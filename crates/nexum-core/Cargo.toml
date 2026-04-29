@@ -1,0 +1,31 @@
+[package]
+name = "nexum-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core library for nexum: hybrid native-store memory layer with cryptographic provenance"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
+git2 = { workspace = true }
+fs2 = { workspace = true }
+uuid = { workspace = true }
+# `ort`, `tokenizers`, `rayon`, `reqwest` deferred — added when M1/M2 implementation hits each layer.
+
+[dev-dependencies]
+insta = { workspace = true }

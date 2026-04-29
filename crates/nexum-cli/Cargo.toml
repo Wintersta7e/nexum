@@ -1,0 +1,24 @@
+[package]
+name = "nexum-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line interface for nexum"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "nexum"
+path = "src/main.rs"
+
+[dependencies]
+nexum-core = { path = "../nexum-core" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }

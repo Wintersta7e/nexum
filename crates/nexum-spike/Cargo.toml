@@ -1,0 +1,56 @@
+[package]
+name = "nexum-spike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Throwaway pre-M1 stack-validation spike for nexum (workspace-private; not published)"
+publish = false
+
+[lints.clippy]
+# nexum-spike is throwaway pre-M1 validation code. We keep `clippy::all` and most pedantic
+# lints, but relax `doc_markdown` since the spike comments reference design-doc identifiers
+# (trust_events, slow_op, x86_64, etc.) that aren't worth wrapping in backticks for code
+# we'll throw away after measurements are captured.
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+doc_markdown = "allow"
+doc_link_with_quotes = "allow"
+# Spike binaries currently `process::exit(2)` from main; that's a deliberate "not implemented"
+# stub. Until the spike body lands, suppress clippy::exit.
+exit = "allow"
+
+[[bin]]
+name = "spike-s1-sqlite-vec-ddl"
+path = "src/bin/s1_sqlite_vec_ddl.rs"
+
+[[bin]]
+name = "spike-s2-vec0-update-semantics"
+path = "src/bin/s2_vec0_update_semantics.rs"
+
+[[bin]]
+name = "spike-s3-onnx-perf"
+path = "src/bin/s3_onnx_perf.rs"
+
+[[bin]]
+name = "spike-s4-rmcp-executor"
+path = "src/bin/s4_rmcp_executor.rs"
+
+[[bin]]
+name = "spike-s5-ort-distribution"
+path = "src/bin/s5_ort_distribution.rs"
+
+[[bin]]
+name = "spike-s6-trust-state-machine"
+path = "src/bin/s6_trust_state_machine.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Per-spike-task dependencies added in NEXT session as each task is implemented:
+#   S1, S2 → rusqlite + sqlite-vec
+#   S3, S5 → ort + tokenizers + uuid
+#   S4     → tokio + rayon (for executor split + semaphore tests)
+#   S6     → git2 + ssh-key + uuid + serde_yaml + rusqlite

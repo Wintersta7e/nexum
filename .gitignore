@@ -1,0 +1,22 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local-only runtime state.
+.nexum/
+
+# Local-only design notes, plans, research artifacts. Not for public history.
+/docs/
+
+# Per-user Claude Code settings overrides (per-developer permission allowlist etc.).
+# .claude/ as a dir CAN be committed if it ever holds project-shared agents/skills,
+# but settings.local.json is always per-user.
+.claude/settings.local.json
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
