@@ -70,3 +70,8 @@ git2 = { workspace = true }
 serde_yaml = { workspace = true }
 ssh-key = { workspace = true }
 uuid = { workspace = true }
+# S3, S5: ONNX cold-start / steady-state timing + ort distribution (§3.6 S3, S5).
+# `download-binaries` ensures ort fetches matching ONNX Runtime libs at build time so the
+# resulting binary can run on a "clean" machine — the §15 distribution claim under test.
+ort = { workspace = true, features = ["download-binaries"] }
+tokenizers = { workspace = true }

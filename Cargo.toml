@@ -37,8 +37,8 @@ clap = { version = "4", features = ["derive"] }
 # Storage / search — pinned versions verified at spike-time (S1, §3.6).
 rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 sqlite-vec = "0.1"
-# Embeddings — pinned at spike-time (S3, S5).
-ort = "2"
+# Embeddings — pinned at spike-time (S3, S5). `ort` is still pre-1.0 in the 2.x series.
+ort = "=2.0.0-rc.12"
 tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
