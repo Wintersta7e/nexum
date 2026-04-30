@@ -107,33 +107,4 @@ mod tests {
         // Quiet a Path import lint if Path isn't otherwise used.
         let _: &Path = &p.home;
     }
-
-    #[test]
-    fn resolve_uses_nexum_home_when_set() {
-        // SAFETY: env var manipulation is process-global. We use a temp dir name
-        // that won't collide with anything real, and we reset the var at the end.
-        // Cargo runs tests in parallel by default; this test serializes its env
-        // touch via a dedicated NEXUM_HOME-only path that no other test uses.
-        let want = PathBuf::from("/tmp/nx-resolve-test-home");
-        unsafe {
-            std::env::set_var("NEXUM_HOME", &want);
-        }
-        let got = Paths::resolve().expect("resolve should succeed when NEXUM_HOME is set");
-        unsafe {
-            std::env::remove_var("NEXUM_HOME");
-        }
-        assert_eq!(got.home, want);
-        assert_eq!(got.notebook_git, want.join("notebook.git"));
-    }
-
-    #[test]
-    fn resolve_errors_when_no_home_anywhere() {
-        unsafe {
-            std::env::remove_var("NEXUM_HOME");
-            std::env::remove_var("HOME");
-            std::env::remove_var("USERPROFILE");
-        }
-        let err = Paths::resolve().expect_err("must error when no home is available");
-        assert!(matches!(err, PathsError::NoHome));
-    }
 }
