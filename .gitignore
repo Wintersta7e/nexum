@@ -8,10 +8,17 @@ Cargo.lock.bak
 # Local-only design notes, plans, research artifacts. Not for public history.
 /docs/
 
+# Local-only project instructions for AI coding agents (per-user, never committed).
+CLAUDE.md
+**/CLAUDE.md
+
 # Per-user Claude Code settings overrides (per-developer permission allowlist etc.).
 # .claude/ as a dir CAN be committed if it ever holds project-shared agents/skills,
 # but settings.local.json is always per-user.
 .claude/settings.local.json
+
+# Per-user Serena MCP state (project index, memories, dashboard cache).
+/.serena/
 
 # Editor / OS
 .DS_Store
