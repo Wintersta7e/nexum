@@ -26,3 +26,9 @@ impl NexumTestHome {
         Paths::with_home(self.path().to_owned())
     }
 }
+
+impl Default for NexumTestHome {
+    fn default() -> Self {
+        Self::new().expect("failed to create temp dir for NexumTestHome")
+    }
+}
