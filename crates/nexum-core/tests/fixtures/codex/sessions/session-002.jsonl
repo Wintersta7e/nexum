@@ -1,0 +1,2 @@
+{"turn": 1, "role": "user", "content": "second synthetic session"}
+{"turn": 2, "role": "assistant", "content": "synthetic response — no tool use here"}
