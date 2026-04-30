@@ -45,6 +45,7 @@ rayon = "1"
 fs2 = "0.4"
 # Test utilities — temp dirs for the test harness (Phase 0 +).
 tempfile = "3"
+walkdir = "2"
 # MCP framework — pinned at spike-time (S4, §3.6). Macros + server runtime only.
 rmcp = { version = "1", features = ["macros", "server"] }
 # Git.

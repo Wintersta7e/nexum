@@ -45,6 +45,14 @@ path = "src/bin/s5_ort_distribution.rs"
 name = "spike-s6-trust-state-machine"
 path = "src/bin/s6_trust_state_machine.rs"
 
+[[bin]]
+name = "probe-cc"
+path = "src/bin/probe_cc.rs"
+
+[[bin]]
+name = "probe-codex"
+path = "src/bin/probe_codex.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -74,3 +82,6 @@ uuid = { workspace = true }
 # resulting binary can run on a "clean" machine — the §15 distribution claim under test.
 ort = { workspace = true, features = ["download-binaries"] }
 tokenizers = { workspace = true }
+# Phase 1a probes.
+clap = { workspace = true }
+walkdir = { workspace = true }
