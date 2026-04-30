@@ -12,6 +12,11 @@ Cargo.lock.bak
 CLAUDE.md
 **/CLAUDE.md
 
+# Test fixtures may need files matching the patterns above (e.g., a fixture
+# CLAUDE.md as adapter test data). Whitelist the fixtures tree explicitly.
+!crates/*/tests/fixtures/
+!crates/*/tests/fixtures/**
+
 # Per-user Claude Code settings overrides (per-developer permission allowlist etc.).
 # .claude/ as a dir CAN be committed if it ever holds project-shared agents/skills,
 # but settings.local.json is always per-user.
