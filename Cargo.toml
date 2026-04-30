@@ -43,6 +43,8 @@ tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
 fs2 = "0.4"
+# MCP framework — pinned at spike-time (S4, §3.6). Macros + server runtime only.
+rmcp = { version = "1", features = ["macros", "server"] }
 # Git.
 git2 = "0.20"
 # HTTP / API client.

@@ -54,9 +54,14 @@ tracing-subscriber = { workspace = true }
 #   S3, S5 → ort + tokenizers + uuid
 #   S4     → tokio + rayon (for executor split + semaphore tests)
 #   S6     → git2 + ssh-key + uuid + serde_yaml + rusqlite + tempfile
-# S1: sqlite-vec DDL + four query types (§3.6 S1).
+# S1, S2: sqlite-vec DDL + four query types (§3.6 S1) + lifecycle ordering (§3.6 S2).
 rusqlite = { workspace = true }
 sqlite-vec = { workspace = true }
 serde_json = { workspace = true }
 # Spike-local; promote to workspace.dependencies if S6 also needs it.
 tempfile = "3"
+# S4: rmcp + executor split + semaphore saturation (§3.6 S4).
+tokio = { workspace = true }
+rayon = { workspace = true }
+rmcp = { workspace = true }
+serde = { workspace = true }
