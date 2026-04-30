@@ -58,8 +58,7 @@ tracing-subscriber = { workspace = true }
 rusqlite = { workspace = true }
 sqlite-vec = { workspace = true }
 serde_json = { workspace = true }
-# Spike-local; promote to workspace.dependencies if S6 also needs it.
-tempfile = "3"
+tempfile = { workspace = true }
 # S4: rmcp + executor split + semaphore saturation (§3.6 S4).
 tokio = { workspace = true }
 rayon = { workspace = true }
