@@ -6,6 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod paths;
+
 /// Placeholder so the crate compiles. Replaced as M1 implementation lands.
 #[must_use]
 pub fn version() -> &'static str {
