@@ -65,3 +65,8 @@ tokio = { workspace = true }
 rayon = { workspace = true }
 rmcp = { workspace = true }
 serde = { workspace = true }
+# S6: full trust state machine roundtrip (§3.6 S6 + §9).
+git2 = { workspace = true }
+serde_yaml = { workspace = true }
+ssh-key = { workspace = true }
+uuid = { workspace = true }

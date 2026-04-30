@@ -51,5 +51,7 @@ git2 = "0.20"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # UUIDs for trust event_ids.
 uuid = { version = "1", features = ["v7", "serde"] }
+# SSH key generation for §9 trust spike (S6) and M1 signer wrapper.
+ssh-key = { version = "0.6", features = ["ed25519"] }
 # Test utilities.
 insta = { version = "1", features = ["yaml"] }
