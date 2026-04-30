@@ -49,8 +49,14 @@ path = "src/bin/s6_trust_state_machine.rs"
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# Per-spike-task dependencies added in NEXT session as each task is implemented:
-#   S1, S2 → rusqlite + sqlite-vec
+# Per-spike-task dependencies added as each task is implemented:
+#   S1, S2 → rusqlite + sqlite-vec + serde_json (+ tempfile for the WAL temp DB)
 #   S3, S5 → ort + tokenizers + uuid
 #   S4     → tokio + rayon (for executor split + semaphore tests)
-#   S6     → git2 + ssh-key + uuid + serde_yaml + rusqlite
+#   S6     → git2 + ssh-key + uuid + serde_yaml + rusqlite + tempfile
+# S1: sqlite-vec DDL + four query types (§3.6 S1).
+rusqlite = { workspace = true }
+sqlite-vec = { workspace = true }
+serde_json = { workspace = true }
+# Spike-local; promote to workspace.dependencies if S6 also needs it.
+tempfile = "3"

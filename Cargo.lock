@@ -688,6 +688,10 @@ name = "nexum-spike"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
+ "rusqlite",
+ "serde_json",
+ "sqlite-vec",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]
