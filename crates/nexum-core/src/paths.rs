@@ -8,6 +8,12 @@
 
 use std::path::PathBuf;
 
+#[derive(Debug, thiserror::Error)]
+pub enum PathsError {
+    #[error("could not resolve nexum home: NEXUM_HOME unset and HOME/USERPROFILE both empty")]
+    NoHome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub home: PathBuf,
@@ -39,6 +45,29 @@ impl Paths {
             lock: home.join(".lock"),
             home,
         }
+    }
+
+    /// Resolve from environment.
+    ///
+    /// Precedence:
+    /// 1. `NEXUM_HOME` (explicit override; preferred for tests + sandboxed installs).
+    /// 2. `$HOME/.nexum/` on Unix.
+    /// 3. `%USERPROFILE%/.nexum/` on Windows.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PathsError::NoHome` if none of the above are available.
+    pub fn resolve() -> Result<Self, PathsError> {
+        if let Some(h) = std::env::var_os("NEXUM_HOME") {
+            return Ok(Self::with_home(PathBuf::from(h)));
+        }
+        if let Some(h) = std::env::var_os("HOME") {
+            return Ok(Self::with_home(PathBuf::from(h).join(".nexum")));
+        }
+        if let Some(h) = std::env::var_os("USERPROFILE") {
+            return Ok(Self::with_home(PathBuf::from(h).join(".nexum")));
+        }
+        Err(PathsError::NoHome)
     }
 }
 
@@ -77,5 +106,34 @@ mod tests {
         }
         // Quiet a Path import lint if Path isn't otherwise used.
         let _: &Path = &p.home;
+    }
+
+    #[test]
+    fn resolve_uses_nexum_home_when_set() {
+        // SAFETY: env var manipulation is process-global. We use a temp dir name
+        // that won't collide with anything real, and we reset the var at the end.
+        // Cargo runs tests in parallel by default; this test serializes its env
+        // touch via a dedicated NEXUM_HOME-only path that no other test uses.
+        let want = PathBuf::from("/tmp/nx-resolve-test-home");
+        unsafe {
+            std::env::set_var("NEXUM_HOME", &want);
+        }
+        let got = Paths::resolve().expect("resolve should succeed when NEXUM_HOME is set");
+        unsafe {
+            std::env::remove_var("NEXUM_HOME");
+        }
+        assert_eq!(got.home, want);
+        assert_eq!(got.notebook_git, want.join("notebook.git"));
+    }
+
+    #[test]
+    fn resolve_errors_when_no_home_anywhere() {
+        unsafe {
+            std::env::remove_var("NEXUM_HOME");
+            std::env::remove_var("HOME");
+            std::env::remove_var("USERPROFILE");
+        }
+        let err = Paths::resolve().expect_err("must error when no home is available");
+        assert!(matches!(err, PathsError::NoHome));
     }
 }

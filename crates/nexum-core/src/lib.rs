@@ -4,7 +4,8 @@
 //! for the design that this crate will implement after the mandatory pre-M1
 //! stack-validation spike completes (§3.6).
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+#![cfg_attr(test, allow(unsafe_code))]
 
 pub mod paths;
 
