@@ -25,8 +25,8 @@
     clippy::too_many_lines,
 )]
 
-use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;

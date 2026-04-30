@@ -21,9 +21,9 @@
     clippy::too_many_lines
 )]
 
-use anyhow::{anyhow, bail, Context, Result};
-use ort::session::builder::GraphOptimizationLevel;
+use anyhow::{Context, Result, anyhow, bail};
 use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::TensorRef;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -74,7 +74,9 @@ fn main() -> Result<()> {
 
     let init_ok = ort::init().with_telemetry(false).commit();
     if !init_ok {
-        bail!("ort::init().commit() returned false — ORT was already initialized with a different config");
+        bail!(
+            "ort::init().commit() returned false — ORT was already initialized with a different config"
+        );
     }
     report.pass("ort-init", "ONNX Runtime initialized");
 

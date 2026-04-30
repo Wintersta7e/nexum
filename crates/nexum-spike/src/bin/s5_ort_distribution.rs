@@ -31,9 +31,9 @@
     clippy::too_many_lines
 )]
 
-use anyhow::{bail, Result};
-use ort::session::builder::GraphOptimizationLevel;
+use anyhow::{Result, bail};
 use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
 
 fn main() -> Result<()> {
     init_tracing();

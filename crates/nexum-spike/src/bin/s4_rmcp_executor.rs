@@ -99,21 +99,19 @@ struct BusyError {
 impl EmbedServer {
     #[tool(description = "Slow embedding op; semaphore-gated, rayon-dispatched")]
     async fn slow_op(&self) -> String {
-        let permit = match tokio::time::timeout(
-            self.wait_timeout,
-            self.semaphore.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(p)) => p,
-            Ok(Err(_)) => return "BUSY: semaphore closed".to_owned(),
-            Err(_) => {
-                return format!(
-                    "BUSY: wait_timeout {}ms exceeded; retry_after_ms=100",
-                    self.wait_timeout.as_millis()
-                );
-            }
-        };
+        let permit =
+            match tokio::time::timeout(self.wait_timeout, self.semaphore.clone().acquire_owned())
+                .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(_)) => return "BUSY: semaphore closed".to_owned(),
+                Err(_) => {
+                    return format!(
+                        "BUSY: wait_timeout {}ms exceeded; retry_after_ms=100",
+                        self.wait_timeout.as_millis()
+                    );
+                }
+            };
 
         let pool = self.rayon_pool.clone();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -223,7 +221,10 @@ async fn main() -> Result<()> {
         over_cap_results.push(joined.unwrap_or_else(|e| format!("PANIC: {e}")));
     }
     let phase2_wall_ms = phase2_start.elapsed().as_millis();
-    let ok = over_cap_results.iter().filter(|s| s.as_str() == "OK").count();
+    let ok = over_cap_results
+        .iter()
+        .filter(|s| s.as_str() == "OK")
+        .count();
     let busy = over_cap_results
         .iter()
         .filter(|s| s.starts_with("BUSY"))
@@ -266,7 +267,10 @@ async fn main() -> Result<()> {
             Ok(()) => sync_ok += 1,
             Err(BusyError { retry_after_ms }) => {
                 // Spec invariant (§3): sync callers see Busy with retry_after_ms == 0.
-                assert_eq!(retry_after_ms, 0, "spec: sync try_acquire Busy must be immediate");
+                assert_eq!(
+                    retry_after_ms, 0,
+                    "spec: sync try_acquire Busy must be immediate"
+                );
                 sync_busy += 1;
             }
         }
@@ -360,7 +364,10 @@ impl Report {
         }
     }
     fn all_pass(&self) -> bool {
-        !self.rows.iter().any(|r| matches!(r, ReportRow::Fail { .. }))
+        !self
+            .rows
+            .iter()
+            .any(|r| matches!(r, ReportRow::Fail { .. }))
     }
     fn print(&self) {
         println!("\n=== nexum spike S4 — rmcp + executor split + semaphore saturation ===\n");

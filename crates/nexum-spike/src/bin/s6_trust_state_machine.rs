@@ -33,7 +33,7 @@
     clippy::struct_field_names,
 )]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use ssh_key::sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -882,7 +882,8 @@ fn verify_record_with_pin(
     }
 
     // Find the trust state at the record's commit position.
-    let signer_known_at_record = state.events
+    let signer_known_at_record = state
+        .events
         .iter()
         .any(|e| e.fingerprint == signer_fp && e.effective_commit_topo_pos <= record_pos);
     if !signer_known_at_record {

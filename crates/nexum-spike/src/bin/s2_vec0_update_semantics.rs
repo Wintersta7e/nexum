@@ -24,7 +24,7 @@
 )]
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
