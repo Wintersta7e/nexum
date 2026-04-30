@@ -20,6 +20,10 @@ CLAUDE.md
 # Per-user Serena MCP state (project index, memories, dashboard cache).
 /.serena/
 
+# Per-user Codex CLI session-state markers (similar to /.serena/).
+/.codex
+/.codex/
+
 # Editor / OS
 .DS_Store
 Thumbs.db
