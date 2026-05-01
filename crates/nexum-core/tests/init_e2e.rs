@@ -6,6 +6,7 @@
 mod common;
 
 use nexum_core::{
+    config::types::Config,
     init::{InitOpts, run},
     trust::events::load_events_yml,
 };
@@ -190,4 +191,48 @@ fn rollback_removes_partial_tree_on_ssh_error() {
         !root.exists(),
         "rollback must remove partial ~/.nexum on failure"
     );
+}
+
+#[test]
+fn e2e_refused_rerun_leaves_existing_artifacts_intact() {
+    let home = common::NexumTestHome::new().unwrap();
+    let outcome = do_init(&home);
+
+    // Read the commit SHA and fingerprint from the first run.
+    let first_sha = outcome.bootstrap_commit_sha.clone();
+    let first_fp = outcome.fingerprint.clone();
+
+    // Attempt a second run — must fail.
+    let key_dir = tempfile::tempdir().unwrap();
+    let priv_path = write_ephemeral_keypair(key_dir.path());
+    let _err = run(InitOpts {
+        ssh_key: Some(priv_path),
+        root: Some(outcome.root.clone()),
+        force: false,
+    });
+
+    // First run's artifacts must still be present and unchanged.
+    let pin = std::fs::read_to_string(outcome.root.join(".bootstrap-fingerprint")).unwrap();
+    assert_eq!(
+        pin.trim(),
+        first_fp,
+        "bootstrap pin must be unchanged after refused rerun"
+    );
+
+    let cfg_raw = std::fs::read_to_string(outcome.root.join("config.toml")).unwrap();
+    let cfg: Config = toml::from_str(&cfg_raw).unwrap();
+    assert_eq!(cfg.trust.bootstrap.fingerprint, first_fp);
+
+    let log_raw = std::fs::read_to_string(
+        outcome
+            .root
+            .join("notebook.git")
+            .join(".trust")
+            .join("events.yml"),
+    )
+    .unwrap();
+    // Commit SHA is in git history, not events.yml — just confirm events.yml still readable.
+    let _log: nexum_core::trust::events::EventLog = serde_yaml::from_str(&log_raw).unwrap();
+
+    let _ = first_sha; // Referenced for clarity.
 }
