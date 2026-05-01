@@ -7,7 +7,7 @@
 //!      reads `/proc/version` for "microsoft" / "wsl".
 //!   2. Symlink resolution: `std::fs::canonicalize`, capped at 32 hops via the
 //!      OS's own depth check (we don't manually count; we let the kernel error
-//!      out and translate the `EINVAL`/`ELOOP` into `CanonError::SymlinkDepth`).
+//!      out and translate the `EINVAL`/`ELOOP` into `CanonError::SymlinkLoop`).
 //!   3. Trailing separator strip.
 //!
 //! Cross-OS, junctions, subst drives, UNC paths, Git Bash form, and case-
@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CanonError {
-    #[error("symlink chain depth exceeded ({0} hops)")]
-    SymlinkDepth(usize),
+    #[error("symlink chain depth exceeded (ELOOP)")]
+    SymlinkLoop,
     #[error("io error during canonicalization: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -36,7 +36,7 @@ pub enum CanonError {
 /// in a future phase if needed).
 ///
 /// # Errors
-/// Returns `CanonError::SymlinkDepth` if symlink chain exceeds the kernel's hop
+/// Returns `CanonError::SymlinkLoop` if symlink chain exceeds the kernel's hop
 /// limit (`ELOOP`); `CanonError::Io` for other filesystem errors (missing path,
 /// permission denied, etc.).
 pub fn canonicalize_path(input: &Path) -> Result<PathBuf, CanonError> {
@@ -44,8 +44,9 @@ pub fn canonicalize_path(input: &Path) -> Result<PathBuf, CanonError> {
     let resolved = std::fs::canonicalize(&normalized).map_err(|e| {
         // Translate ELOOP into a more specific error variant.
         if matches!(e.raw_os_error(), Some(40)) {
-            // Linux ELOOP = 40
-            CanonError::SymlinkDepth(40)
+            // Linux ELOOP = 40 — translate to a typed variant so callers can
+            // distinguish symlink loops from generic IO errors.
+            CanonError::SymlinkLoop
         } else {
             CanonError::Io(e)
         }
@@ -92,10 +93,13 @@ fn wsl_normalize(input: &Path) -> PathBuf {
 }
 
 fn is_wsl() -> bool {
-    // /proc/version is Linux-only; on real Linux it doesn't contain "microsoft" or "wsl".
-    std::fs::read_to_string("/proc/version").is_ok_and(|s| {
-        let lower = s.to_ascii_lowercase();
-        lower.contains("microsoft") || lower.contains("wsl")
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // /proc/version is Linux-only; on real Linux it doesn't contain "microsoft" or "wsl".
+        std::fs::read_to_string("/proc/version").is_ok_and(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower.contains("microsoft") || lower.contains("wsl")
+        })
     })
 }
 
