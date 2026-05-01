@@ -2,29 +2,11 @@
 
 mod common;
 
+use common::write_ephemeral_keypair;
 use nexum_core::{
     config::types::Config,
     init::{InitOpts, run},
 };
-use ssh_key::{Algorithm, PrivateKey};
-use std::path::Path;
-
-fn write_ephemeral_keypair(dir: &Path) -> std::path::PathBuf {
-    use ssh_key::rand_core::OsRng;
-    let private = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let priv_pem = private.to_openssh(ssh_key::LineEnding::LF).unwrap();
-    let pub_line = private.public_key().to_openssh().unwrap();
-    let priv_path = dir.join("id_ed25519");
-    let pub_path = dir.join("id_ed25519.pub");
-    std::fs::write(&priv_path, priv_pem.as_bytes()).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    std::fs::write(&pub_path, pub_line).unwrap();
-    priv_path
-}
 
 fn init_and_load_config() -> (Config, nexum_core::init::InitOutcome) {
     let home = common::NexumTestHome::new().unwrap();

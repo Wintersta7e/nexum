@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use super::fingerprint::compute_fingerprint;
 
-/// A detected SSH key and its derived metadata.
 #[derive(Debug, Clone)]
 pub struct DetectedKey {
     /// Path to the private key file.

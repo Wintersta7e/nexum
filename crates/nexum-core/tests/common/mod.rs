@@ -3,8 +3,28 @@
 // from it with `home.paths()` and pass that into the code under test.
 
 use nexum_core::paths::Paths;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+/// Generate a fresh ed25519 keypair into `dir/id_ed25519{,.pub}`. Returns the
+/// private key path. Tests use this to seed `init::run` with `--ssh-key`.
+#[allow(dead_code)]
+pub fn write_ephemeral_keypair(dir: &Path) -> PathBuf {
+    use ssh_key::rand_core::OsRng;
+    let private = ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap();
+    let priv_pem = private.to_openssh(ssh_key::LineEnding::LF).unwrap();
+    let pub_line = private.public_key().to_openssh().unwrap();
+    let priv_path = dir.join("id_ed25519");
+    let pub_path = dir.join("id_ed25519.pub");
+    std::fs::write(&priv_path, priv_pem.as_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&pub_path, pub_line).unwrap();
+    priv_path
+}
 
 pub struct NexumTestHome {
     tmp: TempDir,

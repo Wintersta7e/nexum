@@ -86,21 +86,25 @@ pub fn regenerate_files(
     }
 
     // historical_signers: all keys ever added.
-    let historical_content = build_allowed_signers_content(&historical);
+    let historical_content = build_signer_file(historical.values().map(String::as_str), "* ");
 
     // allowed_signers: historical minus revoked.
-    let active: HashMap<&String, &String> = historical
-        .iter()
-        .filter(|(fp, _)| !revoked_fps.contains(*fp))
-        .collect();
-    let allowed_content = build_allowed_signers_content_ref(&active);
+    let allowed_content = build_signer_file(
+        historical
+            .iter()
+            .filter(|(fp, _)| !revoked_fps.contains(*fp))
+            .map(|(_, pk)| pk.as_str()),
+        "* ",
+    );
 
     // revoked_signers: keys that are rotated or compromised.
-    let revoked: HashMap<&String, &String> = historical
-        .iter()
-        .filter(|(fp, _)| revoked_fps.contains(*fp))
-        .collect();
-    let revoked_content = build_revoked_content_ref(&revoked);
+    let revoked_content = build_signer_file(
+        historical
+            .iter()
+            .filter(|(fp, _)| revoked_fps.contains(*fp))
+            .map(|(_, pk)| pk.as_str()),
+        "",
+    );
 
     let hist_path = trust_dir.join("historical_signers");
     let allow_path = trust_dir.join("allowed_signers");
@@ -128,37 +132,18 @@ pub fn regenerate_files(
     }
 }
 
-/// Format a `HashMap<fingerprint, public_key_blob>` as an `OpenSSH` `allowed_signers` file.
+/// Format a sorted list of public keys as an OpenSSH-format trust file.
 ///
-/// Each line: `* <public_key_blob>` (the `*` is the principal/namespace wildcard).
-/// Lines are sorted by `public_key` for deterministic output.
-fn build_allowed_signers_content(keys: &HashMap<String, String>) -> String {
-    let mut lines: Vec<String> = keys.values().map(|pubkey| format!("* {pubkey}")).collect();
+/// Each line is `<prefix><public_key_blob>`. `allowed_signers` and
+/// `historical_signers` use `"* "` (the principal/namespace wildcard);
+/// `revoked_signers` uses `""`. Output is sorted for determinism and
+/// terminates with a trailing newline iff non-empty.
+fn build_signer_file<'a>(pubkeys: impl IntoIterator<Item = &'a str>, prefix: &str) -> String {
+    let mut lines: Vec<String> = pubkeys
+        .into_iter()
+        .map(|pk| format!("{prefix}{pk}"))
+        .collect();
     lines.sort();
-    let mut out = lines.join("\n");
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out
-}
-
-/// Same as `build_allowed_signers_content` but accepts borrowed references.
-fn build_allowed_signers_content_ref(keys: &HashMap<&String, &String>) -> String {
-    let mut lines: Vec<String> = keys.values().map(|pubkey| format!("* {pubkey}")).collect();
-    lines.sort();
-    let mut out = lines.join("\n");
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    out
-}
-
-/// Format a `HashMap<fingerprint, public_key_blob>` as an `OpenSSH` revoked keys file.
-///
-/// Each line: `<public_key_blob>` (no principal prefix). Lines sorted for determinism.
-fn build_revoked_content_ref(keys: &HashMap<&String, &String>) -> String {
-    let mut lines: Vec<&str> = keys.values().map(|s| s.as_str()).collect();
-    lines.sort_unstable();
     let mut out = lines.join("\n");
     if !out.is_empty() {
         out.push('\n');
