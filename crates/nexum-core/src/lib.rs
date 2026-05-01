@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod index;
 pub mod paths;
 pub mod project;
