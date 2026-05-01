@@ -22,7 +22,7 @@ use std::{
     path::Path,
 };
 
-use super::events::{load_events_yml, EventKind, TrustError};
+use super::events::{EventKind, TrustError, load_events_yml};
 
 /// Outcome of `regenerate_files`.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,7 +188,7 @@ fn write_file(path: &Path, content: &str) -> Result<(), TrustError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trust::events::{write_seed_yaml, Event, EventKind, EventLog};
+    use crate::trust::events::{Event, EventKind, EventLog, write_seed_yaml};
     use tempfile::tempdir;
     use uuid::Uuid;
 

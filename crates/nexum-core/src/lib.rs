@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod index;
+pub mod init;
 pub mod paths;
 pub mod project;
 pub mod ssh_key;
