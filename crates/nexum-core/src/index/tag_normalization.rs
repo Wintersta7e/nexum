@@ -76,4 +76,74 @@ mod tests {
             "one two three"
         );
     }
+
+    #[test]
+    fn hyphen_in_tag_value_becomes_underscore() {
+        // The §7 / S1 NOTE specific case: `perf-database` would otherwise be
+        // parsed by FTS5 as `perf NOT database`.
+        assert_eq!(
+            normalize_tags_for_fts(r#"["perf-database"]"#),
+            "perf_database"
+        );
+    }
+
+    #[test]
+    fn dot_in_tag_value_becomes_underscore() {
+        // FTS5 column-qualified MATCH uses `:` as the column delimiter; dots
+        // also have special meaning in some FTS5 contexts. Normalize defensively.
+        assert_eq!(
+            normalize_tags_for_fts(r#"["semver.major"]"#),
+            "semver_major"
+        );
+    }
+
+    #[test]
+    fn embedded_quote_becomes_space() {
+        // Raw-string-literal tag containing an internal single-quote.
+        assert_eq!(normalize_tags_for_fts(r#"["it's-fine"]"#), "it s_fine");
+    }
+
+    #[test]
+    fn malformed_json_is_not_an_error() {
+        // We never parse the JSON; we only translate punctuation. Malformed
+        // input still produces a sane (if probably-unsearchable) string.
+        assert_eq!(normalize_tags_for_fts(r#"["unclosed"#), "unclosed");
+    }
+
+    #[test]
+    fn already_normalized_input_is_idempotent_modulo_lowercasing() {
+        // The function is permissive — given already-normalized input it
+        // produces the same output (modulo lowercase).
+        assert_eq!(
+            normalize_tags_for_fts("Already Normalized"),
+            "already normalized"
+        );
+    }
+
+    #[test]
+    fn collapses_consecutive_whitespace_runs() {
+        assert_eq!(
+            normalize_tags_for_fts(r#"["a"  ,  "b"   ,   "c"]"#),
+            "a b c"
+        );
+    }
+
+    #[test]
+    fn unicode_letters_pass_through() {
+        // Non-ASCII letters are kept (FTS5 unicode61 tokenizer handles them);
+        // only the explicit punctuation rules apply.
+        assert_eq!(normalize_tags_for_fts(r#"["café","naïve"]"#), "café naïve");
+    }
+
+    #[test]
+    fn non_array_json_object_treated_as_text() {
+        // {"k":"v"} → strip quotes; the function does NOT translate { or }
+        // (only [ and ]). Documented behavior: braces survive verbatim.
+        let out = normalize_tags_for_fts(r#"{"k":"v"}"#);
+        assert!(!out.contains('"'), "quotes must be stripped, got: {out:?}");
+        assert!(
+            out.contains('{'),
+            "function does not translate braces; '{{' / '}}' survive — got: {out:?}"
+        );
+    }
 }
