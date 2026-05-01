@@ -8,5 +8,5 @@
 pub mod events;
 pub mod regenerate;
 
-pub use events::{Event, EventKind, EventLog, TrustError, write_seed_yaml};
+pub use events::{Event, EventKind, EventLog, TrustError, load_events_yml, write_seed_yaml};
 pub use regenerate::{RegenerateOutcome, regenerate_files};
