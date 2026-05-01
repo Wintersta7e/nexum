@@ -1413,6 +1413,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "sqlite-vec",
+ "ssh-key",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
