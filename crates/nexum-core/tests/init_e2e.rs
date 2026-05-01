@@ -155,3 +155,39 @@ fn e2e_missing_key_returns_error() {
         "expected SshKey error, got: {err}"
     );
 }
+
+#[test]
+fn bad_override_key_path_returns_ssh_key_error() {
+    let home = common::NexumTestHome::new().unwrap();
+    let root = home.path().join(".nexum");
+    // Private key file exists but no .pub file.
+    let fake_key = home.path().join("fake_key");
+    std::fs::write(&fake_key, "PLACEHOLDER").unwrap();
+    let err = run(InitOpts {
+        ssh_key: Some(fake_key),
+        root: Some(root),
+        force: false,
+    })
+    .unwrap_err();
+    assert!(
+        matches!(err, nexum_core::init::InitError::SshKey(_)),
+        "expected SshKey error for missing .pub file"
+    );
+}
+
+#[test]
+fn rollback_removes_partial_tree_on_ssh_error() {
+    let home = common::NexumTestHome::new().unwrap();
+    let root = home.path().join(".nexum");
+    let fake_key = home.path().join("fake_key");
+    std::fs::write(&fake_key, "PLACEHOLDER").unwrap();
+    let _err = run(InitOpts {
+        ssh_key: Some(fake_key),
+        root: Some(root.clone()),
+        force: false,
+    });
+    assert!(
+        !root.exists(),
+        "rollback must remove partial ~/.nexum on failure"
+    );
+}
