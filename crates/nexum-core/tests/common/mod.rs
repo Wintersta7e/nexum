@@ -22,6 +22,9 @@ impl NexumTestHome {
         self.tmp.path()
     }
 
+    // Used by other integration test binaries (e.g. index_schema, paths_smoke).
+    // Dead-code lint fires per-binary for test binaries that only use `path()`.
+    #[allow(dead_code)]
     pub fn paths(&self) -> Paths {
         Paths::with_home(self.path().to_owned())
     }

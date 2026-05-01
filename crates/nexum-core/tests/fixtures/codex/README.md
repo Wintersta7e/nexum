@@ -1,36 +1,41 @@
 # Codex fixture (Codex-CLI-style state DB + session logs)
 
-Mirrors the canonical `~/.codex/state_5.sqlite` + `~/.codex/sessions/` layout that the
-§5 Codex adapter reads. Schema and sample rows are deterministic; everything is
-hand-written placeholder content.
+Refreshed in Phase 1b (post-patch3/4/5) to mirror the real Codex on-disk layout.
 
 ## Files
 
-- `build_state.sql` — SQL source of truth for the SQLite DB. Schema + sample rows.
-  Edit this when changing the fixture; rebuild the SQLite file (see "Rebuilding").
-- `state_5.sqlite` — pre-built fixture SQLite (~16 KB). Committed so tests don't
-  need a build step.
-- `sessions/session-NNN.jsonl` — sample session-log JSONL files. Each line is one
-  recorded turn (`role`, `content`, optional `tool_use`, etc.).
+- `build_state.sql` — SQL source of truth for the SQLite DB. Schema mirrors the
+  §5 patch4 column projection on `threads` (id / rollout_path / cwd /
+  git_origin_url / created_at / updated_at / title / git_sha / git_branch /
+  model). NO `sessions` table — real Codex doesn't have one; transcripts live
+  in JSONL files.
+- `state_5.sqlite` — pre-built fixture SQLite (~16 KB).
+- `sessions/<Y>/<M>/<D>/rollout-<ts>-<thread-id>.jsonl` — per-thread session
+  transcripts. Date-organized hierarchy mirrors real Codex layout. Each
+  thread's `rollout_path` column points at the corresponding file.
+
+## Threads
+
+| id | cwd | git_origin_url | rollout_path |
+|---|---|---|---|
+| thread-aaa | /synthetic/project-a | https://example.invalid/project-a.git | sessions/2026/04/01/... |
+| thread-bbb | /synthetic/project-b | (null) | sessions/2026/04/02/... |
+| thread-ccc | /synthetic/project-c | (null) | sessions/2026/04/03/... |
 
 ## Rebuilding state_5.sqlite
-
-When you change `build_state.sql`, regenerate the SQLite file:
 
 ```sh
 rm -f state_5.sqlite
 sqlite3 state_5.sqlite < build_state.sql
 ```
 
-Then commit both files together so the SQL and the binary stay in sync.
-
 ## Used by
 
-- `crates/nexum-spike/src/bin/probe_codex.rs` — Phase 1a investigation probe.
-- Phase 3's Codex adapter integration tests.
+- Phase 1b's `nexum-core::project::resolve` integration tests.
+- Phase 3's Codex adapter tests.
+- (No longer used by `probe_codex` — that probe will be deleted with the rest
+  of the Phase 1a probes once Phase 2+ no longer needs them.)
 
 ## Names
 
-All thread / session / project / model identifiers are generic placeholders
-(`project-a`, `session-001`, `model-x`, etc.). Anything that looks like a real
-product or person is fabricated.
+All thread / session / cwd identifiers are generic placeholders.
