@@ -46,6 +46,8 @@ fs2 = "0.4"
 # Test utilities — temp dirs for the test harness (Phase 0 +).
 tempfile = "3"
 walkdir = "2"
+# Cryptographic hashing for §7 DDL apply path and §13 path-hint hash function.
+sha2 = "0.10"
 # MCP framework — pinned at spike-time (S4, §3.6). Macros + server runtime only.
 rmcp = { version = "1", features = ["macros", "server"] }
 # Git.

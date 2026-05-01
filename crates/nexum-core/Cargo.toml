@@ -25,6 +25,7 @@ sqlite-vec = { workspace = true }
 git2 = { workspace = true }
 fs2 = { workspace = true }
 uuid = { workspace = true }
+sha2 = { workspace = true }
 # `ort`, `tokenizers`, `rayon`, `reqwest` deferred — added when M1/M2 implementation hits each layer.
 
 [dev-dependencies]
