@@ -7,6 +7,5 @@
 pub mod io;
 pub mod types;
 
+pub use io::{ConfigError, load, write_seed};
 pub use types::Config;
-// re-exports unblocked in Task 3 once io.rs lands
-// pub use io::{load, write_seed, ConfigError};
