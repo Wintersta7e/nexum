@@ -5,7 +5,7 @@
 //! identity) or `Ambiguous` (multiple plausible identities, no higher-priority
 //! signal to pick) or `Unresolved` (no signal at all).
 //!
-//! The patch4 rule: ambiguous slugs must NOT auto-resolve. The resolver returns
+//! Ambiguous slugs MUST NOT auto-resolve. The resolver returns
 //! `ProjectResolution::Ambiguous` and lets the caller decide (typically: surface
 //! as a `nexum doctor` warning; ask the user to register the project explicitly).
 

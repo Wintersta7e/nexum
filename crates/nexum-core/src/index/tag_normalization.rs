@@ -1,11 +1,10 @@
 //! Normalize raw tag JSON (from `records.tags` column) into a space-separated
 //! form suitable for FTS5 indexing in `records.tags_fts`.
 //!
-//! The §7 "FTS5 tag tokenization quirk" rule (from spike S1's NOTE): FTS5's
-//! expression parser treats `-` as a NOT operator, so a tag value like
+//! FTS5's expression parser treats `-` as a NOT operator, so a tag value like
 //! `perf-database` collides with the grammar when matched. Storing tags as raw
 //! JSON in an FTS5 column is brittle; the indexer normalizes at write time and
-//! FTS5 indexes the normalized column instead.
+//! FTS5 indexes the normalized column instead. (§7)
 //!
 //! Normalization rules:
 //!   - JSON brackets (`[`, `]`) become spaces.
@@ -79,8 +78,7 @@ mod tests {
 
     #[test]
     fn hyphen_in_tag_value_becomes_underscore() {
-        // The §7 / S1 NOTE specific case: `perf-database` would otherwise be
-        // parsed by FTS5 as `perf NOT database`.
+        // `perf-database` would otherwise be parsed by FTS5 as `perf NOT database`.
         assert_eq!(
             normalize_tags_for_fts(r#"["perf-database"]"#),
             "perf_database"

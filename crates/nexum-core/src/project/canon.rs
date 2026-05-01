@@ -1,23 +1,20 @@
-//! Path canonicalization (§13, Linux + WSL2 only — Windows-native fixtures are
-//! M1b validation debt).
+//! Path canonicalization (§13, Linux + WSL2 only).
 //!
 //! `canonicalize_path` runs:
 //!   1. Platform normalization: on WSL2, `C:\path` → `/mnt/c/path`. On Linux
-//!      native, no-op (paths are already in the canonical form). Detection
-//!      reads `/proc/version` for "microsoft" / "wsl".
-//!   2. Symlink resolution: `std::fs::canonicalize`, capped at 32 hops via the
-//!      OS's own depth check (we don't manually count; we let the kernel error
-//!      out and translate the `EINVAL`/`ELOOP` into `CanonError::SymlinkLoop`).
+//!      native, no-op. Detection reads `/proc/version` for "microsoft" / "wsl".
+//!   2. Symlink resolution via `std::fs::canonicalize` — kernel depth check
+//!      surfaces as `CanonError::SymlinkLoop` (ELOOP).
 //!   3. Trailing separator strip.
 //!
-//! Cross-OS, junctions, subst drives, UNC paths, Git Bash form, and case-
-//! insensitive FS are M1b validation debt per spec patch1 §13. This impl skips
-//! them; the corresponding fixtures don't exist in M1.
-//!
-//! `path_hint(canonical)` `SHA256`-hashes the path and returns the first 16 hex
+//! `path_hint(canonical)` SHA256-hashes the path and returns the first 16 hex
 //! chars (= 64 bits of identity) per §13 step 5.
+//!
+//! Junctions, subst drives, UNC paths, Git Bash form, and case-insensitive FS
+//! are not yet handled.
 
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -42,10 +39,9 @@ pub enum CanonError {
 pub fn canonicalize_path(input: &Path) -> Result<PathBuf, CanonError> {
     let normalized = wsl_normalize(input);
     let resolved = std::fs::canonicalize(&normalized).map_err(|e| {
-        // Translate ELOOP into a more specific error variant.
+        // Linux ELOOP = 40; surface as a typed variant so callers can
+        // distinguish symlink loops from generic IO errors.
         if matches!(e.raw_os_error(), Some(40)) {
-            // Linux ELOOP = 40 — translate to a typed variant so callers can
-            // distinguish symlink loops from generic IO errors.
             CanonError::SymlinkLoop
         } else {
             CanonError::Io(e)
@@ -54,29 +50,20 @@ pub fn canonicalize_path(input: &Path) -> Result<PathBuf, CanonError> {
     Ok(strip_trailing_separator(&resolved))
 }
 
-/// `SHA256`-hash a canonicalized path; return first 16 hex chars per §13 step 5.
+/// SHA256-hash a canonicalized path; return first 16 hex chars per §13 step 5.
 #[must_use]
 pub fn path_hint(canonical: &Path) -> String {
-    use std::fmt::Write as _;
-    let mut h = Sha256::new();
-    h.update(canonical.to_string_lossy().as_bytes());
-    let digest = h.finalize();
-    digest[..8]
-        .iter()
-        .fold(String::with_capacity(16), |mut s, b| {
-            write!(s, "{b:02x}").expect("write to String is infallible");
-            s
-        })
+    sha256_hex16(canonical.to_string_lossy().as_bytes())
 }
 
-/// Canonicalize a git remote `URL` per §13:
+/// Canonicalize a git remote URL per §13:
 ///   1. Strip credentials: `https://user:pass@host/repo.git` → `https://host/repo.git`
-///   2. Normalize `SSH` form: `git@github.com:user/repo.git` → `ssh://git@github.com/user/repo.git`
+///   2. Normalize SSH form: `git@github.com:user/repo.git` → `ssh://git@github.com/user/repo.git`
 ///   3. Strip trailing `.git`
 ///   4. Lowercase host
 ///
 /// Returns the canonical form. Garbage input is returned best-effort (this is a
-/// string transform, not a `URL` validator).
+/// string transform, not a URL validator).
 #[must_use]
 pub fn canonicalize_git_url(input: &str) -> String {
     let s = input.trim();
@@ -86,23 +73,25 @@ pub fn canonicalize_git_url(input: &str) -> String {
     lowercase_host(&s)
 }
 
-/// Hash a canonicalized git `URL`; returns `git:<16-hex>` per §13 step 5.
+/// Hash a canonicalized git URL; returns `git:<16-hex>` per §13 step 5.
 #[must_use]
 pub fn git_url_hint(canonical: &str) -> String {
-    use std::fmt::Write as _;
+    format!("git:{}", sha256_hex16(canonical.as_bytes()))
+}
+
+// ---- internals ------------------------------------------------------------
+
+fn sha256_hex16(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
-    h.update(canonical.as_bytes());
+    h.update(bytes);
     let digest = h.finalize();
-    let hex = digest[..8]
+    digest[..8]
         .iter()
         .fold(String::with_capacity(16), |mut s, b| {
             write!(s, "{b:02x}").expect("write to String is infallible");
             s
-        });
-    format!("git:{hex}")
+        })
 }
-
-// ---- internals ------------------------------------------------------------
 
 /// On WSL2 only, translate `C:\path` (or `c:\path`, etc.) to `/mnt/c/path`.
 /// On Linux native, returns the input unchanged.

@@ -22,7 +22,7 @@ fn register_sqlite_vec() {
     // signature — but its rustc-visible type uses sqlite-vec's bindgen-generated
     // `sqlite3` opaque alias rather than rusqlite's, so the transmute bridges the two
     // ABI-equivalent function-pointer types. This is the pattern documented by
-    // sqlite-vec for static linking with rusqlite (same pattern used in spike S1).
+    // sqlite-vec for static linking with rusqlite.
     unsafe {
         let init_fn: RusqliteExtInit =
             std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ());

@@ -1,8 +1,5 @@
--- nexum-core/src/index/schema.sql
---
--- §7 index DDL (post-spec-patch3). Loaded into Rust via include_str! and applied
--- by index::schema::apply(). Verbatim copy of the DDL block in §7 of the design
--- doc — keep in sync with the spec.
+-- §7 index DDL. Loaded into Rust via include_str! and applied by
+-- index::schema::apply(). Keep in sync with §7 of the design spec.
 
 CREATE TABLE records (
     rowid INTEGER PRIMARY KEY,

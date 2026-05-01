@@ -6,10 +6,10 @@
 //!   3. Path-based identity from canonicalized cwd (or, for CC, from one of the
 //!      slug-decoded path candidates).
 //!
-//! The patch4 caveat: CC slug decoding is best-effort (the `/` → `-`
-//! substitution doesn't roundtrip when path components contain hyphens). When
-//! the slug is ambiguous and no higher-priority signal applies, `resolve()`
-//! returns `ProjectResolution::Ambiguous` rather than auto-picking a candidate.
+//! CC slug decoding is best-effort: the `/` → `-` substitution doesn't
+//! roundtrip when path components contain hyphens. When the slug is ambiguous
+//! and no higher-priority signal applies, `resolve()` returns
+//! `ProjectResolution::Ambiguous` rather than auto-picking a candidate.
 
 pub mod canon;
 pub mod cc_slug;

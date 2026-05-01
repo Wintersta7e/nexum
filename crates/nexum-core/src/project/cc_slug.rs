@@ -1,4 +1,4 @@
-//! CC cwd-slug decoding per §5 / patch4 (best-effort).
+//! CC cwd-slug decoding per §5 (best-effort).
 //!
 //! Real CC stores encode the original cwd as `<dir>` where `<dir>` is the cwd's
 //! absolute path with `/` substituted to `-`. The leading `/` becomes the
