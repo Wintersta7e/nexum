@@ -1404,6 +1404,7 @@ name = "nexum-core"
 version = "0.0.0-dev"
 dependencies = [
  "anyhow",
+ "chrono",
  "fs2",
  "git2",
  "insta",

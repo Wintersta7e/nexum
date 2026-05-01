@@ -48,6 +48,8 @@ tempfile = "3"
 walkdir = "2"
 # Cryptographic hashing for §7 DDL apply path and §13 path-hint hash function.
 sha2 = "0.10"
+# Timestamps for §8 init (config.toml established_at, META.yml init_at).
+chrono = { version = "0.4", features = ["serde"] }
 # MCP framework — pinned at spike-time (S4, §3.6). Macros + server runtime only.
 rmcp = { version = "1", features = ["macros", "server"] }
 # Git.
