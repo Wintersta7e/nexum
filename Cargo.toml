@@ -48,6 +48,8 @@ tempfile = "3"
 walkdir = "2"
 # Cryptographic hashing for §7 DDL apply path and §13 path-hint hash function.
 sha2 = "0.10"
+# Timestamps for §8 init (config.toml established_at, META.yml init_at).
+chrono = { version = "0.4", features = ["serde"] }
 # MCP framework — pinned at spike-time (S4, §3.6). Macros + server runtime only.
 rmcp = { version = "1", features = ["macros", "server"] }
 # Git.
@@ -57,6 +59,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # UUIDs for trust event_ids.
 uuid = { version = "1", features = ["v7", "serde"] }
 # SSH key generation for §9 trust spike (S6) and M1 signer wrapper.
-ssh-key = { version = "0.6", features = ["ed25519"] }
+ssh-key = { version = "0.6", features = ["ed25519", "getrandom"] }
 # Test utilities.
 insta = { version = "1", features = ["yaml"] }
