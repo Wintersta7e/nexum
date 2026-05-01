@@ -10,6 +10,7 @@ pub mod config;
 pub mod index;
 pub mod paths;
 pub mod project;
+pub mod ssh_key;
 
 /// Placeholder so the crate compiles. Replaced as M1 implementation lands.
 #[must_use]
