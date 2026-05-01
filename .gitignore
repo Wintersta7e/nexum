@@ -1,0 +1,38 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local-only runtime state.
+.nexum/
+
+# Local-only design notes, plans, research artifacts. Not for public history.
+/docs/
+
+# Local-only project instructions for AI coding agents (per-user, never committed).
+CLAUDE.md
+**/CLAUDE.md
+
+# Test fixtures may need files matching the patterns above (e.g., a fixture
+# CLAUDE.md as adapter test data). Whitelist the fixtures tree explicitly.
+!crates/*/tests/fixtures/
+!crates/*/tests/fixtures/**
+
+# Per-user Claude Code settings overrides (per-developer permission allowlist etc.).
+# .claude/ as a dir CAN be committed if it ever holds project-shared agents/skills,
+# but settings.local.json is always per-user.
+.claude/settings.local.json
+
+# Per-user Serena MCP state (project index, memories, dashboard cache).
+/.serena/
+
+# Per-user Codex CLI session-state markers (similar to /.serena/).
+/.codex
+/.codex/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

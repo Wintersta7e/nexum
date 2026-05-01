@@ -1,0 +1,4 @@
+{"turn": 1, "role": "user", "content": "synthetic prompt for fixture testing"}
+{"turn": 2, "role": "assistant", "content": "synthetic response"}
+{"turn": 3, "role": "user", "content": "another synthetic turn"}
+{"turn": 4, "role": "assistant", "content": "synthetic response with a tool call", "tool_use": {"name": "tool-x", "args": {}}}
