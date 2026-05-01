@@ -1,24 +1,34 @@
 //! `nexum` CLI binary entry point.
 //!
-//! Stub for the design at `docs/spec/2026-04-29-nexum-design.md` §6.
-//! M1 implementation is gated on the pre-M1 stack-validation spike (§3.6).
+//! Dispatches to subcommand handlers in `commands::*`. See §6 for the full
+//! command surface; this file wires only the M1 subcommands.
+//!
+//! The CLI is purely synchronous — `nexum_core::init::run` is sync.
+//! No async runtime is pulled in.
 
 #![forbid(unsafe_code)]
 
-use anyhow::Result;
+mod commands;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+use clap::{Parser, Subcommand};
+use std::process::ExitCode;
 
-    println!(
-        "nexum {} — pre-M1 stub. See docs/spec/ for the design; CLI not yet implemented.",
-        nexum_core::version()
-    );
-    Ok(())
+#[derive(Parser, Debug)]
+#[command(name = "nexum", version, about = "Hybrid native-store memory layer")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Initialize a nexum installation at `~/.nexum/`.
+    Init(commands::init::InitArgs),
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Init(args) => commands::init::run(args),
+    }
 }

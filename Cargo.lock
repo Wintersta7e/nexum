@@ -1391,12 +1391,8 @@ dependencies = [
 name = "nexum-cli"
 version = "0.0.0-dev"
 dependencies = [
- "anyhow",
  "clap",
  "nexum-core",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

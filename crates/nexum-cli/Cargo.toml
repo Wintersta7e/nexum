@@ -17,8 +17,4 @@ path = "src/main.rs"
 
 [dependencies]
 nexum-core = { path = "../nexum-core" }
-anyhow = { workspace = true }
 clap = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tokio = { workspace = true }
