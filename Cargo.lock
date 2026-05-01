@@ -1393,6 +1393,8 @@ version = "0.0.0-dev"
 dependencies = [
  "clap",
  "nexum-core",
+ "ssh-key",
+ "tempfile",
 ]
 
 [[package]]

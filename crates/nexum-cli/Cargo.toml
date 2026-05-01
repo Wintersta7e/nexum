@@ -18,3 +18,7 @@ path = "src/main.rs"
 [dependencies]
 nexum-core = { path = "../nexum-core" }
 clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+ssh-key = { workspace = true }
