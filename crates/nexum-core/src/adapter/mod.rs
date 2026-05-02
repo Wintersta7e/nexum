@@ -9,8 +9,7 @@ pub mod codex;
 pub mod local;
 pub mod trait_def;
 
-// Uncommented when Task 4 (03-adapter-trait.md) lands:
-// pub use trait_def::{
-//     Adapter, AdapterError, AdapterPass, AdapterRecordSummary, PassCompleteness,
-//     SkipKind, SkipReason,
-// };
+pub use trait_def::{
+    Adapter, AdapterError, AdapterPass, AdapterRecordSummary, PassCompleteness, SkipKind,
+    SkipReason,
+};
