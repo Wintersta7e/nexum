@@ -50,28 +50,26 @@ pub enum Confidence {
 }
 
 /// Outcome enum, unioning all per-record-type lifecycles. JSON form is
-/// kebab-case. The validity of an outcome with respect to a `record_type` is
-/// caller-enforced (e.g., `Outcome::Working` is only valid on `Decision`).
+/// kebab-case. Validity is caller-enforced (e.g., `Working` is only valid
+/// on `Decision`):
+///
+/// | `RecordType`     | Valid outcomes                              |
+/// |------------------|---------------------------------------------|
+/// | `Decision`       | `Working` \| `Reverted` \| `Superseded`     |
+/// | `Recommendation` | `Proposed` \| `Promoted` \| `Rejected` \| `Stale` |
+/// | `Failure`        | `Attempted` (immutable)                     |
+/// | `Untyped`        | `NotApplicable`                             |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Outcome {
-    /// `decision`
     Working,
-    /// `decision`
     Reverted,
-    /// `decision`
     Superseded,
-    /// `recommendation`
     Proposed,
-    /// `recommendation`
     Promoted,
-    /// `recommendation`
     Rejected,
-    /// `recommendation`
     Stale,
-    /// `failure` (immutable)
     Attempted,
-    /// `untyped` placeholder.
     NotApplicable,
 }
 

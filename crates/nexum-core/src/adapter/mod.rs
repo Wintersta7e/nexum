@@ -9,7 +9,4 @@ pub mod codex;
 pub mod local;
 pub mod trait_def;
 
-pub use trait_def::{
-    Adapter, AdapterError, AdapterPass, AdapterRecordSummary, PassCompleteness, SkipKind,
-    SkipReason,
-};
+pub use trait_def::{Adapter, AdapterError, AdapterPass, PassCompleteness, SkipKind, SkipReason};

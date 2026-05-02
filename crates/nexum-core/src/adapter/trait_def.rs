@@ -6,11 +6,6 @@ use std::path::PathBuf;
 
 use crate::records::{RecordId, RecordSummary, Source, UnifiedRecord};
 
-/// `(id, content_hash)` summary — adapters carry one per record they discover.
-/// Defined in [`crate::records::RecordSummary`]; re-exported here as the trait
-/// reads more naturally with the alias.
-pub type AdapterRecordSummary = RecordSummary;
-
 /// One reason a single file was skipped during an adapter list pass. The set
 /// of reasons populates `PassCompleteness::Partial::skipped`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +53,7 @@ pub enum PassCompleteness {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterPass {
     pub source: Source,
-    pub records: Vec<AdapterRecordSummary>,
+    pub records: Vec<RecordSummary>,
     pub completeness: PassCompleteness,
 }
 
