@@ -1,9 +1,8 @@
 //! `nexum-core` — core library for nexum.
 //!
-//! Lands the read path (`adapter::*`), the indexer (`indexer::*`), the query
-//! layer (`query::*`), and the API facade (`api::*`) — built incrementally
-//! per the plan at `docs/plans/2026-05-01-m1-phase-3/`. Semantic embeddings
-//! and the MCP surface are deferred to later phases.
+//! Wires the read path (`adapter::*`), the indexer (`indexer::*`), the query
+//! layer (`query::*`), and the API facade (`api::*`). Semantic embeddings
+//! and the MCP surface are not yet wired.
 
 #![forbid(unsafe_code)]
 
