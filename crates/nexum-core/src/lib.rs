@@ -1,20 +1,26 @@
 //! `nexum-core` — core library for nexum.
 //!
-//! This crate is currently a stub. See `docs/spec/2026-04-29-nexum-design.md`
-//! for the design that this crate will implement after the mandatory pre-M1
-//! stack-validation spike completes (§3.6).
+//! Lands the read path (`adapter::*`), the indexer (`indexer::*`), the query
+//! layer (`query::*`), and the API facade (`api::*`) — built incrementally
+//! per the plan at `docs/plans/2026-05-01-m1-phase-3/`. Semantic embeddings
+//! and the MCP surface are deferred to later phases.
 
 #![forbid(unsafe_code)]
 
+pub mod adapter;
+pub mod api;
 pub mod config;
 pub mod index;
+pub mod indexer;
 pub mod init;
 pub mod paths;
 pub mod project;
+pub mod query;
+pub mod records;
 pub mod ssh_key;
 pub mod trust;
 
-/// Placeholder so the crate compiles. Replaced as M1 implementation lands.
+/// Crate version.
 #[must_use]
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
