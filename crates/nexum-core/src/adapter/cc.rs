@@ -191,6 +191,10 @@ struct RecordPieces {
     session_refs: Vec<SessionRef>,
     tags: Vec<String>,
     project_id: ProjectId,
+    /// True when the slug had multiple plausible decodings and we picked the
+    /// ranked first one. Surfaced via `extras.project_resolution = "ambiguous"`
+    /// so a future `nexum doctor` pass can warn the user.
+    project_id_ambiguous: bool,
     created: DateTime<Utc>,
     mtime: DateTime<Utc>,
 }
@@ -231,8 +235,14 @@ fn parse_per_topic_file(slug: &str, path: &Path, max_age_years: u32) -> ParseOut
         "cc_type".into(),
         serde_json::Value::String(pieces.cc_type.clone()),
     );
-    if pieces.cc_type == "reference" {
+    if pieces.cc_type.eq_ignore_ascii_case("reference") {
         extras.insert("is_reference".into(), serde_json::Value::Bool(true));
+    }
+    if pieces.project_id_ambiguous {
+        extras.insert(
+            "project_resolution".into(),
+            serde_json::Value::String("ambiguous".into()),
+        );
     }
 
     let hash = content_hash(&pieces.title, pieces.summary.as_deref(), &pieces.body);
@@ -298,7 +308,7 @@ fn extract_record_pieces(
     };
     let tags = frontmatter.and_then(|f| f.tags.clone()).unwrap_or_default();
 
-    let project_id = resolve_cc_project_id(slug);
+    let (project_id, project_id_ambiguous) = resolve_cc_project_id(slug);
 
     let body_str = body.unwrap_or("").trim_start_matches('\n').to_owned();
 
@@ -317,6 +327,7 @@ fn extract_record_pieces(
         session_refs,
         tags,
         project_id,
+        project_id_ambiguous,
         created,
         mtime,
     }
@@ -380,7 +391,13 @@ fn is_within_max_age(mtime: DateTime<Utc>, max_age_years: u32) -> bool {
     mtime >= cutoff
 }
 
-fn resolve_cc_project_id(slug: &str) -> ProjectId {
+/// Resolve a CC slug to a `(project_id, was_ambiguous)` pair.
+///
+/// `was_ambiguous` is true when the slug had multiple plausible decodings
+/// and we picked the ranked-first candidate. Callers surface this via
+/// `extras.project_resolution = "ambiguous"` so a `nexum doctor` pass can
+/// warn the user without blocking ingest.
+fn resolve_cc_project_id(slug: &str) -> (ProjectId, bool) {
     let input = ProjectInput {
         cc_slug: Some(slug.to_owned()),
         codex_cwd: None,
@@ -388,11 +405,14 @@ fn resolve_cc_project_id(slug: &str) -> ProjectId {
         registered_name: None,
     };
     match resolve_project(&input) {
-        ProjectResolution::Resolved { project_id, .. } => project_id,
-        ProjectResolution::Ambiguous { candidates, .. } => candidates
-            .first()
-            .map_or_else(|| format!("cc-slug:{slug}"), |c| c.project_id.clone()),
-        ProjectResolution::Unresolved => format!("cc-slug:{slug}"),
+        ProjectResolution::Resolved { project_id, .. } => (project_id, false),
+        ProjectResolution::Ambiguous { candidates, .. } => {
+            let pid = candidates
+                .first()
+                .map_or_else(|| format!("cc-slug:{slug}"), |c| c.project_id.clone());
+            (pid, true)
+        }
+        ProjectResolution::Unresolved => (format!("cc-slug:{slug}"), false),
     }
 }
 
@@ -533,5 +553,44 @@ mod tests {
         let pass = adapter.list().expect("list ok");
         assert_eq!(pass.records.len(), 0);
         assert_eq!(pass.completeness, PassCompleteness::Authoritative);
+    }
+
+    #[test]
+    fn unresolved_slug_falls_through_to_cc_slug_fallback() {
+        // Resolver behavior: when no slug-decoded path canonicalizes to a real
+        // filesystem path, ProjectResolution::Unresolved fires (NOT Ambiguous),
+        // so the marker is not emitted. To exercise the Ambiguous + marker path
+        // would require seeding two real paths matching different decodings —
+        // out of scope for a unit-level test against synthetic fixtures.
+        // (Marker emission is covered by inspection in cc.rs:233-238.)
+        let root = fixture_root();
+        let adapter = CcAdapter::new(root, 2);
+        let r = adapter
+            .read(&"feedback_naming".to_owned())
+            .expect("read ok");
+        // The marker is NOT emitted on the my-hyphenated-app fixture because
+        // none of the slug-decoded paths exist on disk; the resolver falls
+        // through to Unresolved and the adapter emits the slug fallback id.
+        assert!(!r.extras.contains_key("project_resolution"));
+        assert!(r.project_id.starts_with("cc-slug:"));
+    }
+
+    #[test]
+    fn is_reference_marker_is_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("-tmp-fixture-projalpha").join("memory");
+        write_file(
+            &project.join("reference_x.md"),
+            "---\nname: t\ntype: Reference\n---\nbody\n",
+        );
+        let adapter = CcAdapter::new(dir.path().to_owned(), 2);
+        let r = adapter.read(&"reference_x".to_owned()).expect("read ok");
+        assert_eq!(
+            r.extras
+                .get("is_reference")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "type: Reference (mixed case) must still set is_reference"
+        );
     }
 }
