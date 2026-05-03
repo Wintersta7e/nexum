@@ -2,6 +2,7 @@
 // `NexumTestHome` (isolated temp dir, auto-cleaned on drop). Build a Paths value
 // from it with `home.paths()` and pass that into the code under test.
 
+use nexum_core::config::types::{AdapterCcConfig, AdapterCodexConfig, AdapterLocalConfig, Config};
 use nexum_core::paths::Paths;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -54,4 +55,83 @@ impl Default for NexumTestHome {
     fn default() -> Self {
         Self::new().expect("failed to create temp dir for NexumTestHome")
     }
+}
+
+/// Write a local-adapter-format YAML record at `notebook_git/<sub>/<id>.yml`.
+/// `sub` is one of "decisions" | "recommendations" | "failures" (mapped to
+/// the matching `record_type`) — anything else maps to "untyped". Returns
+/// the path of the written file.
+#[allow(dead_code)]
+pub fn write_local_yaml(notebook_git: &Path, sub: &str, id: &str, body: &str) -> PathBuf {
+    let p = notebook_git.join(sub).join(format!("{id}.yml"));
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("create_dir_all for local yaml");
+    }
+    let kind = match sub {
+        "decisions" => "decision",
+        "recommendations" => "recommendation",
+        "failures" => "failure",
+        _ => "untyped",
+    };
+    std::fs::write(
+        &p,
+        format!(
+            "schema_version: 1\nid: {id}\nrecord_type: {kind}\ntitle: {id}\nbody: |\n  {body}\nproject_id: example\ntags: []\nagent: manual\ncreated: 2026-04-29T00:00:00Z\nupdated: 2026-04-29T00:00:00Z\nconfidence: high\noutcome: working\n"
+        ),
+    )
+    .expect("write local yaml");
+    p
+}
+
+/// `Config::seed()` with cc + codex disabled, local enabled.
+#[allow(dead_code)]
+pub fn test_cfg_local_only() -> Config {
+    let mut cfg = Config::seed();
+    cfg.adapters.cc.enabled = false;
+    cfg.adapters.codex.enabled = false;
+    cfg.adapters.local.enabled = true;
+    cfg
+}
+
+/// Path to the checked-in CC fixture corpus
+/// (`tests/fixtures/cc/projects`).
+#[allow(dead_code)]
+pub fn fixture_cc_projects() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("cc")
+        .join("projects")
+}
+
+/// Path to the checked-in Codex fixture state `SQLite`.
+#[allow(dead_code)]
+pub fn fixture_codex_state_db() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("codex")
+        .join("state_5.sqlite")
+}
+
+/// `Config::seed()` configured to ingest the checked-in CC + Codex fixture
+/// corpora plus the local adapter. The codex memories dir is supplied by
+/// the caller via `codex_memories_dir` — typically a per-test `TempDir`
+/// path so we don't mutate the source tree.
+#[allow(dead_code)]
+pub fn test_cfg_with_fixtures(codex_memories_dir: &Path) -> Config {
+    let mut cfg = Config::seed();
+    cfg.adapters.cc = AdapterCcConfig {
+        enabled: true,
+        projects_dir: fixture_cc_projects().display().to_string(),
+        max_age_years: 99,
+    };
+    cfg.adapters.codex = AdapterCodexConfig {
+        enabled: true,
+        memories_dir: codex_memories_dir.display().to_string(),
+        state_db: fixture_codex_state_db().display().to_string(),
+        read_raw_memories: false,
+    };
+    cfg.adapters.local = AdapterLocalConfig { enabled: true };
+    cfg
 }

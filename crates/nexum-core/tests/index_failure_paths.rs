@@ -6,25 +6,8 @@ mod common;
 use common::NexumTestHome;
 use nexum_core::{
     adapter::{Adapter, PassCompleteness, codex::CodexAdapter},
-    config::types::Config,
-    indexer::{db::open_or_create, run::run as indexer_run},
+    indexer::{db::open_or_create, run::run as indexer_run, state::STALE_THRESHOLD},
 };
-use std::path::Path;
-
-fn write_minimal_local_yaml(home: &Path, id: &str) {
-    let p = home
-        .join("notebook.git")
-        .join("decisions")
-        .join(format!("{id}.yml"));
-    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-    std::fs::write(
-        p,
-        format!(
-            "schema_version: 1\nid: {id}\nrecord_type: decision\ntitle: {id}\nbody: |\n  body\nproject_id: example\ntags: []\nagent: manual\ncreated: 2026-04-29T00:00:00Z\nupdated: 2026-04-29T00:00:00Z\nconfidence: high\noutcome: working\n"
-        ),
-    )
-    .unwrap();
-}
 
 #[test]
 fn codex_with_missing_state_db_yields_partial_pass() {
@@ -50,22 +33,16 @@ fn codex_with_missing_state_db_yields_partial_pass() {
 fn partial_pass_suppresses_delete_computation_in_indexer() {
     let home = NexumTestHome::new().unwrap();
     let paths = home.paths();
-    write_minimal_local_yaml(home.path(), "alpha");
+    let nb = home.path().join("notebook.git");
+    common::write_local_yaml(&nb, "decisions", "alpha", "body");
 
-    let mut cfg = Config::seed();
-    cfg.adapters.cc.enabled = false;
-    cfg.adapters.codex.enabled = false;
-    cfg.adapters.local.enabled = true;
+    let cfg = common::test_cfg_local_only();
     let mut conn = open_or_create(&paths.index_db).unwrap();
     indexer_run(&mut conn, &cfg, &paths).unwrap();
 
     // Inject a malformed yaml. The local pass becomes Partial; the indexer
     // must NOT delete `alpha`.
-    let bad = home
-        .path()
-        .join("notebook.git")
-        .join("decisions")
-        .join("bad.yml");
+    let bad = nb.join("decisions").join("bad.yml");
     std::fs::write(&bad, ":: not [valid yaml [").unwrap();
 
     let outcome = indexer_run(&mut conn, &cfg, &paths).unwrap();
@@ -80,34 +57,26 @@ fn partial_pass_suppresses_delete_computation_in_indexer() {
 
 #[test]
 fn three_authoritative_misses_after_partial_reset_dont_delete() {
+    // This test's narrative is structured around STALE_THRESHOLD == 3. If the
+    // constant changes, update the loop bounds + assertion messages below.
+    assert_eq!(STALE_THRESHOLD, 3, "test logic assumes threshold == 3");
+
     let home = NexumTestHome::new().unwrap();
     let paths = home.paths();
-    write_minimal_local_yaml(home.path(), "alpha");
+    let nb = home.path().join("notebook.git");
+    common::write_local_yaml(&nb, "decisions", "alpha", "body");
 
-    let mut cfg = Config::seed();
-    cfg.adapters.cc.enabled = false;
-    cfg.adapters.codex.enabled = false;
-    cfg.adapters.local.enabled = true;
+    let cfg = common::test_cfg_local_only();
     let mut conn = open_or_create(&paths.index_db).unwrap();
     indexer_run(&mut conn, &cfg, &paths).unwrap();
 
     // Remove alpha — next Authoritative pass bumps miss counter.
-    std::fs::remove_file(
-        home.path()
-            .join("notebook.git")
-            .join("decisions")
-            .join("alpha.yml"),
-    )
-    .unwrap();
+    std::fs::remove_file(nb.join("decisions").join("alpha.yml")).unwrap();
     indexer_run(&mut conn, &cfg, &paths).unwrap(); // counter = 1
     indexer_run(&mut conn, &cfg, &paths).unwrap(); // counter = 2
 
     // Inject malformed file → next pass is Partial → counter resets.
-    let bad = home
-        .path()
-        .join("notebook.git")
-        .join("decisions")
-        .join("bad.yml");
+    let bad = nb.join("decisions").join("bad.yml");
     std::fs::write(&bad, ":: not [yaml [").unwrap();
     indexer_run(&mut conn, &cfg, &paths).unwrap();
 
@@ -145,15 +114,9 @@ fn ambiguous_cc_slug_ingests_with_first_candidate_fallback() {
     let paths = home.paths();
     std::fs::create_dir_all(home.path().join("notebook.git")).unwrap();
 
-    let mut cfg = Config::seed();
+    let mut cfg = nexum_core::config::types::Config::seed();
     cfg.adapters.cc.enabled = true;
-    cfg.adapters.cc.projects_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("cc")
-        .join("projects")
-        .display()
-        .to_string();
+    cfg.adapters.cc.projects_dir = common::fixture_cc_projects().display().to_string();
     cfg.adapters.codex.enabled = false;
     cfg.adapters.local.enabled = false;
     let mut conn = open_or_create(&paths.index_db).unwrap();
