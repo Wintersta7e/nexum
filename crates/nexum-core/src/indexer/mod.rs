@@ -9,4 +9,4 @@ pub mod run;
 pub mod state;
 
 pub use db::{IndexerError, open_or_create};
-// pub use run::{IndexerOutcome, run};   // uncommented when run lands
+pub use run::{IndexerOutcome, run};
