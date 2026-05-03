@@ -1393,6 +1393,7 @@ version = "0.0.0-dev"
 dependencies = [
  "clap",
  "nexum-core",
+ "serde_json",
  "ssh-key",
  "tempfile",
 ]
