@@ -12,7 +12,20 @@ use super::{
 };
 use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
 
+/// Sentinel used in the keyset compare when no cursor is supplied. Any
+/// `updated` string (RFC3339 timestamp) compares strictly less than this
+/// sentinel under `SQLite`'s lexicographic text ordering, making the
+/// `(updated, rowid) < (?1, ?2)` predicate non-restrictive on the first
+/// page.
+const CURSOR_SENTINEL_UPDATED: &str = "9999-12-31T23:59:59Z";
+
 /// Paginated list with `(updated DESC, rowid DESC)` ordering.
+///
+/// The cursor encodes the full sort key — both `updated` and `rowid` — so
+/// pagination remains correct when insertion order does not match
+/// `updated DESC` order. The wire format is opaque
+/// (`"<updated>|<rowid>"`); the `|` separator is collision-safe because
+/// RFC3339 timestamps never contain it.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
@@ -25,29 +38,35 @@ pub fn list(
 ) -> Result<ResultSet, QueryError> {
     let (filter_sql, filter_params) = build_filter_sql(filters);
 
-    // Param layout matches `build_filter_sql`'s contract: `?1` = cursor
-    // (opaque rowid; `i64::MAX` when no cursor, which is a non-restrictive
-    // bound under `records.rowid < ?1`), `?2` = limit, filters start at `?3`.
-    let cursor_value: i64 = match cursor {
-        Some(c) => c.parse().map_err(|_| QueryError::InvalidFilter {
-            detail: format!("invalid cursor: {c}"),
-        })?,
-        None => i64::MAX,
+    // Decode cursor → (updated, rowid). On the first page, use a sentinel
+    // pair that compares strictly greater than any plausible row so the
+    // keyset predicate is non-restrictive.
+    let (cursor_updated, cursor_rowid): (String, i64) = match cursor {
+        Some(c) => decode_cursor(c)?,
+        None => (CURSOR_SENTINEL_UPDATED.to_owned(), i64::MAX),
     };
+
+    // Param layout: `?1` = cursor_updated, `?2` = cursor_rowid; filters
+    // bind at `?3..?N` (matching `build_filter_sql`'s `next_idx` start);
+    // LIMIT binds last at the placeholder index computed below.
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
-    params.push(rusqlite::types::Value::Integer(cursor_value));
-    params.push(rusqlite::types::Value::Integer(i64::from(limit + 1)));
+    params.push(rusqlite::types::Value::Text(cursor_updated));
+    params.push(rusqlite::types::Value::Integer(cursor_rowid));
+    let filter_param_count = filter_params.len();
     for p in filter_params {
         params.push(p);
     }
+    // After cursor (2) + filters, LIMIT lives at `?{filter_param_count + 3}`.
+    let limit_idx = filter_param_count + 3;
+    params.push(rusqlite::types::Value::Integer(i64::from(limit + 1)));
 
     let sql = format!(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
                 records.source, records.project_id, records.signature_status, records.updated \
          FROM records \
-         WHERE records.rowid < ?1 {filter_sql} \
+         WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
          ORDER BY records.updated DESC, records.rowid DESC \
-         LIMIT ?2"
+         LIMIT ?{limit_idx}"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -97,9 +116,19 @@ pub fn list(
         ));
     }
 
-    let next_cursor: Option<String> = if accumulated.len() > usize::try_from(limit).unwrap_or(0) {
-        let pivot = accumulated.pop();
-        pivot.map(|(rowid, _)| rowid.to_string())
+    // Drop the over-limit sentinel row so it does not leak into the
+    // results, then encode the cursor from the LAST RETURNED row's
+    // sort key. The next page asks for rows STRICTLY beyond that key
+    // (`(updated, rowid) < (cursor)`), which is the canonical keyset
+    // pagination invariant.
+    let over_limit = accumulated.len() > usize::try_from(limit).unwrap_or(0);
+    if over_limit {
+        accumulated.pop();
+    }
+    let next_cursor: Option<String> = if over_limit {
+        accumulated
+            .last()
+            .map(|(rowid, r)| encode_cursor(&r.updated, *rowid))
     } else {
         None
     };
@@ -113,6 +142,22 @@ pub fn list(
         next_cursor,
         meta,
     })
+}
+
+/// Encode the keyset pivot as an opaque cursor string.
+fn encode_cursor(updated: &str, rowid: i64) -> String {
+    format!("{updated}|{rowid}")
+}
+
+/// Decode an opaque cursor back into its `(updated, rowid)` keyset pair.
+fn decode_cursor(c: &str) -> Result<(String, i64), QueryError> {
+    let (u, r) = c.split_once('|').ok_or_else(|| QueryError::InvalidFilter {
+        detail: format!("invalid cursor: {c}"),
+    })?;
+    let rowid: i64 = r.parse().map_err(|_| QueryError::InvalidFilter {
+        detail: format!("invalid cursor rowid: {r}"),
+    })?;
+    Ok((u.to_owned(), rowid))
 }
 
 fn build_meta(conn: &Connection, results: &[SearchResult]) -> Result<Meta, QueryError> {
@@ -256,5 +301,85 @@ mod tests {
         let rs = list(&conn, &filters, 10, None).unwrap();
         assert_eq!(rs.results.len(), 1);
         assert_eq!(rs.results[0].id, "r1");
+    }
+
+    /// Regression: pagination must remain correct when insertion order
+    /// does not match `updated DESC` ordering. Prior to the keyset fix
+    /// the cursor only encoded `rowid`, so `WHERE rowid < ?1` skipped
+    /// rows whose `updated` placed them before the pivot but whose
+    /// `rowid` was larger than the pivot's rowid — yielding duplicates
+    /// across pages.
+    #[test]
+    fn list_pagination_correct_when_rowid_order_differs_from_updated_desc() {
+        let (_dir, conn) = open();
+        // Insert in id order (rowids 1..=5) but with shuffled `updated`
+        // timestamps so `(updated DESC, rowid DESC)` ranks them
+        // [r2, r5, r3, r1, r4] (updated desc ordering of the values
+        // below).
+        insert(&conn, "r1", "2026-04-01T00:00:00Z"); // rowid=1
+        insert(&conn, "r2", "2026-04-15T00:00:00Z"); // rowid=2
+        insert(&conn, "r3", "2026-04-10T00:00:00Z"); // rowid=3
+        insert(&conn, "r4", "2026-03-20T00:00:00Z"); // rowid=4
+        insert(&conn, "r5", "2026-04-12T00:00:00Z"); // rowid=5
+
+        let mut all_ids: Vec<String> = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Hard cap to avoid an accidental infinite loop if pagination is
+        // broken in a way that always re-emits the same pivot.
+        for _ in 0..10 {
+            let page = list(&conn, &Filters::default(), 1, cursor.as_deref()).unwrap();
+            for r in &page.results {
+                all_ids.push(r.id.clone());
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        // Union must contain every record exactly once.
+        let mut sorted = all_ids.clone();
+        sorted.sort();
+        let mut deduped = sorted.clone();
+        deduped.dedup();
+        assert_eq!(sorted, deduped, "duplicate ids across pages: {all_ids:?}");
+        assert_eq!(
+            sorted,
+            vec![
+                "r1".to_owned(),
+                "r2".to_owned(),
+                "r3".to_owned(),
+                "r4".to_owned(),
+                "r5".to_owned(),
+            ],
+            "pagination missed records"
+        );
+
+        // Order across pages must match `updated DESC`.
+        assert_eq!(
+            all_ids,
+            vec![
+                "r2".to_owned(), // 2026-04-15
+                "r5".to_owned(), // 2026-04-12
+                "r3".to_owned(), // 2026-04-10
+                "r1".to_owned(), // 2026-04-01
+                "r4".to_owned(), // 2026-03-20
+            ],
+        );
+    }
+
+    #[test]
+    fn list_rejects_malformed_cursor() {
+        let (_dir, conn) = open();
+        let err = list(&conn, &Filters::default(), 1, Some("not-a-cursor")).unwrap_err();
+        assert!(matches!(err, QueryError::InvalidFilter { .. }));
+        let err = list(
+            &conn,
+            &Filters::default(),
+            1,
+            Some("2026-04-01T00:00:00Z|notanint"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, QueryError::InvalidFilter { .. }));
     }
 }
