@@ -5,15 +5,15 @@
 use crate::{
     config::types::Config,
     indexer::{
+        IndexerOutcome,
         db::open_or_create,
         run::{run as indexer_run, run_force as indexer_run_force},
-        IndexerOutcome,
     },
     paths::Paths,
     query::{
+        Filters, GetOpts, ResultSet, SearchOpts, SessionLookup,
         by_session::by_session as query_by_session, get::get as query_get,
         list::list as query_list, recent::recent as query_recent, search::search as query_search,
-        Filters, GetOpts, ResultSet, SearchOpts, SessionLookup,
     },
     records::UnifiedRecord,
 };
