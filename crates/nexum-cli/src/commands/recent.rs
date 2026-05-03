@@ -7,6 +7,6 @@ use std::process::ExitCode;
 pub struct RecentArgs {}
 
 pub fn run(_args: RecentArgs) -> ExitCode {
-    eprintln!("error: `nexum recent` is not implemented yet");
+    eprintln!("error: `nexum recent` is not yet available in this build");
     ExitCode::FAILURE
 }

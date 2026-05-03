@@ -62,7 +62,7 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                 );
                 for src in &o.per_source {
                     println!(
-                        "  [{:?}] completeness={} ingested={} upserts={} deletes={} deferred={}",
+                        "  [{}] completeness={} ingested={} upserts={} deletes={} deferred={}",
                         src.source,
                         src.completeness,
                         src.ingested,

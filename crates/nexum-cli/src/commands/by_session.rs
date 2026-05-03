@@ -9,6 +9,6 @@ pub struct BySessionArgs {
 }
 
 pub fn run(_args: BySessionArgs) -> ExitCode {
-    eprintln!("error: `nexum by-session` is not implemented yet");
+    eprintln!("error: `nexum by-session` is not yet available in this build");
     ExitCode::FAILURE
 }

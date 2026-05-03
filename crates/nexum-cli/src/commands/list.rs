@@ -7,6 +7,6 @@ use std::process::ExitCode;
 pub struct ListArgs {}
 
 pub fn run(_args: ListArgs) -> ExitCode {
-    eprintln!("error: `nexum list` is not implemented yet");
+    eprintln!("error: `nexum list` is not yet available in this build");
     ExitCode::FAILURE
 }

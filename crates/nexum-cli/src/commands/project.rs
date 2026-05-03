@@ -21,6 +21,6 @@ pub enum ProjectSub {
 }
 
 pub fn run(_args: ProjectArgs) -> ExitCode {
-    eprintln!("error: `nexum project` is not implemented yet");
+    eprintln!("error: `nexum project` is not yet available in this build");
     ExitCode::FAILURE
 }

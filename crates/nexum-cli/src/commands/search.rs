@@ -9,6 +9,6 @@ pub struct SearchArgs {
 }
 
 pub fn run(_args: SearchArgs) -> ExitCode {
-    eprintln!("error: `nexum search` is not implemented yet");
+    eprintln!("error: `nexum search` is not yet available in this build");
     ExitCode::FAILURE
 }

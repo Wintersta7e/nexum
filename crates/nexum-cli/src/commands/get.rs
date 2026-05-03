@@ -9,6 +9,6 @@ pub struct GetArgs {
 }
 
 pub fn run(_args: GetArgs) -> ExitCode {
-    eprintln!("error: `nexum get` is not implemented yet");
+    eprintln!("error: `nexum get` is not yet available in this build");
     ExitCode::FAILURE
 }
