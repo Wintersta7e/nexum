@@ -8,13 +8,12 @@ pub mod recent;
 pub mod search;
 pub mod types;
 
+pub use by_session::{SessionLookup, by_session};
+pub use get::{GetOpts, get};
+pub use list::list;
+pub use recent::recent;
 pub use search::{SearchOpts, search};
 pub use types::{
     Cursor, Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
     ResultSet, SearchResult,
 };
-// Uncommented when each downstream task lands its identifiers:
-// pub use by_session::{SessionLookup, by_session};
-// pub use get::{GetOpts, get};
-// pub use list::list;
-// pub use recent::recent;
