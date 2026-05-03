@@ -1,1 +1,137 @@
-//! Placeholder — body lands in the corresponding M1 Phase 3 task.
+//! Query-layer types — `Filters`, `SearchResult`, `ResultSet`, `Meta`,
+//! `QueryError`. Mirrors the response-envelope spec.
+
+use serde::{Deserialize, Serialize};
+
+use crate::records::{ProjectId, RecordId, RecordType, SignatureStatus, Source, TrustBasis};
+
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    #[error("rusqlite error: {0}")]
+    Rusqlite(#[from] rusqlite::Error),
+    #[error("json serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("invalid filter value: {detail}")]
+    InvalidFilter { detail: String },
+    #[error("index missing — run `nexum index` first")]
+    IndexMissing,
+}
+
+/// Filter set shared across `search` / `list` / `recent` / `by_session`.
+/// Pushed into SQL before ranking.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Filters {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_type: Option<RecordType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+    /// Exact tag list — applied as a JSON `EXISTS (... json_each ...)`
+    /// filter on `records.tags`, NOT against the normalized `tags_fts`
+    /// column.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// `since` window (records with `updated >= since`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_iso: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<String>,
+    /// When true, results without `signature_status = "verified"` are
+    /// excluded regardless of policy.
+    #[serde(default)]
+    pub require_signed: bool,
+    /// Future-compat pass-through — the trust state machine isn't wired
+    /// up yet, so this currently has no effect.
+    #[serde(default)]
+    pub strict_revocation: bool,
+    /// When true, suppress the unsigned-content ranking penalty (×0.7).
+    /// CLI flag `--no-unsigned-penalty`; MCP `no_unsigned_penalty`.
+    #[serde(default)]
+    pub no_unsigned_penalty: bool,
+}
+
+/// Per-result row, the `search` / `list` shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub id: RecordId,
+    pub record_type: RecordType,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub score: f64,
+    pub source: Source,
+    pub project_id: ProjectId,
+    pub signature_status: SignatureStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_basis: Option<TrustBasis>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Body included only on top-3 in `search`; always in `get`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub updated: String,
+}
+
+/// Paginated result set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResultSet {
+    pub results: Vec<SearchResult>,
+    pub total_matched: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(rename = "_meta")]
+    pub meta: Meta,
+}
+
+/// Response `_meta` envelope. Filled with `source_counts`, `trust_summary`,
+/// `trust_basis_summary` (with mostly-zero rotation entries since the trust
+/// state machine is stubbed), and `policy_warnings` when warranted.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Meta {
+    #[serde(default)]
+    pub source_counts: MetaSourceCounts,
+    pub trust_policy: String,
+    #[serde(default)]
+    pub trust_summary: MetaTrustSummary,
+    #[serde(default)]
+    pub trust_basis_summary: MetaTrustBasisSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_warnings: Vec<String>,
+    #[serde(default)]
+    pub embed_pool_saturated: bool,
+    #[serde(default)]
+    pub saturation_wait_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct MetaSourceCounts {
+    pub local: u32,
+    #[serde(rename = "cc-native")]
+    pub cc_native: u32,
+    #[serde(rename = "codex-native")]
+    pub codex_native: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct MetaTrustSummary {
+    pub verified: u32,
+    pub unsigned: u32,
+    pub invalid: u32,
+    pub unknown: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct MetaTrustBasisSummary {
+    pub current: u32,
+    #[serde(rename = "rotated-historical")]
+    pub rotated_historical: u32,
+    #[serde(rename = "rotated-historical-compromised")]
+    pub rotated_historical_compromised: u32,
+    #[serde(rename = "pre-reanchor")]
+    pub pre_reanchor: u32,
+}
+
+/// Cursor — opaque base64-encoded `last_rowid`. Currently uses a simple
+/// "after rowid X" strategy; richer cursors land later.
+pub type Cursor = String;

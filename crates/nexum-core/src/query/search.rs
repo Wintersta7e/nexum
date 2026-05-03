@@ -1,1 +1,458 @@
-//! Placeholder — body lands in the corresponding M1 Phase 3 task.
+//! `search` — FTS-only ranked search.
+
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+
+use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
+
+use super::types::{
+    Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
+    ResultSet, SearchResult,
+};
+
+/// `search` options. Compose via `SearchOpts::new(query)` and fluent setters,
+/// or by direct struct construction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchOpts {
+    pub query: String,
+    pub top_k: u32,
+    pub filters: Filters,
+    pub trust_policy: String,
+    /// Embedding pool saturation flag — surfaced through the response envelope
+    /// once an embedder is wired. Currently always `false`.
+    pub embed_pool_saturated: bool,
+    pub saturation_wait_ms: u32,
+}
+
+impl SearchOpts {
+    #[must_use]
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            top_k: 5,
+            filters: Filters::default(),
+            trust_policy: "warn-but-show".into(),
+            embed_pool_saturated: false,
+            saturation_wait_ms: 0,
+        }
+    }
+}
+
+/// FTS-only ranked search. The vector branch is absent in the current build —
+/// ranking degenerates to "by FTS5 bm25 rank, with the unsigned-content
+/// penalty applied last".
+///
+/// # Errors
+/// Returns `QueryError::Rusqlite` on any rusqlite error;
+/// `QueryError::InvalidFilter` if a filter is malformed.
+pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryError> {
+    let (filter_sql, filter_params) = build_filter_sql(&opts.filters);
+
+    // Default top-N for FTS (raised from the on-paper 100 default to keep
+    // filtered queries viable on small corpora).
+    let fts_limit: u32 = 100;
+
+    // FTS query with filter pushdown. ?1 = MATCH query; ?2 = limit;
+    // ?3..= filter params.
+    let fts_sql = format!(
+        "SELECT records.id, records.record_type, records.title, records.summary, \
+                records.body, records.source, records.project_id, \
+                records.signature_status, records.updated, records_fts.rank \
+         FROM records_fts \
+         JOIN records ON records.rowid = records_fts.rowid \
+         WHERE records_fts MATCH ?1 \
+           {filter_sql} \
+         ORDER BY records_fts.rank \
+         LIMIT ?2"
+    );
+
+    let mut stmt = conn.prepare(&fts_sql)?;
+    let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(2 + filter_params.len());
+    params.push(rusqlite::types::Value::Text(opts.query.clone()));
+    params.push(rusqlite::types::Value::Integer(i64::from(fts_limit)));
+    for p in filter_params {
+        params.push(p);
+    }
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        Ok(FtsRow {
+            id: row.get(0)?,
+            record_type: row.get::<_, String>(1)?,
+            title: row.get(2)?,
+            summary: row.get::<_, Option<String>>(3)?,
+            body: row.get::<_, String>(4)?,
+            source: row.get::<_, String>(5)?,
+            project_id: row.get(6)?,
+            signature_status: row.get::<_, String>(7)?,
+            updated: row.get(8)?,
+            fts_rank: row.get::<_, f64>(9)?,
+        })
+    })?;
+    let fts_rows: Vec<FtsRow> = rows.flatten().collect();
+
+    // Reciprocal-rank-fusion-style score over a single branch:
+    //   score(r) = 1 / (k + rank)
+    // With one branch the ranking degenerates to "by FTS rank ascending".
+    // Apply the unsigned penalty after RRF, THEN the top-K cut.
+    let k_const: f64 = 60.0;
+    let mut scored: Vec<(FtsRow, f64)> = fts_rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, r)| {
+            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
+            let rank = f64::from(rank) + 1.0;
+            let mut score = 1.0 / (k_const + rank);
+            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
+            // ordinal above is the actual ranking signal; `fts_rank` is
+            // captured purely for diagnostic logging.
+            let _ = r.fts_rank;
+
+            let is_unsigned = r.signature_status.as_str() != "verified";
+            if is_unsigned && !opts.filters.no_unsigned_penalty {
+                score *= 0.7;
+            }
+            (r, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // require_signed override.
+    if opts.filters.require_signed {
+        scored.retain(|(r, _)| r.signature_status == "verified");
+    }
+    // hide policy: drop unverified.
+    if opts.trust_policy == "hide" {
+        scored.retain(|(r, _)| r.signature_status == "verified");
+    }
+
+    let total = u32::try_from(scored.len()).unwrap_or(u32::MAX);
+    let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);
+    let top_n = scored.into_iter().take(top_k).collect::<Vec<_>>();
+
+    // Body inclusion: top-3 for search; full record fetched in `get`.
+    let results: Vec<SearchResult> = top_n
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (r, score))| project_row(r, score, idx < 3))
+        .collect();
+
+    let meta = build_meta(
+        conn,
+        &results,
+        &opts.trust_policy,
+        opts.embed_pool_saturated,
+        opts.saturation_wait_ms,
+    )?;
+
+    Ok(ResultSet {
+        results,
+        total_matched: total,
+        next_cursor: None,
+        meta,
+    })
+}
+
+/// Project a single FTS row + score into the public `SearchResult` shape,
+/// applying the body-on-top-3 rule and surfacing canonical warnings.
+fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
+    let body = if include_body {
+        Some(r.body.clone())
+    } else {
+        None
+    };
+    let signature_status = parse_signature_status(&r.signature_status);
+    let trust_basis = if matches!(signature_status, SignatureStatus::Verified) {
+        Some(TrustBasis::Current)
+    } else {
+        None
+    };
+    let mut warnings: Vec<String> = Vec::new();
+    if signature_status != SignatureStatus::Verified {
+        warnings.push("unsigned".into());
+    }
+    SearchResult {
+        id: r.id,
+        record_type: parse_record_type(&r.record_type),
+        title: r.title,
+        summary: r.summary,
+        score,
+        source: parse_source(&r.source),
+        project_id: r.project_id,
+        signature_status,
+        trust_basis,
+        warnings,
+        body,
+        updated: r.updated,
+    }
+}
+
+#[derive(Debug)]
+struct FtsRow {
+    id: String,
+    record_type: String,
+    title: String,
+    summary: Option<String>,
+    body: String,
+    source: String,
+    project_id: String,
+    signature_status: String,
+    updated: String,
+    fts_rank: f64,
+}
+
+/// Build the per-table filter clause + bound params for the SQL pushdown.
+/// The returned SQL is appended after the FTS / records JOIN's WHERE clause;
+/// its param indices start from `?3` (the call site passes `?1` = query,
+/// `?2` = limit).
+pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::types::Value>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<rusqlite::types::Value> = Vec::new();
+    let mut next_idx: u32 = 3;
+
+    if let Some(rt) = filters.record_type {
+        let i = next_idx;
+        next_idx += 1;
+        clauses.push(format!("AND records.record_type = ?{i}"));
+        params.push(rusqlite::types::Value::Text(rt.as_db_str().to_owned()));
+    }
+    if let Some(pid) = &filters.project_id {
+        let i = next_idx;
+        next_idx += 1;
+        clauses.push(format!("AND records.project_id = ?{i}"));
+        params.push(rusqlite::types::Value::Text(pid.clone()));
+    }
+    if let Some(source) = filters.source {
+        let i = next_idx;
+        next_idx += 1;
+        clauses.push(format!("AND records.source = ?{i}"));
+        params.push(rusqlite::types::Value::Text(source.as_db_str().to_owned()));
+    }
+    for tag in &filters.tags {
+        let i = next_idx;
+        next_idx += 1;
+        // Tag-column rule: exact filters MUST go through the raw `tags`
+        // JSON column, not `tags_fts`.
+        clauses.push(format!(
+            "AND EXISTS (SELECT 1 FROM json_each(records.tags) WHERE value = ?{i})"
+        ));
+        params.push(rusqlite::types::Value::Text(tag.clone()));
+    }
+    if let Some(since) = &filters.since_iso {
+        let i = next_idx;
+        next_idx += 1;
+        clauses.push(format!("AND records.updated >= ?{i}"));
+        params.push(rusqlite::types::Value::Text(since.clone()));
+    }
+    if let Some(min) = &filters.min_confidence {
+        let i = next_idx;
+        // The `records.confidence` column stores the serialized form
+        // (`"low" | "medium" | "high"`). For `min_confidence` we use an
+        // explicit IN clause rather than ordinal comparison since the
+        // column is text.
+        let allowed: &[&str] = match min.as_str() {
+            "high" => &["high"],
+            "medium" => &["medium", "high"],
+            _ => &["low", "medium", "high"],
+        };
+        let placeholders = (0..allowed.len())
+            .map(|j| {
+                let offset = u32::try_from(j).unwrap_or(0);
+                format!("?{}", i + offset)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        clauses.push(format!("AND records.confidence IN ({placeholders})"));
+        for v in allowed {
+            params.push(rusqlite::types::Value::Text((*v).to_owned()));
+        }
+        // `next_idx` is no longer used after this branch; intentionally
+        // not bumped here so future conditional filter clauses can be
+        // added in any order.
+    }
+
+    (clauses.join(" "), params)
+}
+
+fn build_meta(
+    conn: &Connection,
+    results: &[SearchResult],
+    trust_policy: &str,
+    embed_pool_saturated: bool,
+    saturation_wait_ms: u32,
+) -> Result<Meta, QueryError> {
+    // source_counts: cumulative across the WHOLE index (so the consumer sees
+    // "you queried a corpus of N local + M cc + K codex").
+    let local: i64 = conn.query_row(
+        "SELECT count(*) FROM records WHERE source = 'local'",
+        [],
+        |r| r.get(0),
+    )?;
+    let cc: i64 = conn.query_row(
+        "SELECT count(*) FROM records WHERE source = 'cc-native'",
+        [],
+        |r| r.get(0),
+    )?;
+    let codex: i64 = conn.query_row(
+        "SELECT count(*) FROM records WHERE source = 'codex-native'",
+        [],
+        |r| r.get(0),
+    )?;
+
+    // trust_summary + trust_basis_summary: counted over the RETURNED results.
+    let mut ts = MetaTrustSummary::default();
+    let mut tbs = MetaTrustBasisSummary::default();
+    let mut policy_warnings: Vec<String> = Vec::new();
+    for r in results {
+        match r.signature_status {
+            SignatureStatus::Verified => {
+                ts.verified += 1;
+                tbs.current += 1;
+            }
+            SignatureStatus::Unsigned => ts.unsigned += 1,
+            SignatureStatus::Invalid => ts.invalid += 1,
+            SignatureStatus::Unknown => ts.unknown += 1,
+        }
+    }
+    if trust_policy == "warn-but-show" && (ts.unsigned + ts.invalid + ts.unknown) > 0 {
+        policy_warnings.push("response includes unsigned content".into());
+    }
+
+    Ok(Meta {
+        source_counts: MetaSourceCounts {
+            local: u32::try_from(local).unwrap_or(0),
+            cc_native: u32::try_from(cc).unwrap_or(0),
+            codex_native: u32::try_from(codex).unwrap_or(0),
+        },
+        trust_policy: trust_policy.to_owned(),
+        trust_summary: ts,
+        trust_basis_summary: tbs,
+        policy_warnings,
+        embed_pool_saturated,
+        saturation_wait_ms,
+    })
+}
+
+fn parse_signature_status(s: &str) -> SignatureStatus {
+    match s {
+        "verified" => SignatureStatus::Verified,
+        "invalid" => SignatureStatus::Invalid,
+        "unknown" => SignatureStatus::Unknown,
+        _ => SignatureStatus::Unsigned,
+    }
+}
+
+fn parse_record_type(s: &str) -> RecordType {
+    match s {
+        "decision" => RecordType::Decision,
+        "recommendation" => RecordType::Recommendation,
+        "failure" => RecordType::Failure,
+        _ => RecordType::Untyped,
+    }
+}
+
+fn parse_source(s: &str) -> Source {
+    match s {
+        "local" => Source::Local,
+        "cc-native" => Source::CcNative,
+        _ => Source::CodexNative,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    /// Open a fresh `index.db` under a `TempDir` so the schema (records +
+    /// `records_fts` + `record_embeddings`) and sqlite-vec auto-extension are
+    /// applied via the same path as production.
+    fn open_test_db() -> (TempDir, Connection) {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("index.db");
+        let conn =
+            crate::indexer::db::open_or_create(&path).expect("open_or_create with full schema");
+        (dir, conn)
+    }
+
+    fn insert_minimal(conn: &Connection, id: &str, title: &str, body: &str, signed: bool) {
+        let sig = if signed { "verified" } else { "unsigned" };
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, created, updated, content_hash, signature_status, indexed_at) \
+             VALUES (?1, 'local', 'p', 'decision', ?2, ?3, '[]', '', \
+                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', ?4, '2026-04-29T00:00:00Z')",
+            rusqlite::params![id, title, body, sig],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn empty_index_search_returns_no_results() {
+        let (_dir, conn) = open_test_db();
+        let res = search(&conn, &SearchOpts::new("anything")).unwrap();
+        assert_eq!(res.results.len(), 0);
+        assert_eq!(res.total_matched, 0);
+    }
+
+    #[test]
+    fn fts_match_finds_record_by_body_term() {
+        let (_dir, conn) = open_test_db();
+        insert_minimal(&conn, "id1", "title-a", "body with concurrency word", true);
+        let res = search(&conn, &SearchOpts::new("concurrency")).unwrap();
+        assert_eq!(res.results.len(), 1);
+        assert_eq!(res.results[0].id, "id1");
+        assert!(res.results[0].body.is_some(), "top-3 must include body");
+    }
+
+    #[test]
+    fn unsigned_results_get_penalty_unless_disabled() {
+        let (_dir, conn) = open_test_db();
+        insert_minimal(&conn, "u", "concurrency unsigned", "body", false);
+        insert_minimal(&conn, "v", "concurrency verified", "body", true);
+        let res = search(&conn, &SearchOpts::new("concurrency")).unwrap();
+        // The verified row scores higher than the unsigned row.
+        assert_eq!(res.results[0].id, "v");
+        assert_eq!(res.results[1].id, "u");
+
+        // With penalty disabled, ordering goes back to FTS rank (which is a
+        // deterministic but undocumented function of tokens; we only check
+        // both rows are present).
+        let mut opts = SearchOpts::new("concurrency");
+        opts.filters.no_unsigned_penalty = true;
+        let res = search(&conn, &opts).unwrap();
+        assert_eq!(res.results.len(), 2);
+    }
+
+    #[test]
+    fn require_signed_filters_unsigned_out() {
+        let (_dir, conn) = open_test_db();
+        insert_minimal(&conn, "u", "concurrency unsigned", "body", false);
+        insert_minimal(&conn, "v", "concurrency verified", "body", true);
+        let mut opts = SearchOpts::new("concurrency");
+        opts.filters.require_signed = true;
+        let res = search(&conn, &opts).unwrap();
+        assert_eq!(res.results.len(), 1);
+        assert_eq!(res.results[0].id, "v");
+    }
+
+    #[test]
+    fn meta_envelope_populated_with_source_counts() {
+        let (_dir, conn) = open_test_db();
+        insert_minimal(&conn, "id1", "concurrency", "body", true);
+        let res = search(&conn, &SearchOpts::new("concurrency")).unwrap();
+        assert_eq!(res.meta.source_counts.local, 1);
+        assert_eq!(res.meta.source_counts.cc_native, 0);
+        assert_eq!(res.meta.source_counts.codex_native, 0);
+        assert_eq!(res.meta.trust_summary.verified, 1);
+        assert_eq!(res.meta.trust_basis_summary.current, 1);
+    }
+
+    #[test]
+    fn warn_but_show_with_unsigned_content_yields_policy_warning() {
+        let (_dir, conn) = open_test_db();
+        insert_minimal(&conn, "u", "concurrency u", "body", false);
+        let res = search(&conn, &SearchOpts::new("concurrency")).unwrap();
+        assert!(!res.meta.policy_warnings.is_empty());
+        assert_eq!(res.meta.trust_summary.unsigned, 1);
+    }
+}
