@@ -200,8 +200,9 @@ mod tests {
     #[test]
     fn by_session_with_hide_filters_and_counts() {
         let (_dir, conn) = open();
-        // Insert one verified and one unsigned record that both reference the
-        // same CC session UUID so the lookup returns a mixed set.
+        // Insert one verified, one unsigned, and one invalid record that all
+        // reference the same CC session UUID so the lookup exercises both
+        // hidden buckets.
         let session_json =
             r#"[{"kind":"cc_session","uuid":"22222222-2222-4222-8222-222222222222"}]"#;
         conn.execute(
@@ -222,6 +223,15 @@ mod tests {
             rusqlite::params!["su1", session_json],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             content_hash, signature_status, indexed_at) VALUES \
+             (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
+              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h3', 'invalid', '2026-04-29T00:01:00Z')",
+            rusqlite::params!["si1", session_json],
+        )
+        .unwrap();
 
         let res = by_session(
             &conn,
@@ -238,7 +248,7 @@ mod tests {
         );
         assert_eq!(res.results[0].id, "sv1");
         assert_eq!(res.meta.hidden_unsigned, 1);
-        assert_eq!(res.meta.hidden_invalid, 0);
+        assert_eq!(res.meta.hidden_invalid, 1);
         assert_eq!(res.meta.trust_policy, TrustPolicy::Hide);
     }
 
