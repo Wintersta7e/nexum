@@ -85,9 +85,9 @@ fn insert_record_propagates_to_records_fts_via_trigger() {
     // Minimal record insert covering the NOT NULL columns.
     conn.execute(
         "INSERT INTO records (
-            id, source, record_type, title, tags, tags_fts,
+            id, source, project_id, record_type, title, body, tags, tags_fts,
             created, updated, content_hash, signature_status, indexed_at
-        ) VALUES (?1, 'local', 'decision', ?2, ?3, ?4,
+        ) VALUES (?1, 'local', 'p', 'decision', ?2, '', ?3, ?4,
                   '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z',
                   'h', 'unsigned', '2026-04-30T00:00:00Z')",
         rusqlite::params![
@@ -140,9 +140,9 @@ fn delete_in_correct_order_leaves_no_orphans() {
     // Insert one record (FTS row populated by records_ai trigger).
     conn.execute(
         "INSERT INTO records (
-            id, source, record_type, title, tags, tags_fts,
+            id, source, project_id, record_type, title, body, tags, tags_fts,
             created, updated, content_hash, signature_status, indexed_at
-        ) VALUES (?1, 'local', 'decision', ?2, ?3, ?4,
+        ) VALUES (?1, 'local', 'p', 'decision', ?2, '', ?3, ?4,
                   '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z',
                   'h', 'unsigned', '2026-04-30T00:00:00Z')",
         rusqlite::params!["rec-B", "beta", r#"["t1"]"#, "t1"],

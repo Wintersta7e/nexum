@@ -3,7 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::records::{ProjectId, RecordId, RecordType, SignatureStatus, Source, TrustBasis};
+use crate::records::{
+    Confidence, ProjectId, RecordId, RecordType, SignatureStatus, Source, TrustBasis,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
@@ -36,7 +38,7 @@ pub struct Filters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_iso: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_confidence: Option<String>,
+    pub min_confidence: Option<Confidence>,
     /// When true, results without `signature_status = "verified"` are
     /// excluded regardless of policy.
     #[serde(default)]

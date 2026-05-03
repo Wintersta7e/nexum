@@ -143,9 +143,10 @@ mod tests {
         {
             let conn = open_or_create(&path).unwrap();
             conn.execute(
-                "INSERT INTO records (id, source, record_type, title, tags, tags_fts, \
-                 created, updated, content_hash, signature_status, indexed_at) VALUES \
-                 ('rec1', 'local', 'decision', 'titlec', '[]', '', \
+                "INSERT INTO records (id, source, project_id, record_type, title, body, \
+                 tags, tags_fts, created, updated, content_hash, signature_status, \
+                 indexed_at) VALUES \
+                 ('rec1', 'local', 'p', 'decision', 'titlec', '', '[]', '', \
                   '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'hashc', 'unsigned', \
                   '2026-04-29T00:01:00Z')",
                 [],

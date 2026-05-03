@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
+use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustBasis};
 
 use super::types::{
     Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
@@ -48,8 +48,9 @@ impl SearchOpts {
 pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryError> {
     let (filter_sql, filter_params) = build_filter_sql(&opts.filters);
 
-    // Default top-N for FTS (raised from the on-paper 100 default to keep
-    // filtered queries viable on small corpora).
+    // Cap on FTS candidates fed into RRF. 100 is enough for top-K=5 even
+    // after aggressive filter pushdown; raise this if filtered queries
+    // start under-returning on real corpora.
     let fts_limit: u32 = 100;
 
     // FTS query with filter pushdown. ?1 = MATCH query; ?2 = limit;
@@ -57,7 +58,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let fts_sql = format!(
         "SELECT records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
-                records.signature_status, records.updated, records_fts.rank \
+                records.signature_status, records.updated \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -84,7 +85,6 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             project_id: row.get(6)?,
             signature_status: row.get::<_, String>(7)?,
             updated: row.get(8)?,
-            fts_rank: row.get::<_, f64>(9)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.flatten().collect();
@@ -102,9 +102,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             let rank = f64::from(rank) + 1.0;
             let mut score = 1.0 / (k_const + rank);
             // FTS5 `rank` is a bm25 score (lower = better). The 1-based
-            // ordinal above is the actual ranking signal; `fts_rank` is
-            // captured purely for diagnostic logging.
-            let _ = r.fts_rank;
+            // ordinal above is the actual ranking signal; the underlying
+            // bm25 value is intentionally not surfaced here.
 
             let is_unsigned = r.signature_status.as_str() != "verified";
             if is_unsigned && !opts.filters.no_unsigned_penalty {
@@ -196,7 +195,6 @@ struct FtsRow {
     project_id: String,
     signature_status: String,
     updated: String,
-    fts_rank: f64,
 }
 
 /// Build the per-table filter clause + bound params for the SQL pushdown.
@@ -242,16 +240,16 @@ pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::type
         clauses.push(format!("AND records.updated >= ?{i}"));
         params.push(rusqlite::types::Value::Text(since.clone()));
     }
-    if let Some(min) = &filters.min_confidence {
+    if let Some(min) = filters.min_confidence {
         let i = next_idx;
         // The `records.confidence` column stores the serialized form
         // (`"low" | "medium" | "high"`). For `min_confidence` we use an
         // explicit IN clause rather than ordinal comparison since the
         // column is text.
-        let allowed: &[&str] = match min.as_str() {
-            "high" => &["high"],
-            "medium" => &["medium", "high"],
-            _ => &["low", "medium", "high"],
+        let allowed: &[&str] = match min {
+            Confidence::High => &["high"],
+            Confidence::Medium => &["medium", "high"],
+            Confidence::Low => &["low", "medium", "high"],
         };
         let placeholders = (0..allowed.len())
             .map(|j| {
@@ -264,9 +262,13 @@ pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::type
         for v in allowed {
             params.push(rusqlite::types::Value::Text((*v).to_owned()));
         }
-        // `next_idx` is no longer used after this branch; intentionally
-        // not bumped here so future conditional filter clauses can be
-        // added in any order.
+        // Bump `next_idx` so any future filter clause appended after
+        // this branch gets fresh placeholder indices instead of
+        // colliding on the ones we just consumed. Read back into `_`
+        // so the invariant survives even though this is currently the
+        // last clause in the function.
+        next_idx += u32::try_from(allowed.len()).unwrap_or(u32::MAX);
+        let _ = next_idx;
     }
 
     (clauses.join(" "), params)
