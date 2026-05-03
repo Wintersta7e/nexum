@@ -78,37 +78,74 @@ pub fn get(paths: &Paths, id: &str, opts: &GetOpts) -> Result<Option<UnifiedReco
 
 /// List with filters + pagination.
 ///
+/// `cfg.trust.unsigned_default` is forwarded into the query verb so the
+/// response envelope's `_meta.trust_policy` reflects the runtime
+/// configuration rather than a hardcoded default.
+///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite failure.
 pub fn list(
     paths: &Paths,
+    cfg: &Config,
     filters: &Filters,
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
-    Ok(query_list(&conn, filters, limit, cursor)?)
+    Ok(query_list(
+        &conn,
+        filters,
+        &cfg.trust.unsigned_default,
+        limit,
+        cursor,
+    )?)
 }
 
 /// Recent records (filter on source optional).
 ///
+/// `cfg.trust.unsigned_default` is forwarded into the query verb so the
+/// response envelope's `_meta.trust_policy` reflects the runtime
+/// configuration rather than a hardcoded default.
+///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite failure or unknown source name.
-pub fn recent(paths: &Paths, limit: u32, source: Option<&str>) -> Result<ResultSet, ApiError> {
+pub fn recent(
+    paths: &Paths,
+    cfg: &Config,
+    limit: u32,
+    source: Option<&str>,
+) -> Result<ResultSet, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
-    Ok(query_recent(&conn, limit, source)?)
+    Ok(query_recent(
+        &conn,
+        &cfg.trust.unsigned_default,
+        limit,
+        source,
+    )?)
 }
 
 /// Records associated with a session ref.
 ///
+/// `cfg.trust.unsigned_default` is forwarded into the query verb so the
+/// response envelope's `_meta.trust_policy` reflects the runtime
+/// configuration rather than a hardcoded default.
+///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite failure.
-pub fn by_session(paths: &Paths, lookup: &SessionLookup) -> Result<ResultSet, ApiError> {
+pub fn by_session(
+    paths: &Paths,
+    cfg: &Config,
+    lookup: &SessionLookup,
+) -> Result<ResultSet, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
-    Ok(query_by_session(&conn, lookup)?)
+    Ok(query_by_session(
+        &conn,
+        &cfg.trust.unsigned_default,
+        lookup,
+    )?)
 }
 
 /// Per-project record + signed-record counts. The `list_projects` MCP tool

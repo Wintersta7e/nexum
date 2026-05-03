@@ -247,6 +247,12 @@ impl SignatureStatus {
     }
 }
 
+impl std::fmt::Display for SignatureStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_db_str())
+    }
+}
+
 /// Trust basis (recomputed per query). JSON form is kebab-case.
 ///
 /// Currently only emits `Current` (for verified records) or `None` (for

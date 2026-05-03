@@ -38,9 +38,17 @@ fn escape_like(s: &str) -> String {
 /// match short-circuits without any further round-trip to keep `by_session`
 /// cheap on the common "no such session" path.
 ///
+/// `trust_policy` is reflected verbatim in the response envelope's
+/// `_meta.trust_policy` so callers see the runtime policy that produced the
+/// result set.
+///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure.
-pub fn by_session(conn: &Connection, lookup: &SessionLookup) -> Result<ResultSet, QueryError> {
+pub fn by_session(
+    conn: &Connection,
+    trust_policy: &str,
+    lookup: &SessionLookup,
+) -> Result<ResultSet, QueryError> {
     let needle = match lookup {
         // SessionRef JSON wire shape: `{"kind": "<snake_case>", "<field>": "<value>"}`.
         // Match the field-name + value pair rather than `kind` alone (multiple
@@ -90,7 +98,7 @@ pub fn by_session(conn: &Connection, lookup: &SessionLookup) -> Result<ResultSet
             total_matched: 0,
             next_cursor: None,
             meta: Meta {
-                trust_policy: "warn-but-show".into(),
+                trust_policy: trust_policy.to_owned(),
                 ..Default::default()
             },
         });
@@ -110,7 +118,7 @@ pub fn by_session(conn: &Connection, lookup: &SessionLookup) -> Result<ResultSet
         total_matched: total,
         next_cursor: None,
         meta: Meta {
-            trust_policy: "warn-but-show".into(),
+            trust_policy: trust_policy.to_owned(),
             ..Default::default()
         },
     })
@@ -150,6 +158,7 @@ mod tests {
         );
         let res = by_session(
             &conn,
+            "warn-but-show",
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
             },
@@ -169,6 +178,7 @@ mod tests {
         );
         let res = by_session(
             &conn,
+            "warn-but-show",
             &SessionLookup::CodexThread {
                 thread_id: "thread-aaa".into(),
             },
@@ -182,6 +192,7 @@ mod tests {
         let (_dir, conn) = open();
         let res = by_session(
             &conn,
+            "warn-but-show",
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -216,6 +227,7 @@ mod tests {
 
         let res = by_session(
             &conn,
+            "warn-but-show",
             &SessionLookup::CodexRollout {
                 path: std::path::PathBuf::from(real_path),
             },

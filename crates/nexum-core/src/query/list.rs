@@ -24,12 +24,17 @@ const CURSOR_SENTINEL_UPDATED: &str = "9999-12-31T23:59:59Z";
 /// (`"<updated>|<rowid>"`); the `|` separator is collision-safe because
 /// RFC3339 timestamps never contain it.
 ///
+/// `trust_policy` is passed through verbatim into the response envelope so
+/// the `_meta.trust_policy` field accurately reflects the runtime
+/// `[trust] unsigned_default` setting.
+///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
 /// `QueryError::InvalidFilter` if the cursor is malformed.
 pub fn list(
     conn: &Connection,
     filters: &Filters,
+    trust_policy: &str,
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -132,11 +137,7 @@ pub fn list(
     let results: Vec<SearchResult> = accumulated.into_iter().map(|(_, r)| r).collect();
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
-    // CF-1 (Task 14): the trust_policy / saturation flags will be plumbed
-    // through `list` once the CLI wires `cfg.trust.*` into the call. Until
-    // then `list` honors the same hardcoded "warn-but-show" envelope that
-    // the prior implementation produced.
-    let meta = super::meta::build_meta(conn, &results, "warn-but-show", false, 0)?;
+    let meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
     Ok(ResultSet {
         results,
         total_matched: total,
@@ -191,7 +192,7 @@ mod tests {
         let (_dir, conn) = open();
         insert(&conn, "older", "2026-01-01T00:00:00Z");
         insert(&conn, "newer", "2026-04-01T00:00:00Z");
-        let rs = list(&conn, &Filters::default(), 10, None).unwrap();
+        let rs = list(&conn, &Filters::default(), "warn-but-show", 10, None).unwrap();
         assert_eq!(rs.results[0].id, "newer");
         assert_eq!(rs.results[1].id, "older");
     }
@@ -206,7 +207,7 @@ mod tests {
                 &format!("2026-04-{:02}T00:00:00Z", i + 1),
             );
         }
-        let rs = list(&conn, &Filters::default(), 3, None).unwrap();
+        let rs = list(&conn, &Filters::default(), "warn-but-show", 3, None).unwrap();
         assert_eq!(rs.results.len(), 3);
         assert!(rs.next_cursor.is_some());
     }
@@ -229,7 +230,7 @@ mod tests {
             record_type: Some(crate::records::RecordType::Recommendation),
             ..Filters::default()
         };
-        let rs = list(&conn, &filters, 10, None).unwrap();
+        let rs = list(&conn, &filters, "warn-but-show", 10, None).unwrap();
         assert_eq!(rs.results.len(), 1);
         assert_eq!(rs.results[0].id, "r1");
     }
@@ -258,7 +259,14 @@ mod tests {
         // Hard cap to avoid an accidental infinite loop if pagination is
         // broken in a way that always re-emits the same pivot.
         for _ in 0..10 {
-            let page = list(&conn, &Filters::default(), 1, cursor.as_deref()).unwrap();
+            let page = list(
+                &conn,
+                &Filters::default(),
+                "warn-but-show",
+                1,
+                cursor.as_deref(),
+            )
+            .unwrap();
             for r in &page.results {
                 all_ids.push(r.id.clone());
             }
@@ -302,11 +310,19 @@ mod tests {
     #[test]
     fn list_rejects_malformed_cursor() {
         let (_dir, conn) = open();
-        let err = list(&conn, &Filters::default(), 1, Some("not-a-cursor")).unwrap_err();
+        let err = list(
+            &conn,
+            &Filters::default(),
+            "warn-but-show",
+            1,
+            Some("not-a-cursor"),
+        )
+        .unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
         let err = list(
             &conn,
             &Filters::default(),
+            "warn-but-show",
             1,
             Some("2026-04-01T00:00:00Z|notanint"),
         )

@@ -43,11 +43,11 @@ fn main() -> ExitCode {
     match cli.command {
         Commands::Init(a) => commands::init::run(a),
         Commands::Index(a) => commands::index::run(&a),
-        Commands::Search(a) => commands::search::run(a),
-        Commands::Get(a) => commands::get::run(a),
-        Commands::List(a) => commands::list::run(a),
-        Commands::Recent(a) => commands::recent::run(a),
-        Commands::BySession(a) => commands::by_session::run(a),
+        Commands::Search(a) => commands::search::run(&a),
+        Commands::Get(a) => commands::get::run(&a),
+        Commands::List(a) => commands::list::run(&a),
+        Commands::Recent(a) => commands::recent::run(&a),
+        Commands::BySession(a) => commands::by_session::run(&a),
         Commands::Project(a) => commands::project::run(a),
     }
 }

@@ -1396,6 +1396,7 @@ dependencies = [
  "serde_json",
  "ssh-key",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

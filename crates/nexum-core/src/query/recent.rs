@@ -11,11 +11,15 @@ use crate::records::Source;
 
 /// Recently-updated records.
 ///
+/// `trust_policy` is forwarded into [`list`] so the response envelope's
+/// `_meta.trust_policy` reflects the runtime configuration.
+///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
 /// `QueryError::InvalidFilter` if `source` is unrecognized.
 pub fn recent(
     conn: &Connection,
+    trust_policy: &str,
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -38,7 +42,7 @@ pub fn recent(
         source: source_filter,
         ..Filters::default()
     };
-    list(conn, &filters, limit, None)
+    list(conn, &filters, trust_policy, limit, None)
 }
 
 #[cfg(test)]
@@ -56,7 +60,7 @@ mod tests {
     #[test]
     fn unknown_source_yields_invalid_filter() {
         let (_dir, conn) = open();
-        let err = recent(&conn, 10, Some("not-a-source")).unwrap_err();
+        let err = recent(&conn, "warn-but-show", 10, Some("not-a-source")).unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
     }
 
@@ -74,7 +78,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let rs = recent(&conn, 10, None).unwrap();
+        let rs = recent(&conn, "warn-but-show", 10, None).unwrap();
         assert_eq!(rs.results.len(), 2);
     }
 }
