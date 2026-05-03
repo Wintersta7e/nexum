@@ -345,6 +345,73 @@ impl std::fmt::Display for SignatureStatus {
     }
 }
 
+/// Trust policy applied to unsigned records. JSON / TOML form is kebab-case.
+///
+/// Serializes as `"warn-but-show"` / `"hide"` so the wire shape and
+/// `config.toml` representation are identical (no extra wrapping object).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrustPolicy {
+    /// Surface unsigned records but add a warning to the meta envelope.
+    #[default]
+    WarnButShow,
+    /// Drop unsigned records from results entirely.
+    Hide,
+}
+
+impl TrustPolicy {
+    /// Short string used in the DB `trust_policy` column and TOML config.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            TrustPolicy::WarnButShow => "warn-but-show",
+            TrustPolicy::Hide => "hide",
+        }
+    }
+
+    /// Inverse of [`as_db_str`]: parse from a DB / config value.
+    /// Unknown values default to `WarnButShow` (safe-open posture).
+    // Forward-compat: called when trust_policy is persisted in the DB (a later milestone).
+    #[allow(dead_code)]
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "hide" => TrustPolicy::Hide,
+            _ => TrustPolicy::WarnButShow,
+        }
+    }
+
+    /// Parse from untrusted user input (CLI arg, MCP param). Returns `None`
+    /// for unrecognized values rather than silently defaulting.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "warn-but-show" => Some(TrustPolicy::WarnButShow),
+            "hide" => Some(TrustPolicy::Hide),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TrustPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_db_str())
+    }
+}
+
+/// Result of a `get`-by-id operation. Distinguishes "record not found" from
+/// "record exists but hidden by trust policy" so the CLI can give targeted
+/// guidance instead of a generic "not found" message.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GetOutcome {
+    /// Record present and visible under current trust policy.
+    Found(Box<UnifiedRecord>),
+    /// No record matches the requested id.
+    NotFound,
+    /// Record exists but is hidden by the current trust policy. The
+    /// `signature_status` lets callers decide whether retrying with
+    /// `--include-unsigned` would help.
+    HiddenByPolicy { signature_status: SignatureStatus },
+}
+
 /// Trust basis (recomputed per query). JSON form is kebab-case.
 ///
 /// Currently only emits `Current` (for verified records) or `None` (for
@@ -452,6 +519,53 @@ pub struct UnifiedRecord {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn trust_policy_round_trip_db_str() {
+        for variant in [TrustPolicy::WarnButShow, TrustPolicy::Hide] {
+            let s = variant.as_db_str();
+            let back = TrustPolicy::from_db_str(s);
+            assert_eq!(variant, back, "round-trip via {s}");
+        }
+    }
+
+    #[test]
+    fn trust_policy_user_str_accepts_canonical() {
+        assert_eq!(
+            TrustPolicy::try_from_user_str("warn-but-show"),
+            Some(TrustPolicy::WarnButShow)
+        );
+        assert_eq!(
+            TrustPolicy::try_from_user_str("hide"),
+            Some(TrustPolicy::Hide)
+        );
+    }
+
+    #[test]
+    fn trust_policy_user_str_rejects_unknown() {
+        assert_eq!(TrustPolicy::try_from_user_str("strict"), None);
+        assert_eq!(TrustPolicy::try_from_user_str(""), None);
+    }
+
+    #[test]
+    fn get_outcome_variants_match_intent() {
+        let r = sample_record();
+        let found = GetOutcome::Found(Box::new(r.clone()));
+        let not_found = GetOutcome::NotFound;
+        let hidden = GetOutcome::HiddenByPolicy {
+            signature_status: SignatureStatus::Unsigned,
+        };
+        assert!(matches!(found, GetOutcome::Found(_)));
+        assert!(matches!(not_found, GetOutcome::NotFound));
+        assert!(matches!(
+            hidden,
+            GetOutcome::HiddenByPolicy {
+                signature_status: SignatureStatus::Unsigned
+            }
+        ));
+        // ensure Clone works
+        let _ = found.clone();
+    }
 
     fn sample_record() -> UnifiedRecord {
         UnifiedRecord {

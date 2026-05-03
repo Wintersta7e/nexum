@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustBasis};
+use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
 
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
 
@@ -14,7 +14,7 @@ pub struct SearchOpts {
     pub query: String,
     pub top_k: u32,
     pub filters: Filters,
-    pub trust_policy: String,
+    pub trust_policy: TrustPolicy,
     /// Embedding pool saturation flag — surfaced through the response envelope
     /// once an embedder is wired. Currently always `false`.
     pub embed_pool_saturated: bool,
@@ -34,7 +34,7 @@ impl SearchOpts {
             query: query.into(),
             top_k: 5,
             filters: Filters::default(),
-            trust_policy: "warn-but-show".into(),
+            trust_policy: TrustPolicy::WarnButShow,
             embed_pool_saturated: false,
             saturation_wait_ms: 0,
             unsigned_ranking_penalty: 0.7,
@@ -123,7 +123,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         scored.retain(|(r, _)| r.signature_status == "verified");
     }
     // hide policy: drop unverified.
-    if opts.trust_policy == "hide" {
+    if opts.trust_policy == TrustPolicy::Hide {
         scored.retain(|(r, _)| r.signature_status == "verified");
     }
 
@@ -141,7 +141,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let meta = super::meta::build_meta(
         conn,
         &results,
-        &opts.trust_policy,
+        opts.trust_policy,
         opts.embed_pool_saturated,
         opts.saturation_wait_ms,
     )?;

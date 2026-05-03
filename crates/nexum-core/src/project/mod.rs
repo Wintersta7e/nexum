@@ -54,7 +54,8 @@ pub enum ProjectResolution {
     Unresolved,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
 pub enum ResolutionReason {
     GitOriginUrl,
     RegisteredName,
@@ -70,7 +71,8 @@ pub struct AmbiguityCandidate {
     pub path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AmbiguityReason {
     /// The CC slug had multiple plausible decodings.
     SlugDecodeMultipleCandidates,
@@ -82,4 +84,40 @@ pub enum ProjectError {
     Canon(#[from] canon::CanonError),
     #[error("slug decoding failed: {0}")]
     Slug(#[from] cc_slug::SlugError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn resolution_reason_serializes_as_tagged_json() {
+        // Unit variant — no `value` field emitted.
+        let r = ResolutionReason::GitOriginUrl;
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.contains("\"git-origin-url\""),
+            "expected kebab-cased kind, got {json}"
+        );
+
+        // Tuple variant — emitted as `{"kind": "path", "value": "<path>"}`.
+        let r = ResolutionReason::Path(PathBuf::from("/tmp/project"));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"path\""), "expected kind=path, got {json}");
+        assert!(
+            json.contains("/tmp/project"),
+            "expected path value, got {json}"
+        );
+    }
+
+    #[test]
+    fn ambiguity_reason_serializes_as_tagged_json() {
+        let r = AmbiguityReason::SlugDecodeMultipleCandidates;
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.contains("\"slug-decode-multiple-candidates\""),
+            "expected kebab-cased variant, got {json}"
+        );
+    }
 }

@@ -6,6 +6,7 @@ use common::write_ephemeral_keypair;
 use nexum_core::{
     config::types::Config,
     init::{InitOpts, run},
+    records::TrustPolicy,
 };
 
 fn init_and_load_config() -> (Config, nexum_core::init::InitOutcome) {
@@ -87,7 +88,7 @@ fn config_adapters_enabled_by_default() {
 #[test]
 fn config_trust_defaults() {
     let (cfg, _) = init_and_load_config();
-    assert_eq!(cfg.trust.unsigned_default, "warn-but-show");
+    assert_eq!(cfg.trust.unsigned_default, TrustPolicy::WarnButShow);
     assert!((cfg.trust.ranking_penalty - 0.7).abs() < f64::EPSILON);
     assert!(!cfg.trust.strict_revocation);
 }

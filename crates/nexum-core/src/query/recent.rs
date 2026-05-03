@@ -7,7 +7,7 @@ use super::{
     list::list,
     types::{Filters, QueryError, ResultSet},
 };
-use crate::records::Source;
+use crate::records::{Source, TrustPolicy};
 
 /// Recently-updated records.
 ///
@@ -19,7 +19,7 @@ use crate::records::Source;
 /// `QueryError::InvalidFilter` if `source` is unrecognized.
 pub fn recent(
     conn: &Connection,
-    trust_policy: &str,
+    trust_policy: TrustPolicy,
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -56,17 +56,17 @@ mod tests {
     #[test]
     fn unknown_source_yields_invalid_filter() {
         let (_dir, conn) = open();
-        let err = recent(&conn, "warn-but-show", 10, Some("not-a-source")).unwrap_err();
+        let err = recent(&conn, TrustPolicy::WarnButShow, 10, Some("not-a-source")).unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
     }
 
     #[test]
     fn trust_policy_round_trips_into_meta() {
         let (_dir, conn) = open();
-        let rs = recent(&conn, "warn-but-show", 10, None).unwrap();
-        assert_eq!(rs.meta.trust_policy, "warn-but-show");
-        let rs = recent(&conn, "hide", 10, None).unwrap();
-        assert_eq!(rs.meta.trust_policy, "hide");
+        let rs = recent(&conn, TrustPolicy::WarnButShow, 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, TrustPolicy::WarnButShow);
+        let rs = recent(&conn, TrustPolicy::Hide, 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
     }
 
     #[test]
@@ -83,7 +83,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let rs = recent(&conn, "warn-but-show", 10, None).unwrap();
+        let rs = recent(&conn, TrustPolicy::WarnButShow, 10, None).unwrap();
         assert_eq!(rs.results.len(), 2);
     }
 }

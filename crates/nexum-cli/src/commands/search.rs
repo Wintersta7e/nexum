@@ -51,7 +51,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     };
     let mut opts = SearchOpts::new(args.query.clone());
     opts.top_k = args.top_k;
-    opts.trust_policy.clone_from(&cfg.trust.unsigned_default);
+    opts.trust_policy = cfg.trust.unsigned_default;
     opts.filters = build_filters(args);
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,

@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use super::types::{Meta, QueryError, ResultSet, SearchResult};
-use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
+use crate::records::{RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
 
 /// Discriminator for [`by_session`] queries — names the kind of session
 /// reference to look up.
@@ -46,7 +46,7 @@ fn escape_like(s: &str) -> String {
 /// Returns `QueryError::Rusqlite` on rusqlite failure.
 pub fn by_session(
     conn: &Connection,
-    trust_policy: &str,
+    trust_policy: TrustPolicy,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, QueryError> {
     let needle = match lookup {
@@ -98,7 +98,7 @@ pub fn by_session(
             total_matched: 0,
             next_cursor: None,
             meta: Meta {
-                trust_policy: trust_policy.to_owned(),
+                trust_policy,
                 ..Default::default()
             },
         });
@@ -118,7 +118,7 @@ pub fn by_session(
         total_matched: total,
         next_cursor: None,
         meta: Meta {
-            trust_policy: trust_policy.to_owned(),
+            trust_policy,
             ..Default::default()
         },
     })
@@ -158,7 +158,7 @@ mod tests {
         );
         let res = by_session(
             &conn,
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
             },
@@ -178,7 +178,7 @@ mod tests {
         );
         let res = by_session(
             &conn,
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             &SessionLookup::CodexThread {
                 thread_id: "thread-aaa".into(),
             },
@@ -192,22 +192,22 @@ mod tests {
         let (_dir, conn) = open();
         let res = by_session(
             &conn,
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
         )
         .unwrap();
-        assert_eq!(res.meta.trust_policy, "warn-but-show");
+        assert_eq!(res.meta.trust_policy, TrustPolicy::WarnButShow);
         let res = by_session(
             &conn,
-            "hide",
+            TrustPolicy::Hide,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
         )
         .unwrap();
-        assert_eq!(res.meta.trust_policy, "hide");
+        assert_eq!(res.meta.trust_policy, TrustPolicy::Hide);
     }
 
     #[test]
@@ -215,7 +215,7 @@ mod tests {
         let (_dir, conn) = open();
         let res = by_session(
             &conn,
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -250,7 +250,7 @@ mod tests {
 
         let res = by_session(
             &conn,
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             &SessionLookup::CodexRollout {
                 path: std::path::PathBuf::from(real_path),
             },

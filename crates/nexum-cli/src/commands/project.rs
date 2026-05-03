@@ -133,7 +133,7 @@ fn resolve_path(path: &Path, json: bool) -> ExitCode {
             ProjectResolution::Resolved { project_id, reason } => serde_json::json!({
                 "kind": "resolved",
                 "project_id": project_id,
-                "reason": format!("{reason:?}"),
+                "reason": reason,
             }),
             ProjectResolution::Ambiguous { candidates, reason } => serde_json::json!({
                 "kind": "ambiguous",
@@ -141,7 +141,7 @@ fn resolve_path(path: &Path, json: bool) -> ExitCode {
                     "project_id": c.project_id,
                     "path": c.path.display().to_string(),
                 })).collect::<Vec<_>>(),
-                "reason": format!("{reason:?}"),
+                "reason": reason,
             }),
             ProjectResolution::Unresolved => serde_json::json!({"kind": "unresolved"}),
         };

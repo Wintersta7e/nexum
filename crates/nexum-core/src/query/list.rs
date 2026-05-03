@@ -7,7 +7,7 @@ use super::{
     search::build_filter_sql,
     types::{Filters, QueryError, ResultSet, SearchResult},
 };
-use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
+use crate::records::{RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
 
 /// Sentinel used in the keyset compare when no cursor is supplied. Any
 /// `updated` string (RFC3339 timestamp) compares strictly less than this
@@ -34,7 +34,7 @@ const CURSOR_SENTINEL_UPDATED: &str = "9999-12-31T23:59:59Z";
 pub fn list(
     conn: &Connection,
     filters: &Filters,
-    trust_policy: &str,
+    trust_policy: TrustPolicy,
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -192,7 +192,14 @@ mod tests {
         let (_dir, conn) = open();
         insert(&conn, "older", "2026-01-01T00:00:00Z");
         insert(&conn, "newer", "2026-04-01T00:00:00Z");
-        let rs = list(&conn, &Filters::default(), "warn-but-show", 10, None).unwrap();
+        let rs = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs.results[0].id, "newer");
         assert_eq!(rs.results[1].id, "older");
     }
@@ -207,7 +214,14 @@ mod tests {
                 &format!("2026-04-{:02}T00:00:00Z", i + 1),
             );
         }
-        let rs = list(&conn, &Filters::default(), "warn-but-show", 3, None).unwrap();
+        let rs = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            3,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs.results.len(), 3);
         assert!(rs.next_cursor.is_some());
     }
@@ -230,7 +244,7 @@ mod tests {
             record_type: Some(crate::records::RecordType::Recommendation),
             ..Filters::default()
         };
-        let rs = list(&conn, &filters, "warn-but-show", 10, None).unwrap();
+        let rs = list(&conn, &filters, TrustPolicy::WarnButShow, 10, None).unwrap();
         assert_eq!(rs.results.len(), 1);
         assert_eq!(rs.results[0].id, "r1");
     }
@@ -262,7 +276,7 @@ mod tests {
             let page = list(
                 &conn,
                 &Filters::default(),
-                "warn-but-show",
+                TrustPolicy::WarnButShow,
                 1,
                 cursor.as_deref(),
             )
@@ -311,10 +325,17 @@ mod tests {
     fn trust_policy_round_trips_into_meta() {
         let (_dir, conn) = open();
         insert(&conn, "x", "2026-04-01T00:00:00Z");
-        let rs = list(&conn, &Filters::default(), "warn-but-show", 10, None).unwrap();
-        assert_eq!(rs.meta.trust_policy, "warn-but-show");
-        let rs = list(&conn, &Filters::default(), "hide", 10, None).unwrap();
-        assert_eq!(rs.meta.trust_policy, "hide");
+        let rs = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rs.meta.trust_policy, TrustPolicy::WarnButShow);
+        let rs = list(&conn, &Filters::default(), TrustPolicy::Hide, 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
     }
 
     #[test]
@@ -323,7 +344,7 @@ mod tests {
         let err = list(
             &conn,
             &Filters::default(),
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             1,
             Some("not-a-cursor"),
         )
@@ -332,7 +353,7 @@ mod tests {
         let err = list(
             &conn,
             &Filters::default(),
-            "warn-but-show",
+            TrustPolicy::WarnButShow,
             1,
             Some("2026-04-01T00:00:00Z|notanint"),
         )

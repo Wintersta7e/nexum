@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    Confidence, ProjectId, RecordId, RecordType, SignatureStatus, Source, TrustBasis,
+    Confidence, ProjectId, RecordId, RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -93,7 +93,7 @@ pub struct ResultSet {
 pub struct Meta {
     #[serde(default)]
     pub source_counts: MetaSourceCounts,
-    pub trust_policy: String,
+    pub trust_policy: TrustPolicy,
     #[serde(default)]
     pub trust_summary: MetaTrustSummary,
     #[serde(default)]

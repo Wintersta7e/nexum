@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use super::types::{
     Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError, SearchResult,
 };
-use crate::records::SignatureStatus;
+use crate::records::{SignatureStatus, TrustPolicy};
 
 /// Build the `_meta` envelope for a query result set.
 ///
@@ -25,7 +25,7 @@ use crate::records::SignatureStatus;
 pub(crate) fn build_meta(
     conn: &Connection,
     results: &[SearchResult],
-    trust_policy: &str,
+    trust_policy: TrustPolicy,
     embed_pool_saturated: bool,
     saturation_wait_ms: u32,
 ) -> Result<Meta, QueryError> {
@@ -60,13 +60,13 @@ pub(crate) fn build_meta(
             SignatureStatus::Unknown => ts.unknown += 1,
         }
     }
-    if trust_policy == "warn-but-show" && (ts.unsigned + ts.invalid + ts.unknown) > 0 {
+    if trust_policy == TrustPolicy::WarnButShow && (ts.unsigned + ts.invalid + ts.unknown) > 0 {
         policy_warnings.push("response includes unsigned content".into());
     }
 
     Ok(Meta {
         source_counts,
-        trust_policy: trust_policy.to_owned(),
+        trust_policy,
         trust_summary: ts,
         trust_basis_summary: tbs,
         policy_warnings,

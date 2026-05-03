@@ -1,40 +1,50 @@
 //! `get(conn, id, opts)` — fetch one full record by id; honors the
-//! hide-policy invariant (an unsigned record under `trust_policy = "hide"`
-//! returns `None` unless `include_unsigned` is set).
+//! hide-policy invariant (an unsigned record under `trust_policy = Hide`
+//! returns `HiddenByPolicy` unless `include_unsigned` is set).
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    Agent, Confidence, FileEvidence, Outcome, Provenance, RecordType, SessionRef, SignatureStatus,
-    Source, TrustBasis, UnifiedRecord,
+    Agent, Confidence, FileEvidence, GetOutcome, Outcome, Provenance, RecordType, SessionRef,
+    SignatureStatus, Source, TrustBasis, TrustPolicy, UnifiedRecord,
 };
 
 use super::types::QueryError;
 
 /// `get` options.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetOpts {
     /// `include_unsigned: true` returns the record regardless of policy
     /// (escape hatch for agents that need to inspect deliberately).
     pub include_unsigned: bool,
-    /// Current trust policy from `[trust] unsigned_default`. When `"hide"`
+    /// Current trust policy from `[trust] unsigned_default`. When `Hide`
     /// AND `include_unsigned == false`, an unverified record is returned
-    /// as `Ok(None)`.
-    pub trust_policy: String,
+    /// as `GetOutcome::HiddenByPolicy`.
+    pub trust_policy: TrustPolicy,
 }
 
-/// Fetch the full `UnifiedRecord` for `id`. Returns `Ok(None)` when the
-/// record is hidden by trust policy OR when no such id exists.
+impl Default for GetOpts {
+    fn default() -> Self {
+        Self {
+            include_unsigned: false,
+            trust_policy: TrustPolicy::WarnButShow,
+        }
+    }
+}
+
+/// Fetch the full `UnifiedRecord` for `id`.
+///
+/// Returns:
+/// - `Ok(GetOutcome::Found(r))` — record found and visible.
+/// - `Ok(GetOutcome::NotFound)` — no record with the given id.
+/// - `Ok(GetOutcome::HiddenByPolicy { signature_status })` — record exists
+///   but is suppressed by `trust_policy = Hide` with `include_unsigned = false`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure or
 /// `QueryError::Json` on JSON column deserialization failure.
-pub fn get(
-    conn: &Connection,
-    id: &str,
-    opts: &GetOpts,
-) -> Result<Option<UnifiedRecord>, QueryError> {
+pub fn get(conn: &Connection, id: &str, opts: &GetOpts) -> Result<GetOutcome, QueryError> {
     let row: Option<RawRow> = conn
         .query_row(
             "SELECT id, source, project_id, record_type, title, summary, body, body_origin_path, \
@@ -69,19 +79,23 @@ pub fn get(
         )
         .optional()?;
 
-    let Some(raw) = row else { return Ok(None) };
+    let Some(raw) = row else {
+        return Ok(GetOutcome::NotFound);
+    };
     let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
 
-    // Hide-policy: an unsigned record under `trust_policy = "hide"` returns
-    // None unless the caller explicitly opts in via `include_unsigned`.
-    if opts.trust_policy == "hide"
+    // Hide-policy: an unsigned record under `trust_policy = Hide` is
+    // returned as HiddenByPolicy unless the caller opts in via
+    // `include_unsigned`. The caller can use the returned `signature_status`
+    // to suggest a --include-unsigned retry.
+    if opts.trust_policy == TrustPolicy::Hide
         && !opts.include_unsigned
         && signature_status != SignatureStatus::Verified
     {
-        return Ok(None);
+        return Ok(GetOutcome::HiddenByPolicy { signature_status });
     }
 
-    build_record(raw, signature_status).map(Some)
+    build_record(raw, signature_status).map(|r| GetOutcome::Found(Box::new(r)))
 }
 
 fn build_record(
@@ -203,10 +217,10 @@ mod tests {
     }
 
     #[test]
-    fn get_missing_returns_none() {
+    fn get_missing_returns_not_found() {
         let (_dir, conn) = open();
         let res = get(&conn, "nope", &GetOpts::default()).unwrap();
-        assert!(res.is_none());
+        assert_eq!(res, GetOutcome::NotFound);
     }
 
     #[test]
@@ -218,29 +232,39 @@ mod tests {
             "alpha",
             &GetOpts {
                 include_unsigned: false,
-                trust_policy: "warn-but-show".into(),
+                trust_policy: TrustPolicy::WarnButShow,
             },
         )
         .unwrap();
-        let r = res.unwrap();
+        let GetOutcome::Found(r) = res else {
+            panic!("expected Found, got {res:?}");
+        };
         assert_eq!(r.id, "alpha");
         assert_eq!(r.provenance.signature_status, SignatureStatus::Verified);
     }
 
     #[test]
-    fn get_unsigned_under_hide_policy_returns_none_unless_overridden() {
+    fn get_unsigned_under_hide_policy_returns_hidden_unless_overridden() {
         let (_dir, conn) = open();
         insert(&conn, "u", false);
         let hide_default = GetOpts {
             include_unsigned: false,
-            trust_policy: "hide".into(),
+            trust_policy: TrustPolicy::Hide,
         };
-        assert!(get(&conn, "u", &hide_default).unwrap().is_none());
+        assert!(matches!(
+            get(&conn, "u", &hide_default).unwrap(),
+            GetOutcome::HiddenByPolicy {
+                signature_status: SignatureStatus::Unsigned
+            }
+        ));
         let hide_override = GetOpts {
             include_unsigned: true,
-            trust_policy: "hide".into(),
+            trust_policy: TrustPolicy::Hide,
         };
-        assert!(get(&conn, "u", &hide_override).unwrap().is_some());
+        assert!(matches!(
+            get(&conn, "u", &hide_override).unwrap(),
+            GetOutcome::Found(_)
+        ));
     }
 
     #[test]
@@ -252,10 +276,10 @@ mod tests {
             "u",
             &GetOpts {
                 include_unsigned: false,
-                trust_policy: "warn-but-show".into(),
+                trust_policy: TrustPolicy::WarnButShow,
             },
         )
         .unwrap();
-        assert!(res.is_some());
+        assert!(matches!(res, GetOutcome::Found(_)));
     }
 }

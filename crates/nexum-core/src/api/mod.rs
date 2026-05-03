@@ -15,7 +15,7 @@ use crate::{
         by_session::by_session as query_by_session, get::get as query_get,
         list::list as query_list, recent::recent as query_recent, search::search as query_search,
     },
-    records::UnifiedRecord,
+    records::GetOutcome,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -65,13 +65,13 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
 }
 
 /// Get one record by id; honors the `include_unsigned` escape hatch under
-/// `trust_policy = "hide"` (an unsigned record returns `None` unless the
-/// caller opts in).
+/// `trust_policy = Hide` (an unsigned record returns `HiddenByPolicy` unless
+/// the caller opts in).
 ///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite or deserialization failure.
-pub fn get(paths: &Paths, id: &str, opts: &GetOpts) -> Result<Option<UnifiedRecord>, ApiError> {
+pub fn get(paths: &Paths, id: &str, opts: &GetOpts) -> Result<GetOutcome, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
     Ok(query_get(&conn, id, opts)?)
 }
@@ -96,7 +96,7 @@ pub fn list(
     Ok(query_list(
         &conn,
         filters,
-        &cfg.trust.unsigned_default,
+        cfg.trust.unsigned_default,
         limit,
         cursor,
     )?)
@@ -120,7 +120,7 @@ pub fn recent(
     let conn = open_or_create(&paths.index_db)?;
     Ok(query_recent(
         &conn,
-        &cfg.trust.unsigned_default,
+        cfg.trust.unsigned_default,
         limit,
         source,
     )?)
@@ -141,11 +141,7 @@ pub fn by_session(
     lookup: &SessionLookup,
 ) -> Result<ResultSet, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
-    Ok(query_by_session(
-        &conn,
-        &cfg.trust.unsigned_default,
-        lookup,
-    )?)
+    Ok(query_by_session(&conn, cfg.trust.unsigned_default, lookup)?)
 }
 
 /// Per-project record + signed-record counts. The `list_projects` MCP tool

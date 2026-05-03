@@ -9,6 +9,7 @@ use nexum_core::{
     indexer::db::open_or_create,
     indexer::run::run as indexer_run,
     query::{Filters, GetOpts, SearchOpts, SessionLookup},
+    records::{GetOutcome, TrustPolicy},
 };
 
 #[test]
@@ -43,9 +44,12 @@ fn full_pass_indexes_cc_fixtures_local_yaml_and_runs_search() {
     // Get the full record for `alpha`.
     let opts = GetOpts {
         include_unsigned: false,
-        trust_policy: "warn-but-show".into(),
+        trust_policy: TrustPolicy::WarnButShow,
     };
-    let r = api::get(&paths, "alpha", &opts).unwrap().unwrap();
+    let outcome = api::get(&paths, "alpha", &opts).unwrap();
+    let GetOutcome::Found(r) = outcome else {
+        panic!("expected Found")
+    };
     assert_eq!(r.id, "alpha");
 }
 
