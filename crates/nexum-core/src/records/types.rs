@@ -349,7 +349,9 @@ impl std::fmt::Display for SignatureStatus {
 ///
 /// Serializes as `"warn-but-show"` / `"hide"` so the wire shape and
 /// `config.toml` representation are identical (no extra wrapping object).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustPolicy {
     /// Surface unsigned records but add a warning to the meta envelope.
@@ -563,6 +565,10 @@ mod tests {
                 signature_status: SignatureStatus::Unsigned
             }
         ));
+        // Distinct variants are unequal — exercises the derived PartialEq.
+        assert_ne!(found, not_found);
+        assert_ne!(not_found, hidden);
+        assert_ne!(found, hidden);
         // ensure Clone works
         let _ = found.clone();
     }

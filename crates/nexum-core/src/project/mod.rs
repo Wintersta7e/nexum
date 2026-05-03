@@ -72,7 +72,7 @@ pub struct AmbiguityCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
 pub enum AmbiguityReason {
     /// The CC slug had multiple plausible decodings.
     SlugDecodeMultipleCandidates,
