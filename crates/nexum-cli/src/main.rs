@@ -48,6 +48,6 @@ fn main() -> ExitCode {
         Commands::List(a) => commands::list::run(&a),
         Commands::Recent(a) => commands::recent::run(&a),
         Commands::BySession(a) => commands::by_session::run(&a),
-        Commands::Project(a) => commands::project::run(a),
+        Commands::Project(a) => commands::project::run(&a),
     }
 }
