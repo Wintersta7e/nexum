@@ -5,8 +5,6 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    config::io::load as load_config,
-    paths::Paths,
     query::Filters,
     records::{RecordType, Source},
 };
@@ -34,36 +32,18 @@ pub struct ListArgs {
 }
 
 pub fn run(args: &ListArgs) -> ExitCode {
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
-    };
-    let cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
+    let (paths, cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
 
     let filters = Filters {
-        record_type: args.r#type.as_deref().and_then(|s| match s {
-            "decision" => Some(RecordType::Decision),
-            "recommendation" => Some(RecordType::Recommendation),
-            "failure" => Some(RecordType::Failure),
-            "untyped" => Some(RecordType::Untyped),
-            _ => None,
-        }),
+        record_type: args
+            .r#type
+            .as_deref()
+            .and_then(RecordType::try_from_user_str),
         project_id: args.project.clone(),
-        source: args.source.as_deref().and_then(|s| match s {
-            "local" => Some(Source::Local),
-            "cc-native" => Some(Source::CcNative),
-            "codex-native" => Some(Source::CodexNative),
-            _ => None,
-        }),
+        source: args.source.as_deref().and_then(Source::try_from_user_str),
         tags: args.tag.clone(),
         since_iso: args.since.clone(),
         min_confidence: None,
@@ -94,7 +74,7 @@ pub fn run(args: &ListArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(4)
+            ExitCode::from(super::exit_codes::RUNTIME)
         }
     }
 }

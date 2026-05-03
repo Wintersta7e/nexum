@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, config::io::load as load_config, paths::Paths, query::GetOpts};
+use nexum_core::{api, query::GetOpts};
 
 #[derive(Args, Debug)]
 pub struct GetArgs {
@@ -15,19 +15,9 @@ pub struct GetArgs {
 }
 
 pub fn run(args: &GetArgs) -> ExitCode {
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
-    };
-    let cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
+    let (paths, cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
     let opts = GetOpts {
         include_unsigned: args.include_unsigned,
@@ -62,7 +52,7 @@ pub fn run(args: &GetArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(4)
+            ExitCode::from(super::exit_codes::RUNTIME)
         }
     }
 }

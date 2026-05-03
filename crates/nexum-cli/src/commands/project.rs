@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{Args, Subcommand};
 use nexum_core::{
     api,
-    config::io::{load as load_config, save as save_config},
+    config::io::save as save_config,
     paths::Paths,
     project::{ProjectInput, ProjectResolution, resolve::resolve as resolve_project},
 };
@@ -40,31 +40,34 @@ pub enum ProjectSub {
 }
 
 pub fn run(args: &ProjectArgs) -> ExitCode {
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
-    };
     match &args.command {
-        ProjectSub::Register { name, path } => register(&paths, name, path),
-        ProjectSub::List { json } => list(&paths, *json),
+        ProjectSub::Register { name, path } => register(name, path),
+        ProjectSub::List { json } => {
+            let paths = match Paths::resolve() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}\nDid you run `nexum init`?");
+                    return ExitCode::from(super::exit_codes::NOT_INITIALIZED);
+                }
+            };
+            list(&paths, *json)
+        }
         ProjectSub::Resolve { path, json } => resolve_path(path, *json),
     }
 }
 
-fn register(paths: &Paths, name: &str, path: &Path) -> ExitCode {
+fn register(name: &str, path: &Path) -> ExitCode {
     if !path.exists() {
         eprintln!("error: path does not exist: {}", path.display());
-        return ExitCode::from(2);
+        return ExitCode::from(super::exit_codes::USAGE);
     }
-    let mut cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: load config: {e}");
-            return ExitCode::from(3);
-        }
+    if !path.is_dir() {
+        eprintln!("error: not a directory: {}", path.display());
+        return ExitCode::from(super::exit_codes::USAGE);
+    }
+    let (paths, mut cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
     let mut entry = toml::Table::new();
     entry.insert(
@@ -75,7 +78,7 @@ fn register(paths: &Paths, name: &str, path: &Path) -> ExitCode {
         .insert(name.to_owned(), toml::Value::Table(entry));
     if let Err(e) = save_config(&paths.config, &cfg) {
         eprintln!("error: save config: {e}");
-        return ExitCode::from(3);
+        return ExitCode::from(super::exit_codes::NOT_INITIALIZED);
     }
     println!("Registered project `{name}` -> {}", path.display());
     ExitCode::SUCCESS
@@ -108,12 +111,16 @@ fn list(paths: &Paths, json: bool) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(4)
+            ExitCode::from(super::exit_codes::RUNTIME)
         }
     }
 }
 
 fn resolve_path(path: &Path, json: bool) -> ExitCode {
+    if !path.exists() {
+        eprintln!("error: path does not exist: {}", path.display());
+        return ExitCode::from(super::exit_codes::USAGE);
+    }
     let input = ProjectInput {
         cc_slug: None,
         codex_cwd: Some(path.to_owned()),

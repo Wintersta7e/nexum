@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, config::io::load as load_config, paths::Paths};
+use nexum_core::api;
 
 #[derive(Args, Debug)]
 pub struct RecentArgs {
@@ -16,19 +16,9 @@ pub struct RecentArgs {
 }
 
 pub fn run(args: &RecentArgs) -> ExitCode {
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
-    };
-    let cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
+    let (paths, cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
     match api::recent(&paths, &cfg, args.limit, args.source.as_deref()) {
         Ok(rs) => {
@@ -49,7 +39,7 @@ pub fn run(args: &RecentArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(4)
+            ExitCode::from(super::exit_codes::RUNTIME)
         }
     }
 }

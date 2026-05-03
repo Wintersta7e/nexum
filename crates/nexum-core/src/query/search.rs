@@ -345,6 +345,22 @@ mod tests {
     }
 
     #[test]
+    fn unsigned_ranking_penalty_from_opts_overrides_default() {
+        // Confirm that opts.unsigned_ranking_penalty is honored, not the
+        // hardcoded 0.7. With penalty == 1.0 (no penalty), unsigned rows are
+        // not down-weighted; both rows must be present in the result set
+        // (verified-vs-unsigned ordering is FTS-rank dependent so we don't
+        // assert a deterministic order).
+        let (_dir, conn) = open_test_db();
+        insert_minimal(&conn, "u", "term unsigned", "body", false);
+        insert_minimal(&conn, "v", "term verified", "body", true);
+        let mut opts = SearchOpts::new("term");
+        opts.unsigned_ranking_penalty = 1.0;
+        let res = search(&conn, &opts).unwrap();
+        assert_eq!(res.results.len(), 2);
+    }
+
+    #[test]
     fn require_signed_filters_unsigned_out() {
         let (_dir, conn) = open_test_db();
         insert_minimal(&conn, "u", "concurrency unsigned", "body", false);

@@ -32,7 +32,8 @@ pub enum RecordType {
 
 impl RecordType {
     /// Short string used in the `records.record_type` column.
-    pub(crate) fn as_db_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
         match self {
             RecordType::Decision => "decision",
             RecordType::Recommendation => "recommendation",
@@ -53,6 +54,20 @@ impl RecordType {
             _ => RecordType::Untyped,
         }
     }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Companion to [`from_db_str`], which silently defaults at the trusted-DB
+    /// boundary.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "decision" => Some(RecordType::Decision),
+            "recommendation" => Some(RecordType::Recommendation),
+            "failure" => Some(RecordType::Failure),
+            "untyped" => Some(RecordType::Untyped),
+            _ => None,
+        }
+    }
 }
 
 /// Source-of-record enum. JSON form is kebab-case (`"cc-native"`,
@@ -67,7 +82,8 @@ pub enum Source {
 
 impl Source {
     /// Short string used in the `records.source` and `index_state.source` columns.
-    pub(crate) fn as_db_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
         match self {
             Source::CcNative => "cc-native",
             Source::CodexNative => "codex-native",
@@ -78,12 +94,25 @@ impl Source {
     /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
     /// Falls through to `CodexNative` for unrecognized values. This is the
     /// trusted-DB-column boundary; for parsing untrusted user input that must
-    /// reject unknown sources, use the explicit match in `query::recent`.
+    /// reject unknown sources, use [`try_from_user_str`].
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "local" => Source::Local,
             "cc-native" => Source::CcNative,
             _ => Source::CodexNative,
+        }
+    }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Companion to [`from_db_str`], which silently defaults at the trusted-DB
+    /// boundary.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "local" => Some(Source::Local),
+            "cc-native" => Some(Source::CcNative),
+            "codex-native" => Some(Source::CodexNative),
+            _ => None,
         }
     }
 }
@@ -105,7 +134,8 @@ pub enum Confidence {
 
 impl Confidence {
     /// Short string used in the `records.confidence` column.
-    pub(crate) fn as_db_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
         match self {
             Confidence::Low => "low",
             Confidence::Medium => "medium",
@@ -120,6 +150,19 @@ impl Confidence {
             "low" => Confidence::Low,
             "high" => Confidence::High,
             _ => Confidence::Medium,
+        }
+    }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Companion to [`from_db_str`], which silently defaults at the trusted-DB
+    /// boundary.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "low" => Some(Confidence::Low),
+            "medium" => Some(Confidence::Medium),
+            "high" => Some(Confidence::High),
+            _ => None,
         }
     }
 }
@@ -151,7 +194,8 @@ pub enum Outcome {
 impl Outcome {
     /// Short string used in the `records.outcome` column. `NotApplicable` maps
     /// to `"n-a"`, which differs from the JSON form (`"not-applicable"`).
-    pub(crate) fn as_db_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
         match self {
             Outcome::Working => "working",
             Outcome::Reverted => "reverted",
@@ -181,6 +225,25 @@ impl Outcome {
             _ => Outcome::NotApplicable,
         }
     }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Accepts the JSON / kebab-case form for `NotApplicable` (`"not-applicable"`)
+    /// alongside the DB encoding (`"n-a"`) for symmetry with the other variants.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "working" => Some(Outcome::Working),
+            "reverted" => Some(Outcome::Reverted),
+            "superseded" => Some(Outcome::Superseded),
+            "proposed" => Some(Outcome::Proposed),
+            "promoted" => Some(Outcome::Promoted),
+            "rejected" => Some(Outcome::Rejected),
+            "stale" => Some(Outcome::Stale),
+            "attempted" => Some(Outcome::Attempted),
+            "not-applicable" | "n-a" => Some(Outcome::NotApplicable),
+            _ => None,
+        }
+    }
 }
 
 /// Agent enum (who produced the record). JSON form is kebab-case.
@@ -194,7 +257,8 @@ pub enum Agent {
 
 impl Agent {
     /// Short string used in the `records.agent` column.
-    pub(crate) fn as_db_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
         match self {
             Agent::Codex => "codex",
             Agent::ClaudeCode => "claude-code",
@@ -211,6 +275,19 @@ impl Agent {
             _ => Agent::Manual,
         }
     }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Companion to [`from_db_str`], which silently defaults at the trusted-DB
+    /// boundary.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "codex" => Some(Agent::Codex),
+            "claude-code" => Some(Agent::ClaudeCode),
+            "manual" => Some(Agent::Manual),
+            _ => None,
+        }
+    }
 }
 
 /// Signature status. JSON form is lowercase.
@@ -225,7 +302,8 @@ pub enum SignatureStatus {
 
 impl SignatureStatus {
     /// Short string used in the `records.signature_status` column.
-    pub(crate) fn as_db_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
         match self {
             SignatureStatus::Verified => "verified",
             SignatureStatus::Unsigned => "unsigned",
@@ -243,6 +321,20 @@ impl SignatureStatus {
             "invalid" => SignatureStatus::Invalid,
             "unknown" => SignatureStatus::Unknown,
             _ => SignatureStatus::Unsigned,
+        }
+    }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Companion to [`from_db_str`], which silently defaults at the trusted-DB
+    /// boundary.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "verified" => Some(SignatureStatus::Verified),
+            "unsigned" => Some(SignatureStatus::Unsigned),
+            "invalid" => Some(SignatureStatus::Invalid),
+            "unknown" => Some(SignatureStatus::Unknown),
+            _ => None,
         }
     }
 }
@@ -478,6 +570,95 @@ mod tests {
         let s = serde_json::to_string(&r).unwrap();
         assert!(s.contains("\"kind\":\"codex_rollout\""));
         assert!(s.contains("\"path\":\"/tmp/x.jsonl\""));
+    }
+
+    #[test]
+    fn try_from_user_str_rejects_unknown_for_each_enum() {
+        // RecordType
+        assert_eq!(
+            RecordType::try_from_user_str("decision"),
+            Some(RecordType::Decision)
+        );
+        assert_eq!(
+            RecordType::try_from_user_str("recommendation"),
+            Some(RecordType::Recommendation)
+        );
+        assert_eq!(
+            RecordType::try_from_user_str("failure"),
+            Some(RecordType::Failure)
+        );
+        assert_eq!(
+            RecordType::try_from_user_str("untyped"),
+            Some(RecordType::Untyped)
+        );
+        assert_eq!(RecordType::try_from_user_str("not-a-type"), None);
+
+        // Source
+        assert_eq!(Source::try_from_user_str("local"), Some(Source::Local));
+        assert_eq!(
+            Source::try_from_user_str("cc-native"),
+            Some(Source::CcNative)
+        );
+        assert_eq!(
+            Source::try_from_user_str("codex-native"),
+            Some(Source::CodexNative)
+        );
+        assert_eq!(Source::try_from_user_str("not-a-source"), None);
+
+        // Confidence
+        assert_eq!(Confidence::try_from_user_str("low"), Some(Confidence::Low));
+        assert_eq!(
+            Confidence::try_from_user_str("medium"),
+            Some(Confidence::Medium)
+        );
+        assert_eq!(
+            Confidence::try_from_user_str("high"),
+            Some(Confidence::High)
+        );
+        assert_eq!(Confidence::try_from_user_str("very-high"), None);
+
+        // Outcome (accepts both DB-form `"n-a"` and user-form `"not-applicable"`)
+        assert_eq!(
+            Outcome::try_from_user_str("working"),
+            Some(Outcome::Working)
+        );
+        assert_eq!(
+            Outcome::try_from_user_str("not-applicable"),
+            Some(Outcome::NotApplicable)
+        );
+        assert_eq!(
+            Outcome::try_from_user_str("n-a"),
+            Some(Outcome::NotApplicable)
+        );
+        assert_eq!(Outcome::try_from_user_str("bogus"), None);
+
+        // Agent
+        assert_eq!(Agent::try_from_user_str("codex"), Some(Agent::Codex));
+        assert_eq!(
+            Agent::try_from_user_str("claude-code"),
+            Some(Agent::ClaudeCode)
+        );
+        assert_eq!(Agent::try_from_user_str("manual"), Some(Agent::Manual));
+        assert_eq!(Agent::try_from_user_str("rogue"), None);
+
+        // SignatureStatus
+        assert_eq!(
+            SignatureStatus::try_from_user_str("verified"),
+            Some(SignatureStatus::Verified)
+        );
+        assert_eq!(
+            SignatureStatus::try_from_user_str("unsigned"),
+            Some(SignatureStatus::Unsigned)
+        );
+        assert_eq!(
+            SignatureStatus::try_from_user_str("invalid"),
+            Some(SignatureStatus::Invalid)
+        );
+        assert_eq!(
+            SignatureStatus::try_from_user_str("unknown"),
+            Some(SignatureStatus::Unknown)
+        );
+        assert_eq!(SignatureStatus::try_from_user_str("rotated"), None);
     }
 
     #[test]

@@ -3,14 +3,14 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, config::load as load_config, paths::Paths};
+use nexum_core::api;
 
 #[derive(Args, Debug)]
 pub struct IndexArgs {
     /// Force a full pass: bypass the stale-row gate and apply the entire
     /// `gone` set immediately. Useful after manually confirming that the
     /// upstream tool is not actively writing.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, conflicts_with = "incremental")]
     pub force: bool,
     /// Incremental pass (default; equivalent to passing no flag).
     #[arg(long, default_value_t = false)]
@@ -22,23 +22,9 @@ pub struct IndexArgs {
 
 /// Run `nexum index`.
 pub fn run(args: &IndexArgs) -> ExitCode {
-    if args.force && args.incremental {
-        eprintln!("error: --force and --incremental are mutually exclusive");
-        return ExitCode::from(2);
-    }
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}\nDid you run `nexum init`?");
-            return ExitCode::from(3);
-        }
-    };
-    let cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to read config: {e}\nDid you run `nexum init`?");
-            return ExitCode::from(3);
-        }
+    let (paths, cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
     let outcome = if args.force {
         api::index_run_force(&paths, &cfg)
@@ -76,7 +62,7 @@ pub fn run(args: &IndexArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(4)
+            ExitCode::from(super::exit_codes::RUNTIME)
         }
     }
 }

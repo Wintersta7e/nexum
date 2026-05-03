@@ -23,21 +23,17 @@ pub fn recent(
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
-    // Explicit match (not `Source::from_db_str`) because this is a parse-from-
-    // untrusted-input boundary that must error on unknown values; `from_db_str`
-    // is for parsing trusted DB columns and silently falls through to a
-    // default.
-    let source_filter = match source {
-        Some("local") => Some(Source::Local),
-        Some("cc-native") => Some(Source::CcNative),
-        Some("codex-native") => Some(Source::CodexNative),
-        Some(other) => {
-            return Err(QueryError::InvalidFilter {
-                detail: format!("unknown source: {other}"),
-            });
-        }
-        None => None,
-    };
+    // `Source::try_from_user_str` is the parse-from-untrusted-input boundary
+    // that returns `None` on unknown values; here we lift that to an explicit
+    // `QueryError::InvalidFilter`. The trusted-DB-column counterpart
+    // (`Source::from_db_str`) silently defaults and is the wrong tool here.
+    let source_filter = source
+        .map(|s| {
+            Source::try_from_user_str(s).ok_or_else(|| QueryError::InvalidFilter {
+                detail: format!("unknown source: {s}"),
+            })
+        })
+        .transpose()?;
     let filters = Filters {
         source: source_filter,
         ..Filters::default()
@@ -62,6 +58,15 @@ mod tests {
         let (_dir, conn) = open();
         let err = recent(&conn, "warn-but-show", 10, Some("not-a-source")).unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
+    }
+
+    #[test]
+    fn trust_policy_round_trips_into_meta() {
+        let (_dir, conn) = open();
+        let rs = recent(&conn, "warn-but-show", 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, "warn-but-show");
+        let rs = recent(&conn, "hide", 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, "hide");
     }
 
     #[test]

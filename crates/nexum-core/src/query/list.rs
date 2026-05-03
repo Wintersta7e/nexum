@@ -308,6 +308,16 @@ mod tests {
     }
 
     #[test]
+    fn trust_policy_round_trips_into_meta() {
+        let (_dir, conn) = open();
+        insert(&conn, "x", "2026-04-01T00:00:00Z");
+        let rs = list(&conn, &Filters::default(), "warn-but-show", 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, "warn-but-show");
+        let rs = list(&conn, &Filters::default(), "hide", 10, None).unwrap();
+        assert_eq!(rs.meta.trust_policy, "hide");
+    }
+
+    #[test]
     fn list_rejects_malformed_cursor() {
         let (_dir, conn) = open();
         let err = list(

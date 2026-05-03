@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, config::io::load as load_config, paths::Paths, query::SessionLookup};
+use nexum_core::{api, query::SessionLookup};
 
 #[derive(Args, Debug)]
 pub struct BySessionArgs {
@@ -14,19 +14,9 @@ pub struct BySessionArgs {
 }
 
 pub fn run(args: &BySessionArgs) -> ExitCode {
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
-    };
-    let cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
+    let (paths, cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
     let lookup = if let Ok(uuid) = uuid::Uuid::parse_str(&args.needle) {
         SessionLookup::CcSession { uuid }
@@ -58,7 +48,7 @@ pub fn run(args: &BySessionArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(4)
+            ExitCode::from(super::exit_codes::RUNTIME)
         }
     }
 }

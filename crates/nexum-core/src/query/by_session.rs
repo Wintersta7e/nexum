@@ -188,6 +188,29 @@ mod tests {
     }
 
     #[test]
+    fn trust_policy_round_trips_into_meta() {
+        let (_dir, conn) = open();
+        let res = by_session(
+            &conn,
+            "warn-but-show",
+            &SessionLookup::CcSession {
+                uuid: uuid::Uuid::nil(),
+            },
+        )
+        .unwrap();
+        assert_eq!(res.meta.trust_policy, "warn-but-show");
+        let res = by_session(
+            &conn,
+            "hide",
+            &SessionLookup::CcSession {
+                uuid: uuid::Uuid::nil(),
+            },
+        )
+        .unwrap();
+        assert_eq!(res.meta.trust_policy, "hide");
+    }
+
+    #[test]
     fn unknown_session_returns_empty() {
         let (_dir, conn) = open();
         let res = by_session(

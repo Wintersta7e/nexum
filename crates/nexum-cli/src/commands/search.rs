@@ -5,8 +5,6 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    config::io::load as load_config,
-    paths::Paths,
     query::{Filters, SearchOpts},
     records::{Confidence, RecordType, Source},
 };
@@ -47,19 +45,9 @@ pub struct SearchArgs {
 }
 
 pub fn run(args: &SearchArgs) -> ExitCode {
-    let paths = match Paths::resolve() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}\nDid you run `nexum init`?");
-            return ExitCode::from(3);
-        }
-    };
-    let cfg = match load_config(&paths.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(3);
-        }
+    let (paths, cfg) = match super::common::resolve_runtime() {
+        Ok(v) => v,
+        Err(c) => return c,
     };
     let mut opts = SearchOpts::new(args.query.clone());
     opts.top_k = args.top_k;
@@ -69,7 +57,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::from(4);
+            return ExitCode::from(super::exit_codes::RUNTIME);
         }
     };
     if args.json {
@@ -89,7 +77,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
             if args.full
                 && let Some(b) = &r.body
             {
-                println!("    {}", indent_lines(b));
+                println!("{}", indent_lines(b));
             }
         }
     }
@@ -98,46 +86,29 @@ pub fn run(args: &SearchArgs) -> ExitCode {
 
 fn build_filters(args: &SearchArgs) -> Filters {
     Filters {
-        record_type: args.r#type.as_deref().and_then(parse_record_type),
+        record_type: args
+            .r#type
+            .as_deref()
+            .and_then(RecordType::try_from_user_str),
         project_id: args.project.clone(),
-        source: args.source.as_deref().and_then(parse_source),
+        source: args.source.as_deref().and_then(Source::try_from_user_str),
         tags: args.tag.clone(),
         since_iso: args.since.clone(),
-        min_confidence: args.min_confidence.as_deref().and_then(parse_confidence),
+        min_confidence: args
+            .min_confidence
+            .as_deref()
+            .and_then(Confidence::try_from_user_str),
         require_signed: args.require_signed,
         strict_revocation: args.strict_revocation,
         no_unsigned_penalty: args.no_unsigned_penalty,
     }
 }
 
-fn parse_record_type(s: &str) -> Option<RecordType> {
-    Some(match s {
-        "decision" => RecordType::Decision,
-        "recommendation" => RecordType::Recommendation,
-        "failure" => RecordType::Failure,
-        "untyped" => RecordType::Untyped,
-        _ => return None,
-    })
-}
-
-fn parse_source(s: &str) -> Option<Source> {
-    Some(match s {
-        "local" => Source::Local,
-        "cc-native" => Source::CcNative,
-        "codex-native" => Source::CodexNative,
-        _ => return None,
-    })
-}
-
-fn parse_confidence(s: &str) -> Option<Confidence> {
-    Some(match s {
-        "low" => Confidence::Low,
-        "medium" => Confidence::Medium,
-        "high" => Confidence::High,
-        _ => return None,
-    })
-}
+const BODY_INDENT: &str = "    ";
 
 fn indent_lines(s: &str) -> String {
-    s.lines().collect::<Vec<_>>().join("\n    ")
+    s.lines()
+        .map(|l| format!("{BODY_INDENT}{l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
