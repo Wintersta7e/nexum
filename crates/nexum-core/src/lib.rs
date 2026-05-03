@@ -4,7 +4,11 @@
 //! layer (`query::*`), and the API facade (`api::*`). Semantic embeddings
 //! and the MCP surface are not yet wired.
 
-#![forbid(unsafe_code)]
+// Relaxed `forbid` → `deny` to permit the single justified
+// `#[allow(unsafe_code)]` on `indexer::db::register_sqlite_vec_once`.
+// sqlite-vec's auto-extension registration requires unsafe FFI; no other
+// unsafe is introduced. Every other file in this crate stays unsafe-free.
+#![deny(unsafe_code)]
 
 pub mod adapter;
 pub mod api;
