@@ -64,6 +64,31 @@ pub(crate) fn build_meta(
         policy_warnings.push("response includes unsigned content".into());
     }
 
+    // When the policy hides unsigned/invalid records, count how many are in
+    // the whole DB so callers can surface an informational count. This is a
+    // whole-table count rather than a filter-respecting count; filter-aware
+    // hidden counts are deferred to a later cadence.
+    let mut hidden_unsigned: u32 = 0;
+    let mut hidden_invalid: u32 = 0;
+    if trust_policy == TrustPolicy::Hide {
+        let mut stmt = conn.prepare(
+            "SELECT signature_status, count(*) FROM records \
+             WHERE signature_status IN ('unsigned', 'invalid') \
+             GROUP BY signature_status",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (status, count) in rows {
+            let saturated = u32::try_from(count).unwrap_or(u32::MAX);
+            match status.as_str() {
+                "unsigned" => hidden_unsigned = saturated,
+                "invalid" => hidden_invalid = saturated,
+                _ => {}
+            }
+        }
+    }
+
     Ok(Meta {
         source_counts,
         trust_policy,
@@ -72,5 +97,7 @@ pub(crate) fn build_meta(
         policy_warnings,
         embed_pool_saturated,
         saturation_wait_ms,
+        hidden_unsigned,
+        hidden_invalid,
     })
 }

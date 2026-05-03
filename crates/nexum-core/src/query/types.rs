@@ -104,6 +104,14 @@ pub struct Meta {
     pub embed_pool_saturated: bool,
     #[serde(default)]
     pub saturation_wait_ms: u32,
+    /// Records matching the query filters that were withheld because
+    /// `trust_policy` is `Hide` and `signature_status` is `unsigned`.
+    #[serde(default)]
+    pub hidden_unsigned: u32,
+    /// Records matching the query filters that were withheld because
+    /// `trust_policy` is `Hide` and `signature_status` is `invalid`.
+    #[serde(default)]
+    pub hidden_invalid: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

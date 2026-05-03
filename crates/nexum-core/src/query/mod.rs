@@ -7,6 +7,8 @@ pub mod list;
 pub(crate) mod meta;
 pub mod recent;
 pub mod search;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod types;
 
 pub use by_session::{SessionLookup, by_session};

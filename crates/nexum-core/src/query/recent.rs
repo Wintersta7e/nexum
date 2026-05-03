@@ -70,6 +70,21 @@ mod tests {
     }
 
     #[test]
+    fn recent_with_hide_filters_and_counts_hidden() {
+        let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
+        // 3 verified, 2 unsigned, 1 invalid in the fixture.
+        let rs = recent(&conn, TrustPolicy::Hide, 100, None).unwrap();
+        assert_eq!(
+            rs.results.len(),
+            3,
+            "only verified records visible under hide"
+        );
+        assert_eq!(rs.meta.hidden_unsigned, 2);
+        assert_eq!(rs.meta.hidden_invalid, 1);
+        assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
+    }
+
+    #[test]
     fn recent_with_no_source_returns_all() {
         let (_dir, conn) = open();
         conn.execute(

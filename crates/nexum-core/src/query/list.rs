@@ -134,7 +134,17 @@ pub fn list(
     } else {
         None
     };
-    let results: Vec<SearchResult> = accumulated.into_iter().map(|(_, r)| r).collect();
+    let raw: Vec<SearchResult> = accumulated.into_iter().map(|(_, r)| r).collect();
+    // When the policy is Hide, strip unsigned and invalid records from the
+    // visible result set before building the meta envelope. The meta builder
+    // tallies hidden counts from the DB independently.
+    let results: Vec<SearchResult> = if trust_policy == TrustPolicy::Hide {
+        raw.into_iter()
+            .filter(|r| r.signature_status == SignatureStatus::Verified)
+            .collect()
+    } else {
+        raw
+    };
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
     let meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
@@ -359,5 +369,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
+    }
+
+    #[test]
+    fn list_with_hide_policy_filters_unsigned_and_counts_hidden() {
+        let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
+        // 3 verified, 2 unsigned, 1 invalid in fixtures.
+        let rs = list(&conn, &Filters::default(), TrustPolicy::Hide, 100, None).unwrap();
+        assert_eq!(
+            rs.results.len(),
+            3,
+            "only verified records visible under hide"
+        );
+        assert_eq!(rs.meta.hidden_unsigned, 2);
+        assert_eq!(rs.meta.hidden_invalid, 1);
+        assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
+    }
+
+    #[test]
+    fn list_with_warn_but_show_returns_all_zero_hidden() {
+        let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
+        let rs = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            100,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rs.results.len(), 6);
+        assert_eq!(rs.meta.hidden_unsigned, 0);
+        assert_eq!(rs.meta.hidden_invalid, 0);
     }
 }

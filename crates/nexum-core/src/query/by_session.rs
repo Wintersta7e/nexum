@@ -111,16 +111,26 @@ pub fn by_session(
             r.warnings.push("unsigned".into());
         }
     }
+
+    // Apply trust-policy filter: under Hide, strip unsigned and invalid rows
+    // from the visible set before building the meta envelope.
+    let results: Vec<SearchResult> = if trust_policy == TrustPolicy::Hide {
+        results
+            .into_iter()
+            .filter(|r| r.signature_status == SignatureStatus::Verified)
+            .collect()
+    } else {
+        results
+    };
+
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
+    let meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
 
     Ok(ResultSet {
         results,
         total_matched: total,
         next_cursor: None,
-        meta: Meta {
-            trust_policy,
-            ..Default::default()
-        },
+        meta,
     })
 }
 
@@ -185,6 +195,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res.results.len(), 1);
+    }
+
+    #[test]
+    fn by_session_with_hide_filters_and_counts() {
+        let (_dir, conn) = open();
+        // Insert one verified and one unsigned record that both reference the
+        // same CC session UUID so the lookup returns a mixed set.
+        let session_json =
+            r#"[{"kind":"cc_session","uuid":"22222222-2222-4222-8222-222222222222"}]"#;
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             content_hash, signature_status, indexed_at) VALUES \
+             (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
+              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'verified', '2026-04-29T00:01:00Z')",
+            rusqlite::params!["sv1", session_json],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             content_hash, signature_status, indexed_at) VALUES \
+             (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
+              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h2', 'unsigned', '2026-04-29T00:01:00Z')",
+            rusqlite::params!["su1", session_json],
+        )
+        .unwrap();
+
+        let res = by_session(
+            &conn,
+            TrustPolicy::Hide,
+            &SessionLookup::CcSession {
+                uuid: uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            res.results.len(),
+            1,
+            "only verified record visible under hide"
+        );
+        assert_eq!(res.results[0].id, "sv1");
+        assert_eq!(res.meta.hidden_unsigned, 1);
+        assert_eq!(res.meta.hidden_invalid, 0);
+        assert_eq!(res.meta.trust_policy, TrustPolicy::Hide);
     }
 
     #[test]

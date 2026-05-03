@@ -97,6 +97,19 @@ fn register_sqlite_vec_once() {
     });
 }
 
+/// Open a fresh in-memory database with the full index schema applied.
+/// Intended only for unit tests in the query layer; gated by `#[cfg(test)]`.
+///
+/// # Panics
+/// Panics on any DB / schema error — acceptable in test code.
+#[cfg(test)]
+pub(crate) fn open_or_create_in_memory_for_tests() -> rusqlite::Connection {
+    register_sqlite_vec_once();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::index::schema::apply(&conn).unwrap();
+    conn
+}
+
 #[cfg(test)]
 mod tests {
     use super::open_or_create;
