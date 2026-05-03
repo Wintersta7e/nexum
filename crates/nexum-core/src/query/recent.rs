@@ -19,6 +19,10 @@ pub fn recent(
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
+    // Explicit match (not `Source::from_db_str`) because this is a parse-from-
+    // untrusted-input boundary that must error on unknown values; `from_db_str`
+    // is for parsing trusted DB columns and silently falls through to a
+    // default.
     let source_filter = match source {
         Some("local") => Some(Source::Local),
         Some("cc-native") => Some(Source::CcNative),

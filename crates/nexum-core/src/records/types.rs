@@ -40,6 +40,19 @@ impl RecordType {
             RecordType::Untyped => "untyped",
         }
     }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Falls through to `Untyped` for unrecognized values; the schema CHECK
+    /// constraint already restricts inserted values to the known set, so the
+    /// fallback exists for forward-compatibility only.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "decision" => RecordType::Decision,
+            "recommendation" => RecordType::Recommendation,
+            "failure" => RecordType::Failure,
+            _ => RecordType::Untyped,
+        }
+    }
 }
 
 /// Source-of-record enum. JSON form is kebab-case (`"cc-native"`,
@@ -61,6 +74,18 @@ impl Source {
             Source::Local => "local",
         }
     }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Falls through to `CodexNative` for unrecognized values. This is the
+    /// trusted-DB-column boundary; for parsing untrusted user input that must
+    /// reject unknown sources, use the explicit match in `query::recent`.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "local" => Source::Local,
+            "cc-native" => Source::CcNative,
+            _ => Source::CodexNative,
+        }
+    }
 }
 
 /// Confidence enum. JSON form is lowercase.
@@ -79,6 +104,16 @@ impl Confidence {
             Confidence::Low => "low",
             Confidence::Medium => "medium",
             Confidence::High => "high",
+        }
+    }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Falls through to `Medium` for unrecognized values.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "low" => Confidence::Low,
+            "high" => Confidence::High,
+            _ => Confidence::Medium,
         }
     }
 }
@@ -123,6 +158,23 @@ impl Outcome {
             Outcome::NotApplicable => "n-a",
         }
     }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// The DB encoding for `NotApplicable` is `"n-a"`; an unrecognized value
+    /// also collapses there for safety.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "working" => Outcome::Working,
+            "reverted" => Outcome::Reverted,
+            "superseded" => Outcome::Superseded,
+            "proposed" => Outcome::Proposed,
+            "promoted" => Outcome::Promoted,
+            "rejected" => Outcome::Rejected,
+            "stale" => Outcome::Stale,
+            "attempted" => Outcome::Attempted,
+            _ => Outcome::NotApplicable,
+        }
+    }
 }
 
 /// Agent enum (who produced the record). JSON form is kebab-case.
@@ -141,6 +193,16 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::ClaudeCode => "claude-code",
             Agent::Manual => "manual",
+        }
+    }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Falls through to `Manual` for unrecognized values.
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "codex" => Agent::Codex,
+            "claude-code" => Agent::ClaudeCode,
+            _ => Agent::Manual,
         }
     }
 }
@@ -163,6 +225,18 @@ impl SignatureStatus {
             SignatureStatus::Unsigned => "unsigned",
             SignatureStatus::Invalid => "invalid",
             SignatureStatus::Unknown => "unknown",
+        }
+    }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Falls through to `Unsigned` for unrecognized values (the safest default —
+    /// downstream policy treats unknown trust as untrusted).
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "verified" => SignatureStatus::Verified,
+            "invalid" => SignatureStatus::Invalid,
+            "unknown" => SignatureStatus::Unknown,
+            _ => SignatureStatus::Unsigned,
         }
     }
 }

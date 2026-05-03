@@ -4,6 +4,7 @@
 pub mod by_session;
 pub mod get;
 pub mod list;
+pub(crate) mod meta;
 pub mod recent;
 pub mod search;
 pub mod types;

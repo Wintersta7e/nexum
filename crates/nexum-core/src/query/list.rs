@@ -5,10 +5,7 @@ use rusqlite::Connection;
 
 use super::{
     search::build_filter_sql,
-    types::{
-        Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
-        ResultSet, SearchResult,
-    },
+    types::{Filters, QueryError, ResultSet, SearchResult},
 };
 use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
 
@@ -87,7 +84,7 @@ pub fn list(
 
     let mut accumulated: Vec<(i64, SearchResult)> = Vec::new();
     for (rowid, id, rt, title, summary, source, project_id, sig, updated) in rows {
-        let signature_status = parse_signature_status(&sig);
+        let signature_status = SignatureStatus::from_db_str(&sig);
         let trust_basis = if signature_status == SignatureStatus::Verified {
             Some(TrustBasis::Current)
         } else {
@@ -101,11 +98,11 @@ pub fn list(
             rowid,
             SearchResult {
                 id,
-                record_type: parse_record_type(&rt),
+                record_type: RecordType::from_db_str(&rt),
                 title,
                 summary,
                 score: 0.0,
-                source: parse_source(&source),
+                source: Source::from_db_str(&source),
                 project_id,
                 signature_status,
                 trust_basis,
@@ -135,7 +132,11 @@ pub fn list(
     let results: Vec<SearchResult> = accumulated.into_iter().map(|(_, r)| r).collect();
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
-    let meta = build_meta(conn, &results)?;
+    // CF-1 (Task 14): the trust_policy / saturation flags will be plumbed
+    // through `list` once the CLI wires `cfg.trust.*` into the call. Until
+    // then `list` honors the same hardcoded "warn-but-show" envelope that
+    // the prior implementation produced.
+    let meta = super::meta::build_meta(conn, &results, "warn-but-show", false, 0)?;
     Ok(ResultSet {
         results,
         total_matched: total,
@@ -158,76 +159,6 @@ fn decode_cursor(c: &str) -> Result<(String, i64), QueryError> {
         detail: format!("invalid cursor rowid: {r}"),
     })?;
     Ok((u.to_owned(), rowid))
-}
-
-fn build_meta(conn: &Connection, results: &[SearchResult]) -> Result<Meta, QueryError> {
-    let local: i64 = conn.query_row(
-        "SELECT count(*) FROM records WHERE source = 'local'",
-        [],
-        |r| r.get(0),
-    )?;
-    let cc: i64 = conn.query_row(
-        "SELECT count(*) FROM records WHERE source = 'cc-native'",
-        [],
-        |r| r.get(0),
-    )?;
-    let codex: i64 = conn.query_row(
-        "SELECT count(*) FROM records WHERE source = 'codex-native'",
-        [],
-        |r| r.get(0),
-    )?;
-    let mut ts = MetaTrustSummary::default();
-    let mut tbs = MetaTrustBasisSummary::default();
-    for r in results {
-        match r.signature_status {
-            SignatureStatus::Verified => {
-                ts.verified += 1;
-                tbs.current += 1;
-            }
-            SignatureStatus::Unsigned => ts.unsigned += 1,
-            SignatureStatus::Invalid => ts.invalid += 1,
-            SignatureStatus::Unknown => ts.unknown += 1,
-        }
-    }
-    Ok(Meta {
-        source_counts: MetaSourceCounts {
-            local: u32::try_from(local).unwrap_or(u32::MAX),
-            cc_native: u32::try_from(cc).unwrap_or(u32::MAX),
-            codex_native: u32::try_from(codex).unwrap_or(u32::MAX),
-        },
-        trust_policy: "warn-but-show".into(),
-        trust_summary: ts,
-        trust_basis_summary: tbs,
-        policy_warnings: Vec::new(),
-        embed_pool_saturated: false,
-        saturation_wait_ms: 0,
-    })
-}
-
-fn parse_signature_status(s: &str) -> SignatureStatus {
-    match s {
-        "verified" => SignatureStatus::Verified,
-        "invalid" => SignatureStatus::Invalid,
-        "unknown" => SignatureStatus::Unknown,
-        _ => SignatureStatus::Unsigned,
-    }
-}
-
-fn parse_record_type(s: &str) -> RecordType {
-    match s {
-        "decision" => RecordType::Decision,
-        "recommendation" => RecordType::Recommendation,
-        "failure" => RecordType::Failure,
-        _ => RecordType::Untyped,
-    }
-}
-
-fn parse_source(s: &str) -> Source {
-    match s {
-        "local" => Source::Local,
-        "cc-native" => Source::CcNative,
-        _ => Source::CodexNative,
-    }
 }
 
 #[cfg(test)]

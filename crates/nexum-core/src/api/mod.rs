@@ -50,12 +50,18 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
 
 /// FTS-only search (vector branch lands later).
 ///
+/// The `cfg.trust.ranking_penalty` value overrides any
+/// `unsigned_ranking_penalty` set on `opts` so a single configured value
+/// drives both ranking and presentation.
+///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite or filter encoding failure.
-pub fn search(paths: &Paths, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
+pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
-    Ok(query_search(&conn, opts)?)
+    let mut effective_opts = opts.clone();
+    effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
+    Ok(query_search(&conn, &effective_opts)?)
 }
 
 /// Get one record by id; honors the `include_unsigned` escape hatch under
@@ -129,7 +135,6 @@ pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
             "SELECT project_id, count(*), \
                 sum(CASE WHEN signature_status = 'verified' THEN 1 ELSE 0 END) \
          FROM records \
-         WHERE project_id IS NOT NULL \
          GROUP BY project_id \
          ORDER BY count(*) DESC",
         )

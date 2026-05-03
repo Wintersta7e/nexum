@@ -70,7 +70,7 @@ pub fn get(
         .optional()?;
 
     let Some(raw) = row else { return Ok(None) };
-    let signature_status = parse_signature_status(&raw.signature_status);
+    let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
 
     // Hide-policy: an unsigned record under `trust_policy = "hide"` returns
     // None unless the caller explicitly opts in via `include_unsigned`.
@@ -110,38 +110,17 @@ fn build_record(
         })?
         .with_timezone(&chrono::Utc);
     let body_origin_path = raw.body_origin_path.map(std::path::PathBuf::from);
-    let confidence = match raw.confidence.as_str() {
-        "low" => Confidence::Low,
-        "high" => Confidence::High,
-        _ => Confidence::Medium,
-    };
-    let outcome = match raw.outcome.as_deref() {
-        Some("working") => Outcome::Working,
-        Some("reverted") => Outcome::Reverted,
-        Some("superseded") => Outcome::Superseded,
-        Some("proposed") => Outcome::Proposed,
-        Some("promoted") => Outcome::Promoted,
-        Some("rejected") => Outcome::Rejected,
-        Some("stale") => Outcome::Stale,
-        Some("attempted") => Outcome::Attempted,
-        _ => Outcome::NotApplicable,
-    };
-    let agent = match raw.agent.as_str() {
-        "codex" => Agent::Codex,
-        "claude-code" => Agent::ClaudeCode,
-        _ => Agent::Manual,
-    };
-    let record_type = match raw.record_type.as_str() {
-        "decision" => RecordType::Decision,
-        "recommendation" => RecordType::Recommendation,
-        "failure" => RecordType::Failure,
-        _ => RecordType::Untyped,
-    };
-    let source = match raw.source.as_str() {
-        "local" => Source::Local,
-        "cc-native" => Source::CcNative,
-        _ => Source::CodexNative,
-    };
+    let confidence = Confidence::from_db_str(&raw.confidence);
+    // `outcome` is `Option<String>`; `Outcome::from_db_str` already collapses
+    // unknown values to `NotApplicable`, so a `None` cell maps to the same
+    // sentinel via `map_or`.
+    let outcome = raw
+        .outcome
+        .as_deref()
+        .map_or(Outcome::NotApplicable, Outcome::from_db_str);
+    let agent = Agent::from_db_str(&raw.agent);
+    let record_type = RecordType::from_db_str(&raw.record_type);
+    let source = Source::from_db_str(&raw.source);
 
     Ok(UnifiedRecord {
         id: raw.id,
@@ -195,15 +174,6 @@ struct RawRow {
     content_hash: String,
     signature_status: String,
     extras: Option<String>,
-}
-
-fn parse_signature_status(s: &str) -> SignatureStatus {
-    match s {
-        "verified" => SignatureStatus::Verified,
-        "invalid" => SignatureStatus::Invalid,
-        "unknown" => SignatureStatus::Unknown,
-        _ => SignatureStatus::Unsigned,
-    }
 }
 
 #[cfg(test)]

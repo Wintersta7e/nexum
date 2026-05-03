@@ -4,10 +4,7 @@
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    list::list as list_basic,
-    types::{Filters, Meta, QueryError, ResultSet, SearchResult},
-};
+use super::types::{Meta, QueryError, ResultSet, SearchResult};
 use crate::records::{RecordType, SignatureStatus, Source, TrustBasis};
 
 /// Discriminator for [`by_session`] queries — names the kind of session
@@ -37,6 +34,10 @@ fn escape_like(s: &str) -> String {
 
 /// Find records that reference the given session.
 ///
+/// One SELECT against `records` projects the result rows directly; an empty
+/// match short-circuits without any further round-trip to keep `by_session`
+/// cheap on the common "no such session" path.
+///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure.
 pub fn by_session(conn: &Connection, lookup: &SessionLookup) -> Result<ResultSet, QueryError> {
@@ -55,52 +56,46 @@ pub fn by_session(conn: &Connection, lookup: &SessionLookup) -> Result<ResultSet
     // tooling could.
     let escaped = escape_like(&needle);
     let pattern = format!("%{escaped}%");
-    let sql = "SELECT id FROM records WHERE session_refs LIKE ?1 ESCAPE '\\'";
+    let sql = "SELECT records.id, records.record_type, records.title, records.summary, \
+                      records.source, records.project_id, records.signature_status, records.updated \
+               FROM records \
+               WHERE session_refs LIKE ?1 ESCAPE '\\' \
+               ORDER BY records.updated DESC";
     let mut stmt = conn.prepare(sql)?;
-    let ids: Vec<String> = stmt
-        .query_map(params![pattern], |r| r.get::<_, String>(0))?
-        .flatten()
-        .collect();
+    let rows = stmt.query_map(params![pattern], |r| {
+        Ok(SearchResult {
+            id: r.get(0)?,
+            record_type: RecordType::from_db_str(&r.get::<_, String>(1)?),
+            title: r.get(2)?,
+            summary: r.get::<_, Option<String>>(3)?,
+            score: 0.0,
+            source: Source::from_db_str(&r.get::<_, String>(4)?),
+            project_id: r.get(5)?,
+            signature_status: SignatureStatus::from_db_str(&r.get::<_, String>(6)?),
+            trust_basis: None,
+            warnings: Vec::new(),
+            body: None,
+            updated: r.get(7)?,
+        })
+    })?;
+    let mut results: Vec<SearchResult> = rows.flatten().collect();
 
-    if ids.is_empty() {
-        return list_basic(conn, &Filters::default(), 0, None);
+    // Empty-result fast path: skip the trust-basis loop and any further
+    // bookkeeping. Returning a fresh `ResultSet` is also more honest — an
+    // empty session lookup shouldn't paint the global meta envelope onto
+    // the response.
+    if results.is_empty() {
+        return Ok(ResultSet {
+            results,
+            total_matched: 0,
+            next_cursor: None,
+            meta: Meta {
+                trust_policy: "warn-but-show".into(),
+                ..Default::default()
+            },
+        });
     }
 
-    // Build a single-id-disjunction SQL so the result_set carries the actual rows.
-    let id_placeholders = (0..ids.len())
-        .map(|i| format!("?{}", i + 1))
-        .collect::<Vec<_>>()
-        .join(",");
-    let fetch_sql = format!(
-        "SELECT records.id, records.record_type, records.title, records.summary, records.source, \
-                records.project_id, records.signature_status, records.updated \
-         FROM records WHERE records.id IN ({id_placeholders}) \
-         ORDER BY records.updated DESC"
-    );
-    let mut fetch_stmt = conn.prepare(&fetch_sql)?;
-    let params: Vec<rusqlite::types::Value> = ids
-        .iter()
-        .map(|s| rusqlite::types::Value::Text(s.clone()))
-        .collect();
-    let rows = fetch_stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-            Ok(SearchResult {
-                id: r.get(0)?,
-                record_type: parse_record_type(&r.get::<_, String>(1)?),
-                title: r.get(2)?,
-                summary: r.get::<_, Option<String>>(3)?,
-                score: 0.0,
-                source: parse_source(&r.get::<_, String>(4)?),
-                project_id: r.get(5)?,
-                signature_status: parse_signature_status(&r.get::<_, String>(6)?),
-                trust_basis: None,
-                warnings: Vec::new(),
-                body: None,
-                updated: r.get(7)?,
-            })
-        })?
-        .flatten();
-    let mut results: Vec<SearchResult> = rows.collect();
     for r in &mut results {
         if r.signature_status == SignatureStatus::Verified {
             r.trust_basis = Some(TrustBasis::Current);
@@ -119,32 +114,6 @@ pub fn by_session(conn: &Connection, lookup: &SessionLookup) -> Result<ResultSet
             ..Default::default()
         },
     })
-}
-
-fn parse_signature_status(s: &str) -> SignatureStatus {
-    match s {
-        "verified" => SignatureStatus::Verified,
-        "invalid" => SignatureStatus::Invalid,
-        "unknown" => SignatureStatus::Unknown,
-        _ => SignatureStatus::Unsigned,
-    }
-}
-
-fn parse_record_type(s: &str) -> RecordType {
-    match s {
-        "decision" => RecordType::Decision,
-        "recommendation" => RecordType::Recommendation,
-        "failure" => RecordType::Failure,
-        _ => RecordType::Untyped,
-    }
-}
-
-fn parse_source(s: &str) -> Source {
-    match s {
-        "local" => Source::Local,
-        "cc-native" => Source::CcNative,
-        _ => Source::CodexNative,
-    }
 }
 
 #[cfg(test)]

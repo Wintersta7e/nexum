@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustBasis};
 
-use super::types::{
-    Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
-    ResultSet, SearchResult,
-};
+use super::types::{Filters, QueryError, ResultSet, SearchResult};
 
 /// `search` options. Compose via `SearchOpts::new(query)` and fluent setters,
 /// or by direct struct construction.
@@ -22,6 +19,12 @@ pub struct SearchOpts {
     /// once an embedder is wired. Currently always `false`.
     pub embed_pool_saturated: bool,
     pub saturation_wait_ms: u32,
+    /// Multiplicative penalty applied to unsigned rows after RRF (and before
+    /// the top-K cut). Defaults to `0.7` — match the historical hardcode that
+    /// motivated this knob. The CLI/MCP facade overrides this with the
+    /// configured `[trust] ranking_penalty` so a single value drives both
+    /// presentation and ranking.
+    pub unsigned_ranking_penalty: f64,
 }
 
 impl SearchOpts {
@@ -34,6 +37,7 @@ impl SearchOpts {
             trust_policy: "warn-but-show".into(),
             embed_pool_saturated: false,
             saturation_wait_ms: 0,
+            unsigned_ranking_penalty: 0.7,
         }
     }
 }
@@ -107,7 +111,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
 
             let is_unsigned = r.signature_status.as_str() != "verified";
             if is_unsigned && !opts.filters.no_unsigned_penalty {
-                score *= 0.7;
+                score *= opts.unsigned_ranking_penalty;
             }
             (r, score)
         })
@@ -134,7 +138,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         .map(|(idx, (r, score))| project_row(r, score, idx < 3))
         .collect();
 
-    let meta = build_meta(
+    let meta = super::meta::build_meta(
         conn,
         &results,
         &opts.trust_policy,
@@ -158,7 +162,7 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
     } else {
         None
     };
-    let signature_status = parse_signature_status(&r.signature_status);
+    let signature_status = SignatureStatus::from_db_str(&r.signature_status);
     let trust_basis = if matches!(signature_status, SignatureStatus::Verified) {
         Some(TrustBasis::Current)
     } else {
@@ -170,11 +174,11 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
     }
     SearchResult {
         id: r.id,
-        record_type: parse_record_type(&r.record_type),
+        record_type: RecordType::from_db_str(&r.record_type),
         title: r.title,
         summary: r.summary,
         score,
-        source: parse_source(&r.source),
+        source: Source::from_db_str(&r.source),
         project_id: r.project_id,
         signature_status,
         trust_basis,
@@ -272,91 +276,6 @@ pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::type
     }
 
     (clauses.join(" "), params)
-}
-
-fn build_meta(
-    conn: &Connection,
-    results: &[SearchResult],
-    trust_policy: &str,
-    embed_pool_saturated: bool,
-    saturation_wait_ms: u32,
-) -> Result<Meta, QueryError> {
-    // source_counts: cumulative across the WHOLE index (so the consumer sees
-    // "you queried a corpus of N local + M cc + K codex").
-    let local: i64 = conn.query_row(
-        "SELECT count(*) FROM records WHERE source = 'local'",
-        [],
-        |r| r.get(0),
-    )?;
-    let cc: i64 = conn.query_row(
-        "SELECT count(*) FROM records WHERE source = 'cc-native'",
-        [],
-        |r| r.get(0),
-    )?;
-    let codex: i64 = conn.query_row(
-        "SELECT count(*) FROM records WHERE source = 'codex-native'",
-        [],
-        |r| r.get(0),
-    )?;
-
-    // trust_summary + trust_basis_summary: counted over the RETURNED results.
-    let mut ts = MetaTrustSummary::default();
-    let mut tbs = MetaTrustBasisSummary::default();
-    let mut policy_warnings: Vec<String> = Vec::new();
-    for r in results {
-        match r.signature_status {
-            SignatureStatus::Verified => {
-                ts.verified += 1;
-                tbs.current += 1;
-            }
-            SignatureStatus::Unsigned => ts.unsigned += 1,
-            SignatureStatus::Invalid => ts.invalid += 1,
-            SignatureStatus::Unknown => ts.unknown += 1,
-        }
-    }
-    if trust_policy == "warn-but-show" && (ts.unsigned + ts.invalid + ts.unknown) > 0 {
-        policy_warnings.push("response includes unsigned content".into());
-    }
-
-    Ok(Meta {
-        source_counts: MetaSourceCounts {
-            local: u32::try_from(local).unwrap_or(0),
-            cc_native: u32::try_from(cc).unwrap_or(0),
-            codex_native: u32::try_from(codex).unwrap_or(0),
-        },
-        trust_policy: trust_policy.to_owned(),
-        trust_summary: ts,
-        trust_basis_summary: tbs,
-        policy_warnings,
-        embed_pool_saturated,
-        saturation_wait_ms,
-    })
-}
-
-fn parse_signature_status(s: &str) -> SignatureStatus {
-    match s {
-        "verified" => SignatureStatus::Verified,
-        "invalid" => SignatureStatus::Invalid,
-        "unknown" => SignatureStatus::Unknown,
-        _ => SignatureStatus::Unsigned,
-    }
-}
-
-fn parse_record_type(s: &str) -> RecordType {
-    match s {
-        "decision" => RecordType::Decision,
-        "recommendation" => RecordType::Recommendation,
-        "failure" => RecordType::Failure,
-        _ => RecordType::Untyped,
-    }
-}
-
-fn parse_source(s: &str) -> Source {
-    match s {
-        "local" => Source::Local,
-        "cc-native" => Source::CcNative,
-        _ => Source::CodexNative,
-    }
 }
 
 #[cfg(test)]
