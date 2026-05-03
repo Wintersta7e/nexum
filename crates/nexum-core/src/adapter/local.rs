@@ -147,8 +147,6 @@ struct LocalRecordYaml {
     commits: Vec<String>,
     #[serde(default)]
     provenance: Option<serde_yaml::Value>,
-    #[serde(default)]
-    content_hash: Option<String>,
 }
 
 enum LocalParseError {
@@ -177,10 +175,7 @@ fn parse_local_record(
 
     let record_type = map_record_type(&parsed.record_type);
     let body = parsed.body.unwrap_or_default();
-    let hash = parsed
-        .content_hash
-        .clone()
-        .unwrap_or_else(|| content_hash(&parsed.title, parsed.summary.as_deref(), &body));
+    let hash = content_hash(&parsed.title, parsed.summary.as_deref(), &body);
     let agent = map_agent(parsed.agent.as_deref());
     let outcome = map_outcome(parsed.outcome.as_deref());
     let confidence = map_confidence(parsed.confidence.as_deref());

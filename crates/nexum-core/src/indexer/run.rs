@@ -16,22 +16,22 @@
 //! in a later milestone, and `record_embeddings` stays empty until then.
 
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::{
     adapter::{
-        cc::CcAdapter, codex::CodexAdapter, local::LocalAdapter, Adapter, AdapterPass,
-        PassCompleteness,
+        Adapter, AdapterPass, PassCompleteness, cc::CcAdapter, codex::CodexAdapter,
+        local::LocalAdapter,
     },
     config::types::Config,
     index::tag_normalization::normalize_tags_for_fts,
     indexer::{
         db::IndexerError,
         state::{
-            apply_index_state_ddl, bump_miss, drop_state, reset_miss_for_id,
-            reset_misses_for_source, IndexStateError, STALE_THRESHOLD,
+            IndexStateError, STALE_THRESHOLD, apply_index_state_ddl, bump_miss, drop_state,
+            reset_miss_for_id, reset_misses_for_source,
         },
     },
     paths::Paths,
@@ -287,7 +287,7 @@ fn load_indexed_for_source(
 ) -> Result<std::collections::HashMap<String, String>, IndexerError> {
     let mut indexed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut stmt = tx.prepare("SELECT id, content_hash FROM records WHERE source = ?1")?;
-    let src_str = serialize_source(source);
+    let src_str = source.as_db_str();
     let rows = stmt.query_map(params![src_str], |r| {
         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
     })?;
@@ -383,15 +383,15 @@ fn apply_deletes(
 }
 
 fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(), IndexerError> {
-    let tags_json = serde_json::to_string(&r.tags).unwrap_or_else(|_| "[]".to_owned());
+    let tags_json = serde_json::to_string(&r.tags).expect("serializable record fields");
     let tags_fts = normalize_tags_for_fts(&tags_json);
     let session_refs_json =
-        serde_json::to_string(&r.session_refs).unwrap_or_else(|_| "[]".to_owned());
-    let files_json = serde_json::to_string(&r.files).unwrap_or_else(|_| "[]".to_owned());
-    let commits_json = serde_json::to_string(&r.commits).unwrap_or_else(|_| "[]".to_owned());
-    let extras_json = serde_json::to_string(&r.extras).unwrap_or_else(|_| "{}".to_owned());
+        serde_json::to_string(&r.session_refs).expect("serializable record fields");
+    let files_json = serde_json::to_string(&r.files).expect("serializable record fields");
+    let commits_json = serde_json::to_string(&r.commits).expect("serializable record fields");
+    let extras_json = serde_json::to_string(&r.extras).expect("serializable record fields");
     let now = Utc::now().to_rfc3339();
-    let signature_status = serialize_signature_status(r.provenance.signature_status);
+    let signature_status = r.provenance.signature_status.as_db_str();
     let body_origin_path = r.body_origin_path.as_ref().map(|p| p.display().to_string());
 
     // Look up rowid; if a row exists we mirror the vec0-before-records ordering
@@ -419,18 +419,18 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
              signature_status = ?19, extras = ?20, indexed_at = ?21 \
              WHERE id = ?22",
             params![
-                serialize_source(source),
+                source.as_db_str(),
                 r.project_id,
-                serialize_record_type(r.record_type),
+                r.record_type.as_db_str(),
                 r.title,
                 r.summary,
                 r.body,
                 body_origin_path,
                 tags_json,
                 tags_fts,
-                serialize_confidence(r.confidence),
-                serialize_outcome(r.outcome),
-                serialize_agent(r.agent),
+                r.confidence.as_db_str(),
+                r.outcome.as_db_str(),
+                r.agent.as_db_str(),
                 session_refs_json,
                 files_json,
                 commits_json,
@@ -453,18 +453,18 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
               ?19, ?20, ?21, ?22)",
             params![
                 r.id,
-                serialize_source(source),
+                source.as_db_str(),
                 r.project_id,
-                serialize_record_type(r.record_type),
+                r.record_type.as_db_str(),
                 r.title,
                 r.summary,
                 r.body,
                 body_origin_path,
                 tags_json,
                 tags_fts,
-                serialize_confidence(r.confidence),
-                serialize_outcome(r.outcome),
-                serialize_agent(r.agent),
+                r.confidence.as_db_str(),
+                r.outcome.as_db_str(),
+                r.agent.as_db_str(),
                 session_refs_json,
                 files_json,
                 commits_json,
@@ -514,67 +514,6 @@ fn expand_home(p: &str) -> std::path::PathBuf {
         home.join(stripped)
     } else {
         std::path::PathBuf::from(p)
-    }
-}
-
-fn serialize_source(s: Source) -> &'static str {
-    match s {
-        Source::CcNative => "cc-native",
-        Source::CodexNative => "codex-native",
-        Source::Local => "local",
-    }
-}
-
-fn serialize_record_type(rt: crate::records::RecordType) -> &'static str {
-    use crate::records::RecordType;
-    match rt {
-        RecordType::Decision => "decision",
-        RecordType::Recommendation => "recommendation",
-        RecordType::Failure => "failure",
-        RecordType::Untyped => "untyped",
-    }
-}
-
-fn serialize_confidence(c: crate::records::Confidence) -> &'static str {
-    use crate::records::Confidence;
-    match c {
-        Confidence::Low => "low",
-        Confidence::Medium => "medium",
-        Confidence::High => "high",
-    }
-}
-
-fn serialize_outcome(o: crate::records::Outcome) -> &'static str {
-    use crate::records::Outcome;
-    match o {
-        Outcome::Working => "working",
-        Outcome::Reverted => "reverted",
-        Outcome::Superseded => "superseded",
-        Outcome::Proposed => "proposed",
-        Outcome::Promoted => "promoted",
-        Outcome::Rejected => "rejected",
-        Outcome::Stale => "stale",
-        Outcome::Attempted => "attempted",
-        Outcome::NotApplicable => "n-a",
-    }
-}
-
-fn serialize_agent(a: crate::records::Agent) -> &'static str {
-    use crate::records::Agent;
-    match a {
-        Agent::Codex => "codex",
-        Agent::ClaudeCode => "claude-code",
-        Agent::Manual => "manual",
-    }
-}
-
-fn serialize_signature_status(s: crate::records::SignatureStatus) -> &'static str {
-    use crate::records::SignatureStatus;
-    match s {
-        SignatureStatus::Verified => "verified",
-        SignatureStatus::Unsigned => "unsigned",
-        SignatureStatus::Invalid => "invalid",
-        SignatureStatus::Unknown => "unknown",
     }
 }
 

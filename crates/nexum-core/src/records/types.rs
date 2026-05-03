@@ -30,6 +30,18 @@ pub enum RecordType {
     Untyped,
 }
 
+impl RecordType {
+    /// Short string used in the `records.record_type` column.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            RecordType::Decision => "decision",
+            RecordType::Recommendation => "recommendation",
+            RecordType::Failure => "failure",
+            RecordType::Untyped => "untyped",
+        }
+    }
+}
+
 /// Source-of-record enum. JSON form is kebab-case (`"cc-native"`,
 /// `"codex-native"`, `"local"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +52,17 @@ pub enum Source {
     Local,
 }
 
+impl Source {
+    /// Short string used in the `records.source` and `index_state.source` columns.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            Source::CcNative => "cc-native",
+            Source::CodexNative => "codex-native",
+            Source::Local => "local",
+        }
+    }
+}
+
 /// Confidence enum. JSON form is lowercase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -47,6 +70,17 @@ pub enum Confidence {
     Low,
     Medium,
     High,
+}
+
+impl Confidence {
+    /// Short string used in the `records.confidence` column.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            Confidence::Low => "low",
+            Confidence::Medium => "medium",
+            Confidence::High => "high",
+        }
+    }
 }
 
 /// Outcome enum, unioning all per-record-type lifecycles. JSON form is
@@ -73,6 +107,24 @@ pub enum Outcome {
     NotApplicable,
 }
 
+impl Outcome {
+    /// Short string used in the `records.outcome` column. `NotApplicable` maps
+    /// to `"n-a"`, which differs from the JSON form (`"not-applicable"`).
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            Outcome::Working => "working",
+            Outcome::Reverted => "reverted",
+            Outcome::Superseded => "superseded",
+            Outcome::Proposed => "proposed",
+            Outcome::Promoted => "promoted",
+            Outcome::Rejected => "rejected",
+            Outcome::Stale => "stale",
+            Outcome::Attempted => "attempted",
+            Outcome::NotApplicable => "n-a",
+        }
+    }
+}
+
 /// Agent enum (who produced the record). JSON form is kebab-case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -80,6 +132,17 @@ pub enum Agent {
     Codex,
     ClaudeCode,
     Manual,
+}
+
+impl Agent {
+    /// Short string used in the `records.agent` column.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            Agent::Codex => "codex",
+            Agent::ClaudeCode => "claude-code",
+            Agent::Manual => "manual",
+        }
+    }
 }
 
 /// Signature status. JSON form is lowercase.
@@ -90,6 +153,18 @@ pub enum SignatureStatus {
     Unsigned,
     Invalid,
     Unknown,
+}
+
+impl SignatureStatus {
+    /// Short string used in the `records.signature_status` column.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            SignatureStatus::Verified => "verified",
+            SignatureStatus::Unsigned => "unsigned",
+            SignatureStatus::Invalid => "invalid",
+            SignatureStatus::Unknown => "unknown",
+        }
+    }
 }
 
 /// Trust basis (recomputed per query). JSON form is kebab-case.

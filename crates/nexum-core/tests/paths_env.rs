@@ -1,22 +1,28 @@
 //! Integration tests for the env-based `Paths::resolve()` entry point.
 //!
-//! Live in their own integration-test binary because they mutate the process
-//! environment (`NEXUM_HOME`, `HOME`, `USERPROFILE`) — which is process-global. Cargo
-//! runs each integration-test binary in its own process, so isolation is preserved
-//! here even if other integration tests grow to read env state.
+//! These tests mutate the process environment (`NEXUM_HOME`, `HOME`,
+//! `USERPROFILE`), which is process-global. Cargo runs each integration-test
+//! binary in its own process, so this binary is isolated from other test
+//! binaries — but tests within a single binary run in parallel by default,
+//! and `set_var` / `remove_var` from one would race the other. `ENV_MUTEX`
+//! serializes them.
 
 use nexum_core::paths::{Paths, PathsError};
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 #[test]
 fn resolve_uses_nexum_home_when_set() {
-    // SAFETY: env mutation is process-global; this test binary has no other tests
-    // that read NEXUM_HOME, and we reset the var before returning.
+    let _guard = ENV_MUTEX.lock().expect("env mutex");
     let want = PathBuf::from("/tmp/nx-resolve-test-home");
+    // SAFETY: serialized via ENV_MUTEX; reset before returning.
     unsafe {
         std::env::set_var("NEXUM_HOME", &want);
     }
     let got = Paths::resolve().expect("resolve should succeed when NEXUM_HOME is set");
+    // SAFETY: serialized via ENV_MUTEX.
     unsafe {
         std::env::remove_var("NEXUM_HOME");
     }
@@ -26,9 +32,8 @@ fn resolve_uses_nexum_home_when_set() {
 
 #[test]
 fn resolve_errors_when_no_home_anywhere() {
-    // SAFETY: env mutation is process-global; this test binary has no other tests
-    // that read these vars. The other env-using test (`resolve_uses_nexum_home_when_set`)
-    // sets and clears NEXUM_HOME but doesn't touch HOME / USERPROFILE.
+    let _guard = ENV_MUTEX.lock().expect("env mutex");
+    // SAFETY: serialized via ENV_MUTEX.
     unsafe {
         std::env::remove_var("NEXUM_HOME");
         std::env::remove_var("HOME");

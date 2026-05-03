@@ -41,7 +41,7 @@ pub fn apply_index_state_ddl(conn: &Connection) -> Result<(), IndexStateError> {
 /// # Errors
 /// Returns `IndexStateError::Rusqlite` on SQL failure.
 pub fn bump_miss(conn: &Connection, source: Source, id: &RecordId) -> Result<u32, IndexStateError> {
-    let src = serialize_source(source);
+    let src = source.as_db_str();
     conn.execute(
         "INSERT INTO index_state (source, id, consecutive_authoritative_misses) \
          VALUES (?1, ?2, 1) \
@@ -63,7 +63,7 @@ pub fn bump_miss(conn: &Connection, source: Source, id: &RecordId) -> Result<u32
 /// # Errors
 /// Returns `IndexStateError::Rusqlite` on SQL failure.
 pub fn reset_misses_for_source(conn: &Connection, source: Source) -> Result<(), IndexStateError> {
-    let src = serialize_source(source);
+    let src = source.as_db_str();
     conn.execute(
         "UPDATE index_state SET consecutive_authoritative_misses = 0 WHERE source = ?1",
         params![src],
@@ -82,7 +82,7 @@ pub fn reset_miss_for_id(
     source: Source,
     id: &RecordId,
 ) -> Result<(), IndexStateError> {
-    let src = serialize_source(source);
+    let src = source.as_db_str();
     conn.execute(
         "UPDATE index_state SET consecutive_authoritative_misses = 0 \
          WHERE source = ?1 AND id = ?2",
@@ -97,7 +97,7 @@ pub fn reset_miss_for_id(
 /// # Errors
 /// Returns `IndexStateError::Rusqlite` on SQL failure.
 pub fn drop_state(conn: &Connection, source: Source, id: &RecordId) -> Result<(), IndexStateError> {
-    let src = serialize_source(source);
+    let src = source.as_db_str();
     conn.execute(
         "DELETE FROM index_state WHERE source = ?1 AND id = ?2",
         params![src, id],
@@ -109,14 +109,6 @@ pub fn drop_state(conn: &Connection, source: Source, id: &RecordId) -> Result<()
 /// confirm true deletion"). Exposed as a constant so tests can verify the
 /// threshold is honored without re-deriving from the spec.
 pub const STALE_THRESHOLD: u32 = 3;
-
-fn serialize_source(s: Source) -> &'static str {
-    match s {
-        Source::CcNative => "cc-native",
-        Source::CodexNative => "codex-native",
-        Source::Local => "local",
-    }
-}
 
 #[cfg(test)]
 mod tests {
