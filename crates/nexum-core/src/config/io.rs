@@ -69,6 +69,21 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
     })
 }
 
+/// Unconditionally write `cfg` to `path` (TOML pretty-printed). Used by the
+/// `nexum project register` write-back path.
+///
+/// # Errors
+///
+/// Returns `ConfigError::Serialize` if TOML serialization fails;
+/// `ConfigError::Io` if the file cannot be written.
+pub fn save(path: &Path, cfg: &Config) -> Result<(), ConfigError> {
+    let serialized = toml::to_string_pretty(cfg)?;
+    std::fs::write(path, &serialized).map_err(|e| ConfigError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +136,52 @@ mod tests {
         std::fs::write(&path, "not valid toml ][").unwrap();
         let err = load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use crate::config::types::{Config, RuntimeConfig};
+    use tempfile::TempDir;
+
+    #[test]
+    fn save_overwrites_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::seed();
+        save(&path, &cfg).unwrap();
+        cfg.runtime = RuntimeConfig {
+            worker_threads: 4,
+            max_blocking_threads: 8,
+            embed_threads: 2,
+        };
+        save(&path, &cfg).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.runtime.worker_threads, 4);
+    }
+
+    #[test]
+    fn save_round_trips_projects_table() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::seed();
+        let mut entry = toml::Table::new();
+        entry.insert("path".into(), toml::Value::String("/path/to/projx".into()));
+        cfg.projects
+            .insert("projx".into(), toml::Value::Table(entry));
+        save(&path, &cfg).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        let entry_back = back
+            .projects
+            .get("projx")
+            .and_then(|v| v.as_table())
+            .unwrap();
+        assert_eq!(
+            entry_back.get("path").and_then(|v| v.as_str()),
+            Some("/path/to/projx")
+        );
     }
 }
