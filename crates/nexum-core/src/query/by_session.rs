@@ -66,7 +66,8 @@ pub fn by_session(
     let pattern = format!("%{escaped}%");
     let sql = "SELECT records.id, records.record_type, records.title, records.summary, \
                       records.source, records.project_id, records.signature_status, records.updated, \
-                      records.trust_basis, records.warning_code \
+                      records.trust_basis, records.warning_code, \
+                      records.record_commit_sha, records.signer_fingerprint \
                FROM records \
                WHERE session_refs LIKE ?1 ESCAPE '\\' \
                ORDER BY records.updated DESC";
@@ -77,6 +78,8 @@ pub fn by_session(
         // below alongside the unsigned-warning push.
         let basis_db: Option<String> = r.get(8)?;
         let warn_code: Option<String> = r.get(9)?;
+        let record_commit_sha: Option<String> = r.get(10)?;
+        let signer_fingerprint: Option<String> = r.get(11)?;
         Ok(SearchResult {
             id: r.get(0)?,
             record_type: RecordType::from_db_str(&r.get::<_, String>(1)?),
@@ -87,6 +90,8 @@ pub fn by_session(
             project_id: r.get(5)?,
             signature_status: SignatureStatus::from_db_str(&r.get::<_, String>(6)?),
             trust_basis: basis_db.as_deref().map(TrustBasis::from_db_str),
+            record_commit_sha,
+            signer_fingerprint,
             warnings: warn_code
                 .filter(|s| !s.is_empty())
                 .map_or_else(Vec::new, |c| vec![c]),
@@ -115,8 +120,8 @@ pub fn by_session(
     for r in &mut results {
         if r.signature_status == SignatureStatus::Verified {
             // Only fill the verified default when the verifier hasn't
-            // already written a basis (Phase 4 may persist a richer value
-            // such as `historical` or `pre-reanchor`).
+            // already written a basis; future verifier work may persist a
+            // richer value such as `historical` or `pre-reanchor`.
             if r.trust_basis.is_none() {
                 r.trust_basis = Some(TrustBasis::Current);
             }

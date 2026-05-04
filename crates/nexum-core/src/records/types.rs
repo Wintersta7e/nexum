@@ -485,11 +485,10 @@ impl std::fmt::Display for RecordKey {
 
 /// Trust basis (recomputed per query). JSON form is kebab-case.
 ///
-/// Schema scaffolding for the verifier provenance pipeline. Phase 3.5
-/// populates `Current` (for verified records) and `Unsigned` (for records
-/// without a signature on their last-touching commit). The richer
-/// rotation / compromise / reanchor states are computed by the trust
-/// state machine in a later milestone — `Historical` and `PreReanchor`
+/// The verifier populates `Current` (for verified records) and `Unsigned`
+/// (for records without a signature on their last-touching commit). The
+/// richer rotation / compromise / reanchor states are computed by the trust
+/// state machine in future verifier work — `Historical` and `PreReanchor`
 /// reserve their wire shape now so consumers can match against the full
 /// variant set without a future schema bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -498,15 +497,14 @@ pub enum TrustBasis {
     /// Latest commit, signed with the currently-authoritative key.
     Current,
     /// Latest commit, signed with a key that has since been rotated out
-    /// but is still present in `historical_signers` (the §9 redirect).
+    /// but is still present in `historical_signers`.
     Historical,
     /// Commit predates the most recent signer reanchor; verification
     /// must walk the prior signer set.
     PreReanchor,
     /// No signature on this record's last-touching commit.
     Unsigned,
-    /// Phase 3.5 has not yet computed the basis; the verifier milestone
-    /// will populate it.
+    /// The verifier has not yet computed the basis for this record.
     Unknown,
 }
 
@@ -604,11 +602,10 @@ pub enum FileEvidenceKind {
 /// extraction pipeline (a later milestone); the read path leaves them `None`.
 ///
 /// `record_commit_sha`, `signer_fingerprint`, and `warning_code` are
-/// scaffolding for the verifier provenance pipeline. Phase 3.5 populates
-/// them only on the local-adapter `Verified` path; cc / codex leave them
-/// `None` because their content is not notebook-git-tracked. The full
-/// population logic (trust events, rotation states, distinguishing
-/// `Invalid` from `Unsigned`) lands with the verifier milestone.
+/// populated by the verifier only on the local-adapter `Verified` path;
+/// cc / codex adapters leave them `None` because their content is not
+/// git-tracked. The full population logic (trust events, rotation states,
+/// distinguishing `Invalid` from `Unsigned`) lands with future verifier work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     pub source: Source,

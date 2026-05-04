@@ -152,8 +152,7 @@ fn build_record(
     raw: RawRow,
     signature_status: SignatureStatus,
 ) -> Result<UnifiedRecord, QueryError> {
-    // Prefer the persisted `trust_basis` column when present (Phase 3.5
-    // scaffolding for the verifier milestone). Fall back to the
+    // Prefer the persisted `trust_basis` column when present; fall back to the
     // signature-status default for rows written before the column existed
     // or by adapters that don't track basis.
     let trust_basis = raw.trust_basis.as_deref().map(TrustBasis::from_db_str).or(

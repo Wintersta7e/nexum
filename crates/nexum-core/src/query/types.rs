@@ -76,6 +76,16 @@ pub struct SearchResult {
     pub signature_status: SignatureStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_basis: Option<TrustBasis>,
+    /// Git commit SHA of the record's last-touching commit, as recorded by the
+    /// verifier. `None` for adapters that don't track commit provenance or for
+    /// rows written before the column was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_commit_sha: Option<String>,
+    /// Signing key fingerprint used to verify the record's last-touching
+    /// commit. `None` when the record is unsigned or the verifier has not yet
+    /// populated the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Body included only on top-3 in `search`; always in `get`.

@@ -63,7 +63,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         "SELECT records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
                 records.signature_status, records.updated, records.trust_basis, \
-                records.warning_code \
+                records.warning_code, records.record_commit_sha, records.signer_fingerprint \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -92,6 +92,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             updated: row.get(8)?,
             trust_basis: row.get::<_, Option<String>>(9)?,
             warning_code: row.get::<_, Option<String>>(10)?,
+            record_commit_sha: row.get::<_, Option<String>>(11)?,
+            signer_fingerprint: row.get::<_, Option<String>>(12)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -193,6 +195,8 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         project_id: r.project_id,
         signature_status,
         trust_basis,
+        record_commit_sha: r.record_commit_sha,
+        signer_fingerprint: r.signer_fingerprint,
         warnings,
         body,
         updated: r.updated,
@@ -212,6 +216,8 @@ struct FtsRow {
     updated: String,
     trust_basis: Option<String>,
     warning_code: Option<String>,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
 }
 
 /// Build the per-table filter clause + bound params for the SQL pushdown.

@@ -65,7 +65,8 @@ pub fn list(
     let sql = format!(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
                 records.source, records.project_id, records.signature_status, records.updated, \
-                records.trust_basis, records.warning_code \
+                records.trust_basis, records.warning_code, \
+                records.record_commit_sha, records.signer_fingerprint \
          FROM records \
          WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
          ORDER BY records.updated DESC, records.rowid DESC \
@@ -132,6 +133,8 @@ struct ListRow {
     updated: String,
     trust_basis: Option<String>,
     warning_code: Option<String>,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
 }
 
 fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
@@ -147,6 +150,8 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
         updated: r.get(8)?,
         trust_basis: r.get(9)?,
         warning_code: r.get(10)?,
+        record_commit_sha: r.get(11)?,
+        signer_fingerprint: r.get(12)?,
     })
 }
 
@@ -181,6 +186,8 @@ fn row_to_search_result(raw: ListRow) -> SearchResult {
         project_id: raw.project_id,
         signature_status,
         trust_basis,
+        record_commit_sha: raw.record_commit_sha,
+        signer_fingerprint: raw.signer_fingerprint,
         warnings,
         body: None,
         updated: raw.updated,
