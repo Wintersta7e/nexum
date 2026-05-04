@@ -191,4 +191,36 @@ mod tests {
         let back: AdapterPass = serde_json::from_str(&s).unwrap();
         assert_eq!(pass, back);
     }
+
+    #[test]
+    fn pass_completeness_missing_root_round_trips() {
+        let p = PassCompleteness::MissingRoot {
+            path: PathBuf::from("/tmp/missing"),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: PassCompleteness = serde_json::from_str(&s).unwrap();
+        match back {
+            PassCompleteness::MissingRoot { path } => {
+                assert_eq!(path, PathBuf::from("/tmp/missing"));
+            }
+            other => panic!("expected MissingRoot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pass_completeness_unreadable_round_trips() {
+        let p = PassCompleteness::Unreadable {
+            path: PathBuf::from("/tmp/unreadable"),
+            reason: "permission denied".to_string(),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        let back: PassCompleteness = serde_json::from_str(&s).unwrap();
+        match back {
+            PassCompleteness::Unreadable { path, reason } => {
+                assert_eq!(path, PathBuf::from("/tmp/unreadable"));
+                assert_eq!(reason, "permission denied");
+            }
+            other => panic!("expected Unreadable, got {other:?}"),
+        }
+    }
 }

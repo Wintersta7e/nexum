@@ -7,6 +7,7 @@ use common::{NexumTestHome, record_count};
 use nexum_core::{
     adapter::{Adapter, PassCompleteness, codex::CodexAdapter},
     indexer::{db::open_or_create, run::run as indexer_run, state::STALE_THRESHOLD},
+    records::types::Source,
 };
 
 #[test]
@@ -145,8 +146,19 @@ fn missing_root_with_prior_records_does_not_prune() {
 
     let cfg = common::test_cfg_local_only();
     let mut conn = open_or_create(&paths.index_db).unwrap();
-    indexer_run(&mut conn, &cfg, &paths).unwrap();
+    let first_outcome = indexer_run(&mut conn, &cfg, &paths).unwrap();
     assert_eq!(record_count(&paths.index_db), 1, "initial record inserted");
+
+    // First pass must have been authoritative (root existed).
+    let local_first = first_outcome
+        .per_source
+        .iter()
+        .find(|s| s.source == Source::Local)
+        .expect("local source must appear in first outcome");
+    assert_eq!(
+        local_first.completeness, "authoritative",
+        "first pass with existing root must be authoritative"
+    );
 
     // Remove the root entirely. Re-run: must NOT prune the prior record.
     std::fs::remove_dir_all(&nb).unwrap();
@@ -159,6 +171,18 @@ fn missing_root_with_prior_records_does_not_prune() {
         record_count(&paths.index_db),
         1,
         "prior record retained after missing root"
+    );
+
+    // Second pass must report missing_root, not authoritative.
+    let local_second = outcome
+        .unwrap()
+        .per_source
+        .into_iter()
+        .find(|s| s.source == Source::Local)
+        .expect("local source must appear in second outcome");
+    assert_eq!(
+        local_second.completeness, "missing_root",
+        "second pass must report missing_root after root removal"
     );
 
     // Three more missing-root passes must still not prune.
@@ -187,4 +211,18 @@ fn missing_root_with_empty_index_is_no_op() {
         "missing root on empty index must not error"
     );
     assert_eq!(record_count(&paths.index_db), 0, "empty index stays empty");
+
+    // Confirm the adapter saw MissingRoot, not Authoritative-empty. Without
+    // this the test would still pass if the adapter silently fell back to an
+    // authoritative-zero pass.
+    let outcome = outcome.unwrap();
+    let local = outcome
+        .per_source
+        .iter()
+        .find(|s| s.source == Source::Local)
+        .expect("local source must appear in outcome");
+    assert_eq!(
+        local.completeness, "missing_root",
+        "local source must report missing_root, not authoritative"
+    );
 }

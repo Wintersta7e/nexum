@@ -71,6 +71,11 @@ impl Adapter for LocalAdapter {
         // `Unreadable` (also a hard no-op). Any "directory exists but is
         // empty" case continues into the normal walk below and yields
         // `Authoritative` + zero records.
+        //
+        // Note: there is a narrow TOCTOU window between this probe and the walk
+        // below. If the root disappears in that window the walk surfaces an IO
+        // error that propagates as AdapterError::Io, not MissingRoot. Acceptable;
+        // the next pass catches it.
         match fs::metadata(&self.notebook_git) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

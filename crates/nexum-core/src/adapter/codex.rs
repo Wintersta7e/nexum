@@ -213,6 +213,11 @@ impl Adapter for CodexAdapter {
         // sub-files. The primary configured root is `memories_dir`; the
         // `state_db_path` join is best-effort and remains modeled via
         // existing Partial-pass entries when only the DB is missing.
+        //
+        // Note: there is a narrow TOCTOU window between this probe and the walk
+        // below. If the root disappears in that window the walk surfaces an IO
+        // error that propagates as AdapterError::Io, not MissingRoot. Acceptable;
+        // the next pass catches it.
         match fs::metadata(&self.memories_dir) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

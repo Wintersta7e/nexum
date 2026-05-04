@@ -102,6 +102,11 @@ impl Adapter for CcAdapter {
         // prune prior records); other I/O failures surface as `Unreadable`.
         // An existing-but-empty projects_dir falls through to the normal
         // walk below and yields `Authoritative` + zero records.
+        //
+        // Note: there is a narrow TOCTOU window between this probe and the walk
+        // below. If the root disappears in that window the walk surfaces an IO
+        // error that propagates as AdapterError::Io, not MissingRoot. Acceptable;
+        // the next pass catches it.
         match fs::metadata(&self.projects_dir) {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
