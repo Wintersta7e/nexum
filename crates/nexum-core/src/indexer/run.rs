@@ -416,14 +416,19 @@ fn apply_upserts<F>(
 where
     F: Fn(&RecordId) -> Option<UnifiedRecord>,
 {
+    // Build a secondary index keyed by bare `id` so the per-candidate lookup
+    // is O(1) rather than O(N). Cross-project same-id collisions within a
+    // source are not modeled here — last-write-wins on collision, matching the
+    // existing TODO on `candidates` in `apply_pass_inside_tx`.
+    let indexed_by_id: std::collections::HashMap<&str, &(String, String)> = indexed
+        .iter()
+        .map(|((_pid, id), v)| (id.as_str(), v))
+        .collect();
+
     for (id, candidate_content_hash) in candidates {
-        // Look up cached hashes for any indexed row under this source with this
-        // id. Cross-project same-id collisions within a source are not modeled
-        // here — see the note on `candidates`.
-        let cached_hashes = indexed
-            .iter()
-            .find(|((_pid, indexed_id), _)| indexed_id == id)
-            .map(|(_, hashes)| hashes);
+        // Look up cached hashes for any indexed row under this source with
+        // this id.
+        let cached_hashes = indexed_by_id.get(id.as_str()).copied();
         // TODO: every candidate now pays a `read_full` + `compute_index_hash`
         // because the dual-hash skip requires the full record. For corpora that
         // are mostly unchanged between passes this is the dominant per-pass cost.
