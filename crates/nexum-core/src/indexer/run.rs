@@ -46,12 +46,39 @@ impl From<IndexStateError> for IndexerError {
     }
 }
 
+/// Completeness label for a single per-source pass. Mirrors the variants of
+/// the internal `PassCompleteness` enum but is scoped to the per-source
+/// boundary so the JSON wire format stays flat (`snake_case` strings rather than
+/// adjacently-tagged objects).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerSourceCompleteness {
+    Authoritative,
+    Partial,
+    Failed,
+    MissingRoot,
+    Unreadable,
+}
+
+impl std::fmt::Display for PerSourceCompleteness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::Authoritative => "authoritative",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+            Self::MissingRoot => "missing_root",
+            Self::Unreadable => "unreadable",
+        };
+        f.write_str(s)
+    }
+}
+
 /// Per-source slice of the reindex outcome. Surfaces what each adapter
 /// contributed so the CLI can render a structured summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PerSourceOutcome {
     pub source: Source,
-    pub completeness: String,
+    pub completeness: PerSourceCompleteness,
     pub ingested: u32,
     pub upserts: u32,
     pub deletes: u32,
@@ -194,17 +221,16 @@ fn apply_pass<F>(
 where
     F: Fn(&RecordId) -> Option<UnifiedRecord>,
 {
-    let completeness_label = match &pass.completeness {
-        PassCompleteness::Authoritative => "authoritative",
-        PassCompleteness::Partial { .. } => "partial",
-        PassCompleteness::Failed { .. } => "failed",
-        PassCompleteness::MissingRoot { .. } => "missing_root",
-        PassCompleteness::Unreadable { .. } => "unreadable",
-    }
-    .to_owned();
+    let completeness = match &pass.completeness {
+        PassCompleteness::Authoritative => PerSourceCompleteness::Authoritative,
+        PassCompleteness::Partial { .. } => PerSourceCompleteness::Partial,
+        PassCompleteness::Failed { .. } => PerSourceCompleteness::Failed,
+        PassCompleteness::MissingRoot { .. } => PerSourceCompleteness::MissingRoot,
+        PassCompleteness::Unreadable { .. } => PerSourceCompleteness::Unreadable,
+    };
     let mut per_source = PerSourceOutcome {
         source,
-        completeness: completeness_label,
+        completeness,
         ingested: u32::try_from(pass.records.len()).unwrap_or(u32::MAX),
         upserts: 0,
         deletes: 0,

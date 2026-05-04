@@ -156,7 +156,8 @@ fn missing_root_with_prior_records_does_not_prune() {
         .find(|s| s.source == Source::Local)
         .expect("local source must appear in first outcome");
     assert_eq!(
-        local_first.completeness, "authoritative",
+        local_first.completeness,
+        nexum_core::indexer::run::PerSourceCompleteness::Authoritative,
         "first pass with existing root must be authoritative"
     );
 
@@ -181,7 +182,8 @@ fn missing_root_with_prior_records_does_not_prune() {
         .find(|s| s.source == Source::Local)
         .expect("local source must appear in second outcome");
     assert_eq!(
-        local_second.completeness, "missing_root",
+        local_second.completeness,
+        nexum_core::indexer::run::PerSourceCompleteness::MissingRoot,
         "second pass must report missing_root after root removal"
     );
 
@@ -222,7 +224,8 @@ fn missing_root_with_empty_index_is_no_op() {
         .find(|s| s.source == Source::Local)
         .expect("local source must appear in outcome");
     assert_eq!(
-        local.completeness, "missing_root",
+        local.completeness,
+        nexum_core::indexer::run::PerSourceCompleteness::MissingRoot,
         "local source must report missing_root, not authoritative"
     );
 }
