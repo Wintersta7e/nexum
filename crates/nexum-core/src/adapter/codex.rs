@@ -89,7 +89,7 @@ impl CodexAdapter {
                 Ok(r) => {
                     by_rollout.insert(r.rollout_path.clone(), r);
                 }
-                Err(_) => return ThreadIndexResult::Locked,
+                Err(_) => return ThreadIndexResult::Malformed,
             }
         }
         let _ = conn.execute_batch("COMMIT;");
@@ -206,6 +206,7 @@ enum ThreadIndexResult {
     Ok(HashMap<String, ThreadRow>),
     Locked,
     Missing,
+    Malformed,
 }
 
 impl Adapter for CodexAdapter {
@@ -264,6 +265,13 @@ impl Adapter for CodexAdapter {
                     at: Utc::now(),
                 });
             }
+            ThreadIndexResult::Malformed => {
+                skipped.push(SkipReason {
+                    path: self.state_db_path.clone(),
+                    kind: SkipKind::FileMalformed,
+                    at: Utc::now(),
+                });
+            }
             ThreadIndexResult::Missing if !records.is_empty() => {
                 // Records present but state_db absent — the project_id /
                 // SessionRef::CodexThread join can't run; surface as a
@@ -296,7 +304,9 @@ impl Adapter for CodexAdapter {
     fn read(&self, id: &RecordId) -> Result<UnifiedRecord, AdapterError> {
         let thread_index = match self.read_thread_index() {
             ThreadIndexResult::Ok(idx) => idx,
-            ThreadIndexResult::Locked | ThreadIndexResult::Missing => HashMap::new(),
+            ThreadIndexResult::Locked
+            | ThreadIndexResult::Missing
+            | ThreadIndexResult::Malformed => HashMap::new(),
         };
 
         // Try MEMORY.md sections first.
