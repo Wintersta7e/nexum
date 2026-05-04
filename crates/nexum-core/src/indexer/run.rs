@@ -345,6 +345,12 @@ where
             .iter()
             .find(|((_pid, indexed_id), _)| indexed_id == id)
             .map(|(_, hashes)| hashes);
+        // TODO: every candidate now pays a `read_full` + `compute_index_hash`
+        // because the dual-hash skip requires the full record. For corpora that
+        // are mostly unchanged between passes this is the dominant per-pass cost.
+        // Caching `index_hash` alongside `content_hash` on `AdapterPass.records`
+        // would restore the cheap pre-`read_full` skip path; needs adapters to
+        // surface enough state to compute the hash without the full read.
         let Some(record) = read_full(id) else {
             warn!(
                 ?source,
