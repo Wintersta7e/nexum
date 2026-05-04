@@ -256,6 +256,12 @@ where
     // path; Codex: id includes section identity; Local: single-project
     // notebook), and the composite UNIQUE on the records table still
     // prevents silent overwrite at upsert time.
+    //
+    // TODO: when adapters can cheaply surface `project_id` at list time,
+    // key `candidates` by `(project_id, id)` to correctly handle same-id
+    // / different-project records within a single source. Until then a
+    // multi-project local adapter could silently drop one of two
+    // colliding records inside a single pass.
     let candidates: std::collections::HashMap<String, String> = pass
         .records
         .iter()

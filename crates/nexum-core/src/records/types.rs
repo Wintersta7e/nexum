@@ -893,6 +893,8 @@ mod tests {
         assert!(RecordKey::parse_qualified("nope:git:abc:rec").is_none());
         // Empty id segment.
         assert!(RecordKey::parse_qualified("local:git:abc:").is_none());
+        // Empty project_id segment between two colons.
+        assert!(RecordKey::parse_qualified("local::my-record").is_none());
     }
 
     #[test]
