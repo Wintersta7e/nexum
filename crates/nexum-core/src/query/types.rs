@@ -154,14 +154,17 @@ pub struct MetaTrustSummary {
     pub unknown: u32,
 }
 
+/// Tally of returned rows by `trust_basis`. Rows without a basis (unsigned,
+/// invalid, unknown-signer) carry `None` and are NOT counted here; the
+/// `trust_summary` field exposes the per-`SignatureStatus` counts. Wire
+/// shape uses kebab-case keys so the JSON form mirrors the spec value set.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct MetaTrustBasisSummary {
     pub current: u32,
-    pub historical: u32,
-    #[serde(rename = "pre-reanchor")]
+    pub rotated_historical: u32,
+    pub rotated_historical_compromised: u32,
     pub pre_reanchor: u32,
-    pub unsigned: u32,
-    pub unknown: u32,
 }
 
 /// Cursor — opaque base64-encoded `last_rowid`. Currently uses a simple

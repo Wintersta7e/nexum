@@ -56,16 +56,19 @@ pub(crate) fn build_meta(
             SignatureStatus::Invalid => ts.invalid += 1,
             SignatureStatus::Unknown => ts.unknown += 1,
         }
-        // Trust-basis bucketing prefers the persisted column when the
-        // verifier has populated it; for verified rows that pre-date the
-        // column the read projection fills in `Some(Current)` so this
-        // tally still ticks the `current` bucket.
+        // Trust-basis bucketing tallies the four spec-aligned values; rows
+        // without a basis (i.e. unsigned, invalid, or unknown-signer) carry
+        // `None` and do not contribute to the basis summary. The
+        // `signature_status_summary` already exposes the unsigned / invalid /
+        // unknown counts separately.
         match r.trust_basis {
             Some(TrustBasis::Current) => tbs.current += 1,
-            Some(TrustBasis::Historical) => tbs.historical += 1,
+            Some(TrustBasis::RotatedHistorical) => tbs.rotated_historical += 1,
+            Some(TrustBasis::RotatedHistoricalCompromised) => {
+                tbs.rotated_historical_compromised += 1;
+            }
             Some(TrustBasis::PreReanchor) => tbs.pre_reanchor += 1,
-            Some(TrustBasis::Unsigned) => tbs.unsigned += 1,
-            Some(TrustBasis::Unknown) | None => tbs.unknown += 1,
+            None => {}
         }
     }
     if trust_policy == TrustPolicy::WarnButShow && (ts.unsigned + ts.invalid + ts.unknown) > 0 {

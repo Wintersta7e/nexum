@@ -131,8 +131,8 @@ pub struct RecordSummary {
 mod index_hash_tests {
     use super::*;
     use crate::records::types::{
-        Agent, Confidence, FileEvidence, FileEvidenceKind, Outcome, Provenance, RecordType,
-        SessionRef, SignatureStatus, Source, UnifiedRecord,
+        Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome, Provenance,
+        RecordType, SessionRef, SignatureStatus, Source, UnifiedRecord,
     };
     use std::path::PathBuf;
 
@@ -163,12 +163,13 @@ mod index_hash_tests {
             provenance: Provenance {
                 source: Source::Local,
                 signature_status: SignatureStatus::Unsigned,
-                trust_basis: None,
                 extractor: None,
                 digest_hash: None,
                 record_commit_sha: None,
                 signer_fingerprint: None,
-                warning_code: None,
+                crypto_result: CryptoResult::NoSignature,
+                relevant_trust_events_commit: None,
+                warnings: Vec::new(),
             },
             extras: std::collections::HashMap::new(),
             content_hash: ch,

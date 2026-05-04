@@ -555,7 +555,7 @@ impl<'a> UpsertRow<'a> {
             extras_json: serde_json::to_string(&r.extras).expect("serializable record fields"),
             body_origin_path: r.body_origin_path.as_ref().map(|p| p.display().to_string()),
             now: Utc::now().to_rfc3339(),
-            crypto_result: r.provenance.signature_status.as_crypto_result_str(),
+            crypto_result: r.provenance.crypto_result.as_db_str(),
             record_commit_sha: r.provenance.record_commit_sha.as_deref(),
             signer_fingerprint: r.provenance.signer_fingerprint.as_deref(),
         }

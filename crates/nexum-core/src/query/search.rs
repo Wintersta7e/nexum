@@ -3,9 +3,9 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustPolicy};
+use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
 
-use super::resolve_trust_basis;
+use super::{signature_status_for, trust_basis_for};
 
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
 
@@ -82,6 +82,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         params.push(p);
     }
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        let crypto_result = CryptoResult::from_db_str(&row.get::<_, String>(7)?);
         Ok(FtsRow {
             id: row.get(0)?,
             record_type: row.get::<_, String>(1)?,
@@ -90,7 +91,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             body: row.get::<_, String>(4)?,
             source: row.get::<_, String>(5)?,
             project_id: row.get(6)?,
-            signature_status: SignatureStatus::from_crypto_result_str(&row.get::<_, String>(7)?),
+            crypto_result,
             updated: row.get(8)?,
             record_commit_sha: row.get::<_, Option<String>>(9)?,
             signer_fingerprint: row.get::<_, Option<String>>(10)?,
@@ -114,7 +115,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             // ordinal above is the actual ranking signal; the underlying
             // bm25 value is intentionally not surfaced here.
 
-            let is_unsigned = r.signature_status != SignatureStatus::Verified;
+            let is_unsigned = signature_status_for(r.crypto_result) != SignatureStatus::Verified;
             if is_unsigned && !opts.filters.no_unsigned_penalty {
                 score *= opts.unsigned_ranking_penalty;
             }
@@ -125,11 +126,11 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
 
     // require_signed override.
     if opts.filters.require_signed {
-        scored.retain(|(r, _)| r.signature_status == SignatureStatus::Verified);
+        scored.retain(|(r, _)| signature_status_for(r.crypto_result) == SignatureStatus::Verified);
     }
     // hide policy: drop unverified.
     if opts.trust_policy == TrustPolicy::Hide {
-        scored.retain(|(r, _)| r.signature_status == SignatureStatus::Verified);
+        scored.retain(|(r, _)| signature_status_for(r.crypto_result) == SignatureStatus::Verified);
     }
 
     let total = u32::try_from(scored.len()).unwrap_or(u32::MAX);
@@ -167,15 +168,14 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
     } else {
         None
     };
-    // `r.signature_status` is already parsed into the enum at query_map time.
-    // `trust_basis` is no longer persisted as a SQL column; pass `None` so the
-    // resolver derives the basis from `signature_status` (Verified -> Current,
-    // otherwise None). Per-record basis projection lands in a later task.
-    let trust_basis = resolve_trust_basis(None, r.signature_status);
-    let mut warnings: Vec<String> = Vec::new();
-    if r.signature_status != SignatureStatus::Verified {
-        warnings.push("unsigned".into());
-    }
+    let signature_status = signature_status_for(r.crypto_result);
+    // Bootstrap-only basis projection: `Good` -> `Some(Current)`, everything
+    // else -> `None`. The full read-time projection (consulting trust_events)
+    // lands later.
+    let trust_basis = trust_basis_for(r.crypto_result);
+    // Read-time warnings are populated by the verifier projection in a later
+    // task; for now we surface an empty vec.
+    let warnings: Vec<String> = Vec::new();
     SearchResult {
         id: r.id,
         record_type: RecordType::from_db_str(&r.record_type),
@@ -184,7 +184,7 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         score,
         source: Source::from_db_str(&r.source),
         project_id: r.project_id,
-        signature_status: r.signature_status,
+        signature_status,
         trust_basis,
         record_commit_sha: r.record_commit_sha,
         signer_fingerprint: r.signer_fingerprint,
@@ -203,7 +203,10 @@ struct FtsRow {
     body: String,
     source: String,
     project_id: String,
-    signature_status: SignatureStatus,
+    /// Cached `git verify-commit` outcome read straight from
+    /// `records.crypto_result`. Both `signature_status` and `trust_basis`
+    /// are projected from this value at row materialization time.
+    crypto_result: CryptoResult,
     updated: String,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,

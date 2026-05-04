@@ -11,11 +11,11 @@ use rusqlite::{Connection, Row, ToSql};
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    Agent, Confidence, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey, RecordType,
-    SessionRef, SignatureStatus, Source, TrustPolicy, UnifiedRecord,
+    Agent, Confidence, CryptoResult, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey,
+    RecordType, SessionRef, SignatureStatus, Source, TrustPolicy, UnifiedRecord,
 };
 
-use super::{resolve_trust_basis, types::QueryError};
+use super::{signature_status_for, types::QueryError};
 
 /// `get` options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,14 +69,15 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     }
     // Exactly one candidate — apply hide-policy then materialize.
     let raw = candidates.swap_remove(0);
-    let signature_status = SignatureStatus::from_crypto_result_str(&raw.crypto_result);
+    let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
+    let signature_status = signature_status_for(crypto_result);
     if opts.trust_policy == TrustPolicy::Hide
         && !opts.include_unsigned
         && signature_status != SignatureStatus::Verified
     {
         return Ok(GetOutcome::HiddenByPolicy { signature_status });
     }
-    build_record(raw, signature_status).map(|r| GetOutcome::Found(Box::new(r)))
+    build_record(raw, crypto_result, signature_status).map(|r| GetOutcome::Found(Box::new(r)))
 }
 
 /// Run the appropriate `SELECT` for the key shape and collect the rows.
@@ -147,12 +148,9 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
 
 fn build_record(
     raw: RawRow,
+    crypto_result: CryptoResult,
     signature_status: SignatureStatus,
 ) -> Result<UnifiedRecord, QueryError> {
-    // `trust_basis` is no longer persisted as a SQL column; pass `None` so the
-    // resolver derives the basis from `signature_status` (Verified -> Current,
-    // otherwise None). Per-record basis projection lands in a later task.
-    let trust_basis = resolve_trust_basis(None, signature_status);
     let extras: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(raw.extras.as_deref().unwrap_or("{}"))?;
     let tags: Vec<String> = serde_json::from_str(&raw.tags)?;
@@ -203,12 +201,15 @@ fn build_record(
         provenance: Provenance {
             source,
             signature_status,
-            trust_basis,
             extractor: None,
             digest_hash: None,
             record_commit_sha: raw.record_commit_sha,
             signer_fingerprint: raw.signer_fingerprint,
-            warning_code: None,
+            crypto_result,
+            // Populated by the read-time verifier projection in a later task.
+            relevant_trust_events_commit: None,
+            // Populated by the read-time verifier projection in a later task.
+            warnings: Vec::new(),
         },
         extras,
         content_hash: raw.content_hash,

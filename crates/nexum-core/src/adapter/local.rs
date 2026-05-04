@@ -23,9 +23,9 @@ use crate::{
     },
     init::git_ops::git_verify_commit_with_signers_and_details,
     records::{
-        Agent, Confidence, FileEvidence, FileEvidenceKind, Outcome, ProjectId, Provenance,
-        RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source, TrustBasis,
-        UnifiedRecord, WARNING_VERIFIER_REJECTED, content_hash,
+        Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome, ProjectId,
+        Provenance, RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source,
+        UnifiedRecord, content_hash,
     },
 };
 
@@ -246,12 +246,13 @@ fn parse_local_record(
         provenance: Provenance {
             source: Source::Local,
             signature_status: verification.status,
-            trust_basis: verification.trust_basis,
             extractor: None,
             digest_hash: None,
             record_commit_sha: verification.record_commit_sha,
             signer_fingerprint: verification.signer_fingerprint,
-            warning_code: verification.warning_code,
+            crypto_result: verification.crypto_result,
+            relevant_trust_events_commit: None,
+            warnings: Vec::new(),
         },
         extras: HashMap::new(),
         content_hash: hash,
@@ -322,16 +323,15 @@ fn decode_files(raw: Vec<serde_yaml::Value>) -> Vec<FileEvidence> {
 }
 
 /// Verifier provenance for one record, populated by
-/// [`compute_signature_status`]. Schema scaffolding for the verifier
-/// pipeline; the next milestone may extend this with rotation /
-/// reanchor signals.
+/// [`compute_signature_status`]. The cached crypto outcome flows through
+/// `CryptoResult`; the read-time projection joins it with the trust-events
+/// view to derive the final `signature_status` / `trust_basis` / `warnings`.
 #[derive(Debug, Clone)]
 struct VerificationResult {
     status: SignatureStatus,
-    trust_basis: Option<TrustBasis>,
+    crypto_result: CryptoResult,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
-    warning_code: Option<String>,
 }
 
 impl VerificationResult {
@@ -342,10 +342,9 @@ impl VerificationResult {
     fn unevaluable() -> Self {
         Self {
             status: SignatureStatus::Unsigned,
-            trust_basis: None,
+            crypto_result: CryptoResult::NoSignature,
             record_commit_sha: None,
             signer_fingerprint: None,
-            warning_code: None,
         }
     }
 }
@@ -375,33 +374,28 @@ fn compute_signature_status(notebook_git: &Path, record_path: &Path) -> Verifica
         // recompute against a freshly-materialized signer view.
         return VerificationResult {
             status: SignatureStatus::Unsigned,
-            trust_basis: Some(TrustBasis::Unsigned),
+            crypto_result: CryptoResult::NoSignature,
             record_commit_sha: Some(sha),
             signer_fingerprint: None,
-            warning_code: None,
         };
     }
     match git_verify_commit_with_signers_and_details(notebook_git, &sha, &historical_signers) {
         Ok(details) => VerificationResult {
             status: SignatureStatus::Verified,
-            trust_basis: Some(TrustBasis::Current),
+            crypto_result: CryptoResult::Good,
             record_commit_sha: Some(sha),
             signer_fingerprint: details.signer_fingerprint,
-            warning_code: None,
         },
         Err(_) => {
-            // The verifier rejected the commit. The current minimum
-            // mapping still collapses this to `Unsigned`; the verifier
-            // milestone promotes `Invalid` as a distinct status with a
-            // richer diagnostic. Emit `warning_code = "verifier-rejected"`
-            // so consumers can already distinguish "no signature was
-            // attempted" from "a signature failed verification".
+            // The verifier rejected the commit. The cached crypto outcome
+            // is `BadSignature`; a later verifier task distinguishes
+            // `BadSignature` from `UnknownSigner` via the captured stderr
+            // from the verify shell-out.
             VerificationResult {
-                status: SignatureStatus::Unsigned,
-                trust_basis: None,
+                status: SignatureStatus::Invalid,
+                crypto_result: CryptoResult::BadSignature,
                 record_commit_sha: Some(sha),
                 signer_fingerprint: None,
-                warning_code: Some(WARNING_VERIFIER_REJECTED.into()),
             }
         }
     }

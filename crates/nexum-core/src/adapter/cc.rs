@@ -25,8 +25,8 @@ use crate::{
     },
     project::{ProjectInput, ProjectResolution, resolve::resolve as resolve_project},
     records::{
-        Agent, Confidence, Outcome, ProjectId, Provenance, RecordId, RecordSummary, RecordType,
-        SessionRef, SignatureStatus, Source, UnifiedRecord, content_hash,
+        Agent, Confidence, CryptoResult, Outcome, ProjectId, Provenance, RecordId, RecordSummary,
+        RecordType, SessionRef, SignatureStatus, Source, UnifiedRecord, content_hash,
     },
 };
 
@@ -302,12 +302,13 @@ fn parse_per_topic_file(slug: &str, path: &Path, max_age_years: u32) -> ParseOut
         provenance: Provenance {
             source: Source::CcNative,
             signature_status: SignatureStatus::Unsigned,
-            trust_basis: None,
             extractor: None,
             digest_hash: None,
             record_commit_sha: None,
             signer_fingerprint: None,
-            warning_code: None,
+            crypto_result: CryptoResult::NoSignature,
+            relevant_trust_events_commit: None,
+            warnings: Vec::new(),
         },
         extras,
         content_hash: hash,

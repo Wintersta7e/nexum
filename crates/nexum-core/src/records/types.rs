@@ -303,10 +303,11 @@ pub enum SignatureStatus {
 
 impl SignatureStatus {
     /// Short string for the in-memory representation; mirrors the JSON form
-    /// that adapters / wire-format consumers expect (verified/unsigned/invalid/
-    /// unknown). Distinct from [`as_crypto_result_str`], which encodes the
-    /// status into the four `git verify-commit` exit-code states stored in
-    /// the `records.crypto_result` SQL column.
+    /// that adapters / wire-format consumers expect (verified / unsigned /
+    /// invalid / unknown). The `records.signature_status` SQL column was
+    /// dropped; this helper drives the API / wire path only — the read-time
+    /// projection derives `SignatureStatus` from the cached `crypto_result`
+    /// column via [`crate::query::signature_status_for`].
     #[must_use]
     pub fn as_db_str(self) -> &'static str {
         match self {
@@ -321,40 +322,13 @@ impl SignatureStatus {
     /// Falls through to `Unsigned` for unrecognized values (the safest default —
     /// downstream policy treats unknown trust as untrusted).
     // Forward-compat: kept available for future JSON-form parse paths even
-    // though the current SQL boundary uses `from_crypto_result_str` instead.
+    // though the current read path projects from `crypto_result` instead.
     #[allow(dead_code)]
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "verified" => SignatureStatus::Verified,
             "invalid" => SignatureStatus::Invalid,
             "unknown" => SignatureStatus::Unknown,
-            _ => SignatureStatus::Unsigned,
-        }
-    }
-
-    /// Encode the status into the four-valued `crypto_result` SQL column
-    /// (`good` / `bad-signature` / `unknown-signer` / `no-signature`), which
-    /// mirrors the `git verify-commit` exit-code taxonomy. Used at the
-    /// indexer-write boundary; the read path uses
-    /// [`from_crypto_result_str`].
-    #[must_use]
-    pub fn as_crypto_result_str(self) -> &'static str {
-        match self {
-            SignatureStatus::Verified => "good",
-            SignatureStatus::Invalid => "bad-signature",
-            SignatureStatus::Unknown => "unknown-signer",
-            SignatureStatus::Unsigned => "no-signature",
-        }
-    }
-
-    /// Inverse of [`as_crypto_result_str`]: parse from the SQL column form.
-    /// Falls through to `Unsigned` for unrecognized values (no-signature is
-    /// the safest default).
-    pub(crate) fn from_crypto_result_str(s: &str) -> Self {
-        match s {
-            "good" => SignatureStatus::Verified,
-            "bad-signature" => SignatureStatus::Invalid,
-            "unknown-signer" => SignatureStatus::Unknown,
             _ => SignatureStatus::Unsigned,
         }
     }
@@ -380,10 +354,61 @@ impl std::fmt::Display for SignatureStatus {
     }
 }
 
+/// Cached `git verify-commit` outcome per record. Maps 1:1 to the
+/// G / B / U / N exit-code semantics, plus a "no commit at all" sentinel
+/// for records that aren't in `notebook.git` (cc-native, codex-native).
+///
+/// The verify shell-out runs at index time and the result is invariant
+/// per commit (commits are immutable). The read-time projection joins
+/// this with the `trust_events` view to produce the API's
+/// `signature_status` + `trust_basis` + `warnings`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CryptoResult {
+    /// `git verify-commit` returned exit 0 (G); signer found in
+    /// `historical_signers`.
+    Good,
+    /// `git verify-commit` returned exit non-zero with `B` status
+    /// (signature invalid).
+    BadSignature,
+    /// `git verify-commit` returned exit non-zero with `U` status
+    /// (signer unknown).
+    UnknownSigner,
+    /// No signature on the commit, or no commit at all (cc-native /
+    /// codex-native records).
+    NoSignature,
+}
+
+impl CryptoResult {
+    /// Short string used in the `records.crypto_result` SQL column. Matches
+    /// the JSON wire form (kebab-case).
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            CryptoResult::Good => "good",
+            CryptoResult::BadSignature => "bad-signature",
+            CryptoResult::UnknownSigner => "unknown-signer",
+            CryptoResult::NoSignature => "no-signature",
+        }
+    }
+
+    /// Inverse of [`as_db_str`]: parse from the SQL column form. Falls
+    /// through to `NoSignature` for unrecognized values (the safest
+    /// default — downstream policy treats unknown trust as untrusted).
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "good" => CryptoResult::Good,
+            "bad-signature" => CryptoResult::BadSignature,
+            "unknown-signer" => CryptoResult::UnknownSigner,
+            _ => CryptoResult::NoSignature,
+        }
+    }
+}
+
 /// Trust policy applied to unsigned records. JSON / TOML form is kebab-case.
 ///
-/// Serializes as `"warn-but-show"` / `"hide"` so the wire shape and
-/// `config.toml` representation are identical (no extra wrapping object).
+/// Serializes as `"warn-but-show"` / `"hide"` / `"show-silent"` so the wire
+/// shape and `config.toml` representation are identical (no extra wrapping
+/// object).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
 )]
@@ -394,6 +419,10 @@ pub enum TrustPolicy {
     WarnButShow,
     /// Drop unsigned records from results entirely.
     Hide,
+    /// Surface unsigned records WITHOUT warnings or ranking penalty.
+    /// Pre-verifier read behavior; not recommended for production but
+    /// retained for compatibility / debugging.
+    ShowSilent,
 }
 
 impl TrustPolicy {
@@ -402,6 +431,7 @@ impl TrustPolicy {
         match self {
             TrustPolicy::WarnButShow => "warn-but-show",
             TrustPolicy::Hide => "hide",
+            TrustPolicy::ShowSilent => "show-silent",
         }
     }
 
@@ -412,6 +442,7 @@ impl TrustPolicy {
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "hide" => TrustPolicy::Hide,
+            "show-silent" => TrustPolicy::ShowSilent,
             _ => TrustPolicy::WarnButShow,
         }
     }
@@ -423,6 +454,7 @@ impl TrustPolicy {
         match s {
             "warn-but-show" => Some(TrustPolicy::WarnButShow),
             "hide" => Some(TrustPolicy::Hide),
+            "show-silent" => Some(TrustPolicy::ShowSilent),
             _ => None,
         }
     }
@@ -518,62 +550,54 @@ impl std::fmt::Display for RecordKey {
     }
 }
 
-/// Warning code set on a record when the local adapter finds a signed commit
-/// whose signature does not verify against `historical_signers`. The string
-/// value is stable across versions; consumers can match it at compile time via
-/// this constant.
-pub const WARNING_VERIFIER_REJECTED: &str = "verifier-rejected";
-
-/// Trust basis (recomputed per query). JSON form is kebab-case.
-///
-/// The verifier populates `Current` (for verified records) and `Unsigned`
-/// (for records without a signature on their last-touching commit). The
-/// richer rotation / compromise / reanchor states are computed by the trust
-/// state machine in future verifier work — `Historical` and `PreReanchor`
-/// reserve their wire shape now so consumers can match against the full
-/// variant set without a future schema bump.
+/// Final trust-state interpretation. Derived on read by the verifier
+/// projection; never cached. The four values are the exact spec value set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustBasis {
-    /// Latest commit, signed with the currently-authoritative key.
+    /// Signed by a key still trusted at the current head of `events.yml`.
     Current,
-    /// Latest commit, signed with a key that has since been rotated out
-    /// but is still present in `historical_signers`.
-    Historical,
-    /// Commit predates the most recent signer reanchor; verification
-    /// must walk the prior signer set.
+    /// Signed by a key that was Trusted at signing topo position but has
+    /// since been routinely rotated out (`KeyRotatedOut` event with no
+    /// compromise marker).
+    RotatedHistorical,
+    /// Signed by a key that has a later `KeyCompromised` event. Default
+    /// policy returns the record as Verified; `--strict-revocation`
+    /// flips to Invalid.
+    RotatedHistoricalCompromised,
+    /// Signed by a key trusted in the pre-reanchor chain. Pin-intact case
+    /// surfaces as Verified; pin-lost case surfaces as Invalid.
     PreReanchor,
-    /// No signature on this record's last-touching commit.
-    Unsigned,
-    /// The verifier has not yet computed the basis for this record.
-    Unknown,
 }
 
 impl TrustBasis {
     /// Short string for the in-memory / JSON wire form of trust basis.
-    /// The `records.trust_basis` SQL column was dropped; this helper now
-    /// serves the API/wire path only.
+    /// The `records.trust_basis` SQL column was dropped; this helper
+    /// serves the API / wire path only.
     #[must_use]
     pub fn as_db_str(self) -> &'static str {
         match self {
             TrustBasis::Current => "current",
-            TrustBasis::Historical => "historical",
+            TrustBasis::RotatedHistorical => "rotated-historical",
+            TrustBasis::RotatedHistoricalCompromised => "rotated-historical-compromised",
             TrustBasis::PreReanchor => "pre-reanchor",
-            TrustBasis::Unsigned => "unsigned",
-            TrustBasis::Unknown => "unknown",
         }
     }
 
     /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
-    /// Falls through to `Unknown` for unrecognized values (forward-compatible
-    /// with future variants written by a newer writer).
+    /// Falls through to `Current` for unrecognized values; defensive default
+    /// — production writers only emit the four known forms.
+    // Forward-compat: not currently called by production code (the
+    // `records.trust_basis` column was dropped; basis is derived on read from
+    // `crypto_result`). Retained for future round-trip use and exercised by
+    // the `trust_basis_aligned_with_spec_four_values` test.
+    #[allow(dead_code)]
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
-            "current" => TrustBasis::Current,
-            "historical" => TrustBasis::Historical,
+            "rotated-historical" => TrustBasis::RotatedHistorical,
+            "rotated-historical-compromised" => TrustBasis::RotatedHistoricalCompromised,
             "pre-reanchor" => TrustBasis::PreReanchor,
-            "unsigned" => TrustBasis::Unsigned,
-            _ => TrustBasis::Unknown,
+            _ => TrustBasis::Current,
         }
     }
 
@@ -584,10 +608,9 @@ impl TrustBasis {
     pub fn try_from_user_str(s: &str) -> Option<Self> {
         match s {
             "current" => Some(TrustBasis::Current),
-            "historical" => Some(TrustBasis::Historical),
+            "rotated-historical" => Some(TrustBasis::RotatedHistorical),
+            "rotated-historical-compromised" => Some(TrustBasis::RotatedHistoricalCompromised),
             "pre-reanchor" => Some(TrustBasis::PreReanchor),
-            "unsigned" => Some(TrustBasis::Unsigned),
-            "unknown" => Some(TrustBasis::Unknown),
             _ => None,
         }
     }
@@ -644,17 +667,19 @@ pub enum FileEvidenceKind {
 /// Provenance struct. `extractor` and `digest_hash` are populated by the
 /// extraction pipeline (a later milestone); the read path leaves them `None`.
 ///
-/// `record_commit_sha`, `signer_fingerprint`, and `warning_code` are
-/// populated by the verifier only on the local-adapter `Verified` path;
-/// cc / codex adapters leave them `None` because their content is not
-/// git-tracked. The full population logic (trust events, rotation states,
-/// distinguishing `Invalid` from `Unsigned`) lands with future verifier work.
+/// `record_commit_sha`, `signer_fingerprint`, `crypto_result`, and
+/// `relevant_trust_events_commit` are populated by the verifier only on the
+/// local-adapter signed path; cc / codex adapters set
+/// `crypto_result = NoSignature` and leave the others `None`. The full
+/// population logic (trust events, rotation states, distinguishing `Invalid`
+/// from `Unsigned`) lands with future verifier work.
+///
+/// `signature_status` and `warnings` are derived on read by the verifier
+/// projection — they are NOT cached as columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     pub source: Source,
     pub signature_status: SignatureStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trust_basis: Option<TrustBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extractor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -672,12 +697,20 @@ pub struct Provenance {
     /// signed records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_fingerprint: Option<String>,
-    /// Diagnostic flag from the verifier — currently only
-    /// `"verifier-rejected"` when the local adapter sees a signed commit
-    /// whose signature does not verify against
-    /// `historical_signers`. `None` on the happy path.
+    /// Cached `git verify-commit` outcome. Set at indexing time by the
+    /// crypto batcher. Persisted in the `records.crypto_result` column.
+    pub crypto_result: CryptoResult,
+    /// SHA of the `.trust/events.yml` commit effective at this record's
+    /// commit time. Used by the read-time verifier projection to look up
+    /// trust state. Only set for local records; cc-native / codex-native
+    /// records leave NULL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub warning_code: Option<String>,
+    pub relevant_trust_events_commit: Option<String>,
+    /// Read-time-populated warning codes per the warning taxonomy. Empty
+    /// for fully verified records. Persisted as empty vec; the read-time
+    /// projection populates on its way out to API consumers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Unified in-memory record. Every adapter normalizes its on-disk shape to
@@ -720,7 +753,11 @@ mod tests {
 
     #[test]
     fn trust_policy_round_trip_db_str() {
-        for variant in [TrustPolicy::WarnButShow, TrustPolicy::Hide] {
+        for variant in [
+            TrustPolicy::WarnButShow,
+            TrustPolicy::Hide,
+            TrustPolicy::ShowSilent,
+        ] {
             let s = variant.as_db_str();
             let back = TrustPolicy::from_db_str(s);
             assert_eq!(variant, back, "round-trip via {s}");
@@ -736,6 +773,10 @@ mod tests {
         assert_eq!(
             TrustPolicy::try_from_user_str("hide"),
             Some(TrustPolicy::Hide)
+        );
+        assert_eq!(
+            TrustPolicy::try_from_user_str("show-silent"),
+            Some(TrustPolicy::ShowSilent)
         );
     }
 
@@ -795,12 +836,13 @@ mod tests {
             provenance: Provenance {
                 source: Source::Local,
                 signature_status: SignatureStatus::Verified,
-                trust_basis: Some(TrustBasis::Current),
                 extractor: None,
                 digest_hash: None,
                 record_commit_sha: None,
                 signer_fingerprint: None,
-                warning_code: None,
+                crypto_result: CryptoResult::Good,
+                relevant_trust_events_commit: None,
+                warnings: Vec::new(),
             },
             extras: HashMap::new(),
             content_hash: "ec22deadbeef".into(),
@@ -1044,13 +1086,12 @@ mod tests {
     }
 
     #[test]
-    fn trust_basis_round_trip_db_str() {
+    fn trust_basis_aligned_with_spec_four_values() {
         for variant in [
             TrustBasis::Current,
-            TrustBasis::Historical,
+            TrustBasis::RotatedHistorical,
+            TrustBasis::RotatedHistoricalCompromised,
             TrustBasis::PreReanchor,
-            TrustBasis::Unsigned,
-            TrustBasis::Unknown,
         ] {
             assert_eq!(
                 TrustBasis::from_db_str(variant.as_db_str()),
@@ -1062,26 +1103,29 @@ mod tests {
     }
 
     #[test]
+    fn trust_basis_rejects_dropped_values_via_user_str() {
+        assert_eq!(TrustBasis::try_from_user_str("historical"), None);
+        assert_eq!(TrustBasis::try_from_user_str("unsigned"), None);
+        assert_eq!(TrustBasis::try_from_user_str("unknown"), None);
+    }
+
+    #[test]
     fn trust_basis_user_str_canonical_and_unknown() {
         assert_eq!(
             TrustBasis::try_from_user_str("current"),
             Some(TrustBasis::Current)
         );
         assert_eq!(
-            TrustBasis::try_from_user_str("historical"),
-            Some(TrustBasis::Historical)
+            TrustBasis::try_from_user_str("rotated-historical"),
+            Some(TrustBasis::RotatedHistorical)
+        );
+        assert_eq!(
+            TrustBasis::try_from_user_str("rotated-historical-compromised"),
+            Some(TrustBasis::RotatedHistoricalCompromised)
         );
         assert_eq!(
             TrustBasis::try_from_user_str("pre-reanchor"),
             Some(TrustBasis::PreReanchor)
-        );
-        assert_eq!(
-            TrustBasis::try_from_user_str("unsigned"),
-            Some(TrustBasis::Unsigned)
-        );
-        assert_eq!(
-            TrustBasis::try_from_user_str("unknown"),
-            Some(TrustBasis::Unknown)
         );
         assert_eq!(TrustBasis::try_from_user_str("garbage"), None);
         assert_eq!(TrustBasis::try_from_user_str(""), None);
@@ -1090,14 +1134,27 @@ mod tests {
     #[test]
     fn trust_basis_serializes_kebab_case() {
         // The wire form (JSON / TOML) uses kebab-case via serde; the
-        // db form mirrors it. PreReanchor is the worst-case rename.
+        // db form mirrors it. PreReanchor and the compromised variant
+        // are the worst-case renames.
         assert_eq!(
             serde_json::to_string(&TrustBasis::PreReanchor).unwrap(),
             "\"pre-reanchor\""
         );
         assert_eq!(
-            serde_json::to_string(&TrustBasis::Unsigned).unwrap(),
-            "\"unsigned\""
+            serde_json::to_string(&TrustBasis::RotatedHistoricalCompromised).unwrap(),
+            "\"rotated-historical-compromised\""
         );
+    }
+
+    #[test]
+    fn crypto_result_round_trips_db_str() {
+        for variant in [
+            CryptoResult::Good,
+            CryptoResult::BadSignature,
+            CryptoResult::UnknownSigner,
+            CryptoResult::NoSignature,
+        ] {
+            assert_eq!(CryptoResult::from_db_str(variant.as_db_str()), variant);
+        }
     }
 }
