@@ -85,7 +85,7 @@ pub fn list(
                 r.get::<_, String>(8)?,
             ))
         })?
-        .flatten();
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut accumulated: Vec<(i64, SearchResult)> = Vec::new();
     for (rowid, id, rt, title, summary, source, project_id, sig, updated) in rows {

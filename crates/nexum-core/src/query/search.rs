@@ -91,7 +91,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             updated: row.get(8)?,
         })
     })?;
-    let fts_rows: Vec<FtsRow> = rows.flatten().collect();
+    let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
 
     // Reciprocal-rank-fusion-style score over a single branch:
     //   score(r) = 1 / (k + rank)

@@ -86,7 +86,7 @@ pub fn by_session(
             updated: r.get(7)?,
         })
     })?;
-    let mut results: Vec<SearchResult> = rows.flatten().collect();
+    let mut results: Vec<SearchResult> = rows.collect::<Result<Vec<_>, _>>()?;
 
     // Empty-result fast path: skip the trust-basis loop and any further
     // bookkeeping. Returning a fresh `ResultSet` is also more honest — an

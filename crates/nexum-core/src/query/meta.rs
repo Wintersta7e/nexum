@@ -35,7 +35,7 @@ pub(crate) fn build_meta(
     let mut source_counts = MetaSourceCounts::default();
     let mut stmt = conn.prepare("SELECT source, count(*) FROM records GROUP BY source")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-    for row in rows.flatten() {
+    for row in rows.collect::<Result<Vec<_>, _>>()? {
         let (source, count) = row;
         let saturated = u32::try_from(count).unwrap_or(u32::MAX);
         match source.as_str() {

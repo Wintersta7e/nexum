@@ -186,7 +186,9 @@ pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
         })
         .map_err(crate::query::QueryError::from)?;
     let summaries: Vec<ProjectSummary> = rows
-        .flatten()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::query::QueryError::from)?
+        .into_iter()
         .map(|(pid, count, signed)| ProjectSummary {
             identity_kind: identity_kind_for(&pid).to_owned(),
             project_id: pid,

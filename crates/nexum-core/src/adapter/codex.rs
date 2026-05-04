@@ -84,8 +84,13 @@ impl CodexAdapter {
         }) else {
             return ThreadIndexResult::Locked;
         };
-        for r in rows.flatten() {
-            by_rollout.insert(r.rollout_path.clone(), r);
+        for r in rows {
+            match r {
+                Ok(r) => {
+                    by_rollout.insert(r.rollout_path.clone(), r);
+                }
+                Err(_) => return ThreadIndexResult::Locked,
+            }
         }
         let _ = conn.execute_batch("COMMIT;");
         ThreadIndexResult::Ok(by_rollout)
