@@ -18,6 +18,9 @@ path = "src/main.rs"
 [dependencies]
 nexum-core = { path = "../nexum-core" }
 clap = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

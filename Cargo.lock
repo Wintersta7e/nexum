@@ -1393,8 +1393,11 @@ version = "0.0.0-dev"
 dependencies = [
  "clap",
  "nexum-core",
+ "serde_json",
  "ssh-key",
  "tempfile",
+ "toml",
+ "uuid",
 ]
 
 [[package]]
@@ -1419,6 +1422,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

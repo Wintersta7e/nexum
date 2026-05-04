@@ -3,49 +3,16 @@
 //! Invokes the compiled binary as a subprocess against a temp HOME.
 //! Requires a `git` binary in PATH (standard on all dev machines).
 
-use ssh_key::{Algorithm, PrivateKey};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+mod common;
+
+use std::process::Command;
 use tempfile::TempDir;
-
-fn nexum_bin() -> PathBuf {
-    // Built by `cargo test --package nexum-cli --locked`.
-    // The test binary is at target/debug/deps/init_cli-<hash>,
-    // so we walk up to target/debug/ and find nexum there.
-    let mut p = std::env::current_exe().expect("current_exe");
-    // Walk up: deps/ -> debug/
-    while p.pop() {
-        if p.file_name().is_some_and(|f| f == "debug") {
-            return p.join("nexum");
-        }
-    }
-    panic!("could not find target/debug from test binary")
-}
-
-fn write_ephemeral_keypair(dir: &Path) -> PathBuf {
-    use ssh_key::rand_core::OsRng;
-    let private = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-    let priv_pem = private.to_openssh(ssh_key::LineEnding::LF).unwrap();
-    let pub_line = private.public_key().to_openssh().unwrap();
-    let priv_path = dir.join("id_ed25519");
-    let pub_path = dir.join("id_ed25519.pub");
-    std::fs::write(&priv_path, priv_pem.as_bytes()).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-    std::fs::write(&pub_path, pub_line).unwrap();
-    priv_path
-}
 
 fn run_init(home: &TempDir, extra_args: &[&str]) -> std::process::Output {
     let key_dir = tempfile::tempdir().unwrap();
-    let priv_path = write_ephemeral_keypair(key_dir.path());
+    let priv_path = common::write_ephemeral_keypair(key_dir.path());
     let root = home.path().join(".nexum");
-    Command::new(nexum_bin())
+    Command::new(common::nexum_bin())
         .args(["init", "--ssh-key"])
         .arg(&priv_path)
         .args(["--root"])
@@ -85,9 +52,9 @@ fn cli_init_already_exists_exits_nonzero() {
 
     // Second init without --force.
     let key_dir = tempfile::tempdir().unwrap();
-    let priv_path = write_ephemeral_keypair(key_dir.path());
+    let priv_path = common::write_ephemeral_keypair(key_dir.path());
     let root = home.path().join(".nexum");
-    let out = Command::new(nexum_bin())
+    let out = Command::new(common::nexum_bin())
         .args(["init", "--ssh-key"])
         .arg(&priv_path)
         .args(["--root"])

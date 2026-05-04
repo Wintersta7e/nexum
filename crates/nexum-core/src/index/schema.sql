@@ -3,13 +3,13 @@
 
 CREATE TABLE records (
     rowid INTEGER PRIMARY KEY,
-    id TEXT NOT NULL UNIQUE,
+    id TEXT NOT NULL,
     source TEXT NOT NULL,
-    project_id TEXT,
+    project_id TEXT NOT NULL,
     record_type TEXT NOT NULL,
     title TEXT NOT NULL,
     summary TEXT,
-    body TEXT,
+    body TEXT NOT NULL,
     body_origin_path TEXT,
     tags JSON NOT NULL,
     tags_fts TEXT NOT NULL,
@@ -22,12 +22,15 @@ CREATE TABLE records (
     created TEXT NOT NULL,
     updated TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    index_hash TEXT NOT NULL,
     signature_status TEXT NOT NULL,
     extras JSON,
-    indexed_at TEXT NOT NULL
+    indexed_at TEXT NOT NULL,
+    UNIQUE (source, project_id, id)
 );
 
-CREATE UNIQUE INDEX idx_records_id ON records(id);
+CREATE INDEX idx_records_identity ON records(source, project_id, id);
+CREATE INDEX idx_records_id ON records(id);
 CREATE INDEX idx_records_project ON records(project_id);
 CREATE INDEX idx_records_type ON records(record_type);
 CREATE INDEX idx_records_source ON records(source);

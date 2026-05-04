@@ -1,21 +1,25 @@
-//! CC cwd-slug decoding per §5 (best-effort).
+//! CC cwd-slug decoding (best-effort).
 //!
 //! Real CC stores encode the original cwd as `<dir>` where `<dir>` is the cwd's
 //! absolute path with `/` substituted to `-`. The leading `/` becomes the
 //! leading `-`. Example:
 //!
-//!     cwd `/home/user/projects/foo` → slug `-home-user-projects-foo`
+//! ```text
+//! cwd `/home/user/projects/foo` -> slug `-home-user-projects-foo`
+//! ```
 //!
 //! Decoding is **lossy**: every `/` in the original path becomes `-` in the
 //! slug, but `-` characters that exist in path components also become `-` in
 //! the slug. Two paths with the same character sequence after substitution are
 //! indistinguishable from the slug.
 //!
-//!     slug `-home-user-my-project` could mean:
-//!         /home/user/my-project       (1 inner hyphenated component)
-//!         /home/user/my/project       (3 single-word components)
-//!         /home/user/my-project/      (trailing sep — equivalent after canon)
-//!         /home-user-my/project       (etc.)
+//! ```text
+//! slug `-home-user-my-project` could mean:
+//!     /home/user/my-project       (1 inner hyphenated component)
+//!     /home/user/my/project       (3 single-word components)
+//!     /home/user/my-project/      (trailing sep -- equivalent after canon)
+//!     /home-user-my/project       (etc.)
+//! ```
 //!
 //! `decode_cc_slug(slug)` returns ALL plausible decodings as a `Vec<PathBuf>`
 //! (sorted fewest-components-first by component count). The caller (`project::resolve`)

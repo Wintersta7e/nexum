@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::records::TrustPolicy;
+
 /// Top-level configuration for a nexum installation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
@@ -31,7 +33,7 @@ pub struct PathsConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustConfig {
-    pub unsigned_default: String,
+    pub unsigned_default: TrustPolicy,
     pub ranking_penalty: f64,
     pub strict_revocation: bool,
     pub bootstrap: BootstrapConfig,
@@ -131,7 +133,7 @@ impl Config {
                 models: "~/.nexum/models".into(),
             },
             trust: TrustConfig {
-                unsigned_default: "warn-but-show".into(),
+                unsigned_default: TrustPolicy::WarnButShow,
                 ranking_penalty: 0.7,
                 strict_revocation: false,
                 bootstrap: BootstrapConfig {

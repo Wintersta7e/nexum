@@ -42,7 +42,7 @@ pub struct InitArgs {
 ///
 /// Returns `ExitCode::SUCCESS` on success, `ExitCode::FAILURE` on any error
 /// (error message is printed to stderr before returning).
-pub fn run(args: InitArgs) -> ExitCode {
+pub fn run(args: &InitArgs) -> ExitCode {
     // Resolve SSH HOME for key detection. Independent of --root.
     // SSH keys always live in $HOME/.ssh/, not in the nexum root.
     let ssh_home = std::env::var_os("HOME")
@@ -50,8 +50,8 @@ pub fn run(args: InitArgs) -> ExitCode {
         .map(PathBuf::from);
 
     // §8 step 3: if --ssh-key not given, detect candidate and ask user to confirm.
-    let resolved_ssh_key: Option<PathBuf> = if let Some(explicit) = args.ssh_key {
-        Some(explicit)
+    let resolved_ssh_key: Option<PathBuf> = if let Some(explicit) = &args.ssh_key {
+        Some(explicit.clone())
     } else if args.yes {
         // --yes without --ssh-key: detect silently (core will detect again using
         // $HOME lookup, but omitting the path here lets the core handle it).
@@ -95,7 +95,7 @@ pub fn run(args: InitArgs) -> ExitCode {
 
     let opts = InitOpts {
         ssh_key: resolved_ssh_key,
-        root: args.root,
+        root: args.root.clone(),
         force: args.force,
     };
 

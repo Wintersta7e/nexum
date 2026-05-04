@@ -1,20 +1,29 @@
 //! `nexum-core` — core library for nexum.
 //!
-//! This crate is currently a stub. See `docs/spec/2026-04-29-nexum-design.md`
-//! for the design that this crate will implement after the mandatory pre-M1
-//! stack-validation spike completes (§3.6).
+//! Wires the read path (`adapter::*`), the indexer (`indexer::*`), the query
+//! layer (`query::*`), and the API facade (`api::*`). Semantic embeddings
+//! and the MCP surface are not yet wired.
 
-#![forbid(unsafe_code)]
+// Relaxed `forbid` → `deny` to permit the single justified
+// `#[allow(unsafe_code)]` on `indexer::db::register_sqlite_vec_once`.
+// sqlite-vec's auto-extension registration requires unsafe FFI; no other
+// unsafe is introduced. Every other file in this crate stays unsafe-free.
+#![deny(unsafe_code)]
 
+pub mod adapter;
+pub mod api;
 pub mod config;
 pub mod index;
+pub mod indexer;
 pub mod init;
 pub mod paths;
 pub mod project;
+pub mod query;
+pub mod records;
 pub mod ssh_key;
 pub mod trust;
 
-/// Placeholder so the crate compiles. Replaced as M1 implementation lands.
+/// Crate version.
 #[must_use]
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
