@@ -21,7 +21,7 @@ use crate::{
     adapter::trait_def::{
         Adapter, AdapterError, AdapterPass, PassCompleteness, SkipKind, SkipReason,
     },
-    init::git_ops::git_verify_commit_with_signers,
+    init::git_ops::git_verify_commit_with_signers_and_details,
     records::{
         Agent, Confidence, FileEvidence, FileEvidenceKind, Outcome, ProjectId, Provenance,
         RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source, TrustBasis,
@@ -221,7 +221,7 @@ fn parse_local_record(
         .project_id
         .unwrap_or_else(|| "local-no-project".into());
 
-    let (signature_status, trust_basis) = compute_signature_status(notebook_git, path);
+    let verification = compute_signature_status(notebook_git, path);
 
     Ok(Box::new(UnifiedRecord {
         id: parsed.id,
@@ -243,10 +243,13 @@ fn parse_local_record(
         outcome,
         provenance: Provenance {
             source: Source::Local,
-            signature_status,
-            trust_basis,
+            signature_status: verification.status,
+            trust_basis: verification.trust_basis,
             extractor: None,
             digest_hash: None,
+            record_commit_sha: verification.record_commit_sha,
+            signer_fingerprint: verification.signer_fingerprint,
+            warning_code: verification.warning_code,
         },
         extras: HashMap::new(),
         content_hash: hash,
@@ -316,13 +319,39 @@ fn decode_files(raw: Vec<serde_yaml::Value>) -> Vec<FileEvidence> {
         .collect()
 }
 
-fn compute_signature_status(
-    notebook_git: &Path,
-    record_path: &Path,
-) -> (SignatureStatus, Option<TrustBasis>) {
+/// Verifier provenance for one record, populated by
+/// [`compute_signature_status`]. Schema scaffolding for the verifier
+/// pipeline; the next milestone may extend this with rotation /
+/// reanchor signals.
+#[derive(Debug, Clone)]
+struct VerificationResult {
+    status: SignatureStatus,
+    trust_basis: Option<TrustBasis>,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
+    warning_code: Option<String>,
+}
+
+impl VerificationResult {
+    /// Default for a record whose signature could not be evaluated at all
+    /// (path outside the notebook, no commit history, missing
+    /// `historical_signers`). Treated identically to "no signature
+    /// present".
+    fn unevaluable() -> Self {
+        Self {
+            status: SignatureStatus::Unsigned,
+            trust_basis: None,
+            record_commit_sha: None,
+            signer_fingerprint: None,
+            warning_code: None,
+        }
+    }
+}
+
+fn compute_signature_status(notebook_git: &Path, record_path: &Path) -> VerificationResult {
     // Step 1: identify the commit that last touched `record_path`.
     let Ok(relative) = record_path.strip_prefix(notebook_git) else {
-        return (SignatureStatus::Unsigned, None);
+        return VerificationResult::unevaluable();
     };
     let log_out = Command::new("git")
         .args(["log", "-1", "--format=%H", "--"])
@@ -331,24 +360,47 @@ fn compute_signature_status(
         .output();
     let sha = match log_out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-        _ => return (SignatureStatus::Unsigned, None),
+        _ => return VerificationResult::unevaluable(),
     };
     if sha.is_empty() {
-        return (SignatureStatus::Unsigned, None);
+        return VerificationResult::unevaluable();
     }
     // Step 2: redirect verify-commit through historical_signers.
     let historical_signers = notebook_git.join(".trust").join("historical_signers");
     if !historical_signers.exists() {
-        return (SignatureStatus::Unsigned, None);
+        // We have a commit SHA but cannot verify against the notebook's
+        // signer set — capture the SHA so a future verifier pass can
+        // recompute against a freshly-materialized signer view.
+        return VerificationResult {
+            status: SignatureStatus::Unsigned,
+            trust_basis: Some(TrustBasis::Unsigned),
+            record_commit_sha: Some(sha),
+            signer_fingerprint: None,
+            warning_code: None,
+        };
     }
-    match git_verify_commit_with_signers(notebook_git, &sha, &historical_signers) {
-        Ok(()) => (SignatureStatus::Verified, Some(TrustBasis::Current)),
+    match git_verify_commit_with_signers_and_details(notebook_git, &sha, &historical_signers) {
+        Ok(details) => VerificationResult {
+            status: SignatureStatus::Verified,
+            trust_basis: Some(TrustBasis::Current),
+            record_commit_sha: Some(sha),
+            signer_fingerprint: details.signer_fingerprint,
+            warning_code: None,
+        },
         Err(_) => {
-            // Distinguishing "no signature" from "bad signature" via stderr would
-            // require a richer return shape; the current minimum mapping is
-            // "verifier rejected → unsigned". A future milestone promotes
-            // `Invalid` as a distinct status with a richer diagnostic.
-            (SignatureStatus::Unsigned, None)
+            // The verifier rejected the commit. The current minimum
+            // mapping still collapses this to `Unsigned`; the verifier
+            // milestone promotes `Invalid` as a distinct status with a
+            // richer diagnostic. Emit `warning_code = "verifier-rejected"`
+            // so consumers can already distinguish "no signature was
+            // attempted" from "a signature failed verification".
+            VerificationResult {
+                status: SignatureStatus::Unsigned,
+                trust_basis: None,
+                record_commit_sha: Some(sha),
+                signer_fingerprint: None,
+                warning_code: Some("verifier-rejected".into()),
+            }
         }
     }
 }

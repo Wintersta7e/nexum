@@ -147,12 +147,11 @@ pub struct MetaTrustSummary {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MetaTrustBasisSummary {
     pub current: u32,
-    #[serde(rename = "rotated-historical")]
-    pub rotated_historical: u32,
-    #[serde(rename = "rotated-historical-compromised")]
-    pub rotated_historical_compromised: u32,
+    pub historical: u32,
     #[serde(rename = "pre-reanchor")]
     pub pre_reanchor: u32,
+    pub unsigned: u32,
+    pub unknown: u32,
 }
 
 /// Cursor — opaque base64-encoded `last_rowid`. Currently uses a simple

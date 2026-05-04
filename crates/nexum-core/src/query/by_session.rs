@@ -65,12 +65,18 @@ pub fn by_session(
     let escaped = escape_like(&needle);
     let pattern = format!("%{escaped}%");
     let sql = "SELECT records.id, records.record_type, records.title, records.summary, \
-                      records.source, records.project_id, records.signature_status, records.updated \
+                      records.source, records.project_id, records.signature_status, records.updated, \
+                      records.trust_basis, records.warning_code \
                FROM records \
                WHERE session_refs LIKE ?1 ESCAPE '\\' \
                ORDER BY records.updated DESC";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![pattern], |r| {
+        // Materialize trust_basis and warning_code from the persisted
+        // columns when present; the verified-row default is filled in
+        // below alongside the unsigned-warning push.
+        let basis_db: Option<String> = r.get(8)?;
+        let warn_code: Option<String> = r.get(9)?;
         Ok(SearchResult {
             id: r.get(0)?,
             record_type: RecordType::from_db_str(&r.get::<_, String>(1)?),
@@ -80,8 +86,10 @@ pub fn by_session(
             source: Source::from_db_str(&r.get::<_, String>(4)?),
             project_id: r.get(5)?,
             signature_status: SignatureStatus::from_db_str(&r.get::<_, String>(6)?),
-            trust_basis: None,
-            warnings: Vec::new(),
+            trust_basis: basis_db.as_deref().map(TrustBasis::from_db_str),
+            warnings: warn_code
+                .filter(|s| !s.is_empty())
+                .map_or_else(Vec::new, |c| vec![c]),
             body: None,
             updated: r.get(7)?,
         })
@@ -106,7 +114,12 @@ pub fn by_session(
 
     for r in &mut results {
         if r.signature_status == SignatureStatus::Verified {
-            r.trust_basis = Some(TrustBasis::Current);
+            // Only fill the verified default when the verifier hasn't
+            // already written a basis (Phase 4 may persist a richer value
+            // such as `historical` or `pre-reanchor`).
+            if r.trust_basis.is_none() {
+                r.trust_basis = Some(TrustBasis::Current);
+            }
         } else {
             r.warnings.push("unsigned".into());
         }

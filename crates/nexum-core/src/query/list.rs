@@ -64,7 +64,8 @@ pub fn list(
 
     let sql = format!(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
-                records.source, records.project_id, records.signature_status, records.updated \
+                records.source, records.project_id, records.signature_status, records.updated, \
+                records.trust_basis, records.warning_code \
          FROM records \
          WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
          ORDER BY records.updated DESC, records.rowid DESC \
@@ -72,51 +73,12 @@ pub fn list(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
-            ))
-        })?
+        .query_map(rusqlite::params_from_iter(params.iter()), row_to_raw)?
         .collect::<Result<Vec<_>, _>>()?;
-
-    let mut accumulated: Vec<(i64, SearchResult)> = Vec::new();
-    for (rowid, id, rt, title, summary, source, project_id, sig, updated) in rows {
-        let signature_status = SignatureStatus::from_db_str(&sig);
-        let trust_basis = if signature_status == SignatureStatus::Verified {
-            Some(TrustBasis::Current)
-        } else {
-            None
-        };
-        let mut warnings: Vec<String> = Vec::new();
-        if signature_status != SignatureStatus::Verified {
-            warnings.push("unsigned".into());
-        }
-        accumulated.push((
-            rowid,
-            SearchResult {
-                id,
-                record_type: RecordType::from_db_str(&rt),
-                title,
-                summary,
-                score: 0.0,
-                source: Source::from_db_str(&source),
-                project_id,
-                signature_status,
-                trust_basis,
-                warnings,
-                body: None,
-                updated,
-            },
-        ));
-    }
+    let mut accumulated: Vec<(i64, SearchResult)> = rows
+        .into_iter()
+        .map(|raw| (raw.rowid, row_to_search_result(raw)))
+        .collect();
 
     // Drop the over-limit sentinel row so it does not leak into the
     // results, then encode the cursor from the LAST RETURNED row's
@@ -154,6 +116,75 @@ pub fn list(
         next_cursor,
         meta,
     })
+}
+
+/// Raw column tuple read out of a `records` row in the list / recent SELECT.
+/// Mirrors the SELECT column order so `row_to_raw` stays a straight read.
+struct ListRow {
+    rowid: i64,
+    id: String,
+    record_type: String,
+    title: String,
+    summary: Option<String>,
+    source: String,
+    project_id: String,
+    signature_status: String,
+    updated: String,
+    trust_basis: Option<String>,
+    warning_code: Option<String>,
+}
+
+fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
+    Ok(ListRow {
+        rowid: r.get(0)?,
+        id: r.get(1)?,
+        record_type: r.get(2)?,
+        title: r.get(3)?,
+        summary: r.get(4)?,
+        source: r.get(5)?,
+        project_id: r.get(6)?,
+        signature_status: r.get(7)?,
+        updated: r.get(8)?,
+        trust_basis: r.get(9)?,
+        warning_code: r.get(10)?,
+    })
+}
+
+/// Materialize one DB row into a `SearchResult`. Splits out of `list` so
+/// the verb stays under the strict-clippy `too-many-lines` threshold.
+fn row_to_search_result(raw: ListRow) -> SearchResult {
+    let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
+    // Prefer the persisted basis when the verifier wrote one; fall back
+    // to deriving Current-on-verified for rows pre-dating the column or
+    // written by adapters that don't track basis.
+    let trust_basis = raw.trust_basis.as_deref().map(TrustBasis::from_db_str).or({
+        if signature_status == SignatureStatus::Verified {
+            Some(TrustBasis::Current)
+        } else {
+            None
+        }
+    });
+    let mut warnings: Vec<String> = Vec::new();
+    if signature_status != SignatureStatus::Verified {
+        warnings.push("unsigned".into());
+    }
+    if let Some(code) = raw.warning_code.filter(|s| !s.is_empty()) {
+        warnings.push(code);
+    }
+    SearchResult {
+        id: raw.id,
+        record_type: RecordType::from_db_str(&raw.record_type),
+        title: raw.title,
+        summary: raw.summary,
+        score: 0.0,
+        source: Source::from_db_str(&raw.source),
+        project_id: raw.project_id,
+        signature_status,
+        trust_basis,
+        warnings,
+        body: None,
+        updated: raw.updated,
+    }
 }
 
 /// Encode the keyset pivot as an opaque cursor string.

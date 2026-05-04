@@ -108,7 +108,7 @@ pub fn git_commit_signed(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// Verify `commit` using `historical_signers` (the §9 historical-verification redirect).
+/// Verify `commit` using `historical_signers` (the historical-verification redirect).
 ///
 /// Invokes:
 /// ```text
@@ -156,6 +156,63 @@ pub fn git_verify_commit_with_signers(
             ),
         })
     }
+}
+
+/// Extra provenance captured alongside a successful verify-commit. Today
+/// just the SSH signer fingerprint via `git log -1 --format=%GF`; future
+/// fields (e.g., commit-time pin, key-rotation marker) can be added
+/// without disrupting callers.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VerifyDetails {
+    /// Signer fingerprint as reported by `git log --format=%GF`. `None`
+    /// when git could not extract a fingerprint (e.g., legacy or
+    /// unusually-formatted signature) — verification still succeeded if
+    /// this struct is returned.
+    pub signer_fingerprint: Option<String>,
+}
+
+/// Verify `commit` against `historical_signers` and capture the signer
+/// fingerprint on success. Companion to [`git_verify_commit_with_signers`]
+/// for callers that need the verifier provenance — leaves the simpler
+/// boolean form intact for callers that only check the exit code.
+///
+/// On a successful verify, runs `git log -1 --format=%GF <commit>` to
+/// surface the fingerprint git's SSH backend matched. The fingerprint is
+/// optional in [`VerifyDetails`] because some signature shapes do not
+/// produce one, and the verifier's "signature is valid" answer must not
+/// hinge on whether git can also surface the fingerprint.
+///
+/// # Errors
+///
+/// Returns `InitError::BootstrapVerifyFailed` if verification fails.
+/// Returns `InitError::Io` if the git binary cannot be spawned.
+pub fn git_verify_commit_with_signers_and_details(
+    repo_path: &Path,
+    commit: &str,
+    historical_signers: &Path,
+) -> Result<VerifyDetails, InitError> {
+    git_verify_commit_with_signers(repo_path, commit, historical_signers)?;
+
+    let log_out = Command::new("git")
+        .current_dir(repo_path)
+        .args(["log", "-1", "--format=%GF", commit])
+        .output()
+        .map_err(|e| InitError::Io {
+            path: repo_path.display().to_string(),
+            source: e,
+        })?;
+
+    let signer_fingerprint = if log_out.status.success() {
+        let raw = String::from_utf8_lossy(&log_out.stdout).trim().to_owned();
+        if raw.is_empty() { None } else { Some(raw) }
+    } else {
+        // verify-commit already passed, so a missing fingerprint here is
+        // a soft signal — log nothing and return None rather than
+        // promoting it to a failure.
+        None
+    };
+
+    Ok(VerifyDetails { signer_fingerprint })
 }
 
 /// Read `user.name` and `user.email` from the global git config.

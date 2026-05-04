@@ -84,7 +84,8 @@ fn fetch_candidates(conn: &Connection, key: &RecordKey) -> Result<Vec<RawRow>, Q
     const COLUMNS: &str = "id, source, project_id, record_type, title, summary, body, \
                            body_origin_path, tags, confidence, outcome, agent, session_refs, \
                            files, commits, created, updated, content_hash, signature_status, \
-                           extras";
+                           extras, record_commit_sha, signer_fingerprint, trust_basis, \
+                           warning_code";
 
     let (where_clause, params): (&str, Vec<Box<dyn ToSql>>) =
         match (key.source, key.project_id.as_deref()) {
@@ -140,6 +141,10 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
         content_hash: r.get(17)?,
         signature_status: r.get::<_, String>(18)?,
         extras: r.get::<_, Option<String>>(19)?,
+        record_commit_sha: r.get::<_, Option<String>>(20)?,
+        signer_fingerprint: r.get::<_, Option<String>>(21)?,
+        trust_basis: r.get::<_, Option<String>>(22)?,
+        warning_code: r.get::<_, Option<String>>(23)?,
     })
 }
 
@@ -147,11 +152,17 @@ fn build_record(
     raw: RawRow,
     signature_status: SignatureStatus,
 ) -> Result<UnifiedRecord, QueryError> {
-    let trust_basis = if signature_status == SignatureStatus::Verified {
-        Some(TrustBasis::Current)
-    } else {
-        None
-    };
+    // Prefer the persisted `trust_basis` column when present (Phase 3.5
+    // scaffolding for the verifier milestone). Fall back to the
+    // signature-status default for rows written before the column existed
+    // or by adapters that don't track basis.
+    let trust_basis = raw.trust_basis.as_deref().map(TrustBasis::from_db_str).or(
+        if signature_status == SignatureStatus::Verified {
+            Some(TrustBasis::Current)
+        } else {
+            None
+        },
+    );
     let extras: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(raw.extras.as_deref().unwrap_or("{}"))?;
     let tags: Vec<String> = serde_json::from_str(&raw.tags)?;
@@ -205,6 +216,9 @@ fn build_record(
             trust_basis,
             extractor: None,
             digest_hash: None,
+            record_commit_sha: raw.record_commit_sha,
+            signer_fingerprint: raw.signer_fingerprint,
+            warning_code: raw.warning_code,
         },
         extras,
         content_hash: raw.content_hash,
@@ -233,6 +247,10 @@ struct RawRow {
     content_hash: String,
     signature_status: String,
     extras: Option<String>,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
+    trust_basis: Option<String>,
+    warning_code: Option<String>,
 }
 
 #[cfg(test)]

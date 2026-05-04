@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use super::types::{
     Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError, SearchResult,
 };
-use crate::records::{SignatureStatus, TrustPolicy};
+use crate::records::{SignatureStatus, TrustBasis, TrustPolicy};
 
 /// Build the `_meta` envelope for a query result set.
 ///
@@ -51,13 +51,21 @@ pub(crate) fn build_meta(
     let mut policy_warnings: Vec<String> = Vec::new();
     for r in results {
         match r.signature_status {
-            SignatureStatus::Verified => {
-                ts.verified += 1;
-                tbs.current += 1;
-            }
+            SignatureStatus::Verified => ts.verified += 1,
             SignatureStatus::Unsigned => ts.unsigned += 1,
             SignatureStatus::Invalid => ts.invalid += 1,
             SignatureStatus::Unknown => ts.unknown += 1,
+        }
+        // Trust-basis bucketing prefers the persisted column when the
+        // verifier has populated it; for verified rows that pre-date the
+        // column the read projection fills in `Some(Current)` so this
+        // tally still ticks the `current` bucket.
+        match r.trust_basis {
+            Some(TrustBasis::Current) => tbs.current += 1,
+            Some(TrustBasis::Historical) => tbs.historical += 1,
+            Some(TrustBasis::PreReanchor) => tbs.pre_reanchor += 1,
+            Some(TrustBasis::Unsigned) => tbs.unsigned += 1,
+            Some(TrustBasis::Unknown) | None => tbs.unknown += 1,
         }
     }
     if trust_policy == TrustPolicy::WarnButShow && (ts.unsigned + ts.invalid + ts.unknown) > 0 {

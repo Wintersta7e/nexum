@@ -24,6 +24,10 @@ CREATE TABLE records (
     content_hash TEXT NOT NULL,
     index_hash TEXT NOT NULL,
     signature_status TEXT NOT NULL,
+    record_commit_sha TEXT,
+    signer_fingerprint TEXT,
+    trust_basis TEXT,
+    warning_code TEXT,
     extras JSON,
     indexed_at TEXT NOT NULL,
     UNIQUE (source, project_id, id)

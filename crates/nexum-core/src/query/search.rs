@@ -62,7 +62,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let fts_sql = format!(
         "SELECT records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
-                records.signature_status, records.updated \
+                records.signature_status, records.updated, records.trust_basis, \
+                records.warning_code \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -89,6 +90,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             project_id: row.get(6)?,
             signature_status: row.get::<_, String>(7)?,
             updated: row.get(8)?,
+            trust_basis: row.get::<_, Option<String>>(9)?,
+            warning_code: row.get::<_, Option<String>>(10)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -163,14 +166,22 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         None
     };
     let signature_status = SignatureStatus::from_db_str(&r.signature_status);
-    let trust_basis = if matches!(signature_status, SignatureStatus::Verified) {
-        Some(TrustBasis::Current)
-    } else {
-        None
-    };
+    // Prefer the persisted basis when the verifier wrote one; fall back
+    // to deriving Current-on-verified for rows that pre-date the
+    // verifier-provenance column.
+    let trust_basis = r.trust_basis.as_deref().map(TrustBasis::from_db_str).or({
+        if matches!(signature_status, SignatureStatus::Verified) {
+            Some(TrustBasis::Current)
+        } else {
+            None
+        }
+    });
     let mut warnings: Vec<String> = Vec::new();
     if signature_status != SignatureStatus::Verified {
         warnings.push("unsigned".into());
+    }
+    if let Some(code) = r.warning_code.filter(|s| !s.is_empty()) {
+        warnings.push(code);
     }
     SearchResult {
         id: r.id,
@@ -199,6 +210,8 @@ struct FtsRow {
     project_id: String,
     signature_status: String,
     updated: String,
+    trust_basis: Option<String>,
+    warning_code: Option<String>,
 }
 
 /// Build the per-table filter clause + bound params for the SQL pushdown.

@@ -485,16 +485,77 @@ impl std::fmt::Display for RecordKey {
 
 /// Trust basis (recomputed per query). JSON form is kebab-case.
 ///
-/// Currently only emits `Current` (for verified records) or `None` (for
-/// unsigned). The richer rotation/compromise/reanchor states are populated
-/// when the trust state machine is fully wired in a later milestone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Schema scaffolding for the verifier provenance pipeline. Phase 3.5
+/// populates `Current` (for verified records) and `Unsigned` (for records
+/// without a signature on their last-touching commit). The richer
+/// rotation / compromise / reanchor states are computed by the trust
+/// state machine in a later milestone — `Historical` and `PreReanchor`
+/// reserve their wire shape now so consumers can match against the full
+/// variant set without a future schema bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TrustBasis {
+    /// Latest commit, signed with the currently-authoritative key.
     Current,
-    RotatedHistorical,
-    RotatedHistoricalCompromised,
+    /// Latest commit, signed with a key that has since been rotated out
+    /// but is still present in `historical_signers` (the §9 redirect).
+    Historical,
+    /// Commit predates the most recent signer reanchor; verification
+    /// must walk the prior signer set.
     PreReanchor,
+    /// No signature on this record's last-touching commit.
+    Unsigned,
+    /// Phase 3.5 has not yet computed the basis; the verifier milestone
+    /// will populate it.
+    Unknown,
+}
+
+impl TrustBasis {
+    /// Short string used in the `records.trust_basis` column.
+    #[must_use]
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            TrustBasis::Current => "current",
+            TrustBasis::Historical => "historical",
+            TrustBasis::PreReanchor => "pre-reanchor",
+            TrustBasis::Unsigned => "unsigned",
+            TrustBasis::Unknown => "unknown",
+        }
+    }
+
+    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Falls through to `Unknown` for unrecognized values (forward-compatible
+    /// with future variants written by a newer writer).
+    pub(crate) fn from_db_str(s: &str) -> Self {
+        match s {
+            "current" => TrustBasis::Current,
+            "historical" => TrustBasis::Historical,
+            "pre-reanchor" => TrustBasis::PreReanchor,
+            "unsigned" => TrustBasis::Unsigned,
+            _ => TrustBasis::Unknown,
+        }
+    }
+
+    /// Reject unknown values — for parsing untrusted user input (CLI args, MCP).
+    /// Companion to [`from_db_str`], which silently defaults at the trusted-DB
+    /// boundary.
+    #[must_use]
+    pub fn try_from_user_str(s: &str) -> Option<Self> {
+        match s {
+            "current" => Some(TrustBasis::Current),
+            "historical" => Some(TrustBasis::Historical),
+            "pre-reanchor" => Some(TrustBasis::PreReanchor),
+            "unsigned" => Some(TrustBasis::Unsigned),
+            "unknown" => Some(TrustBasis::Unknown),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TrustBasis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_db_str())
+    }
 }
 
 /// Tagged session-reference enum. The variant determines how a consumer
@@ -541,6 +602,13 @@ pub enum FileEvidenceKind {
 
 /// Provenance struct. `extractor` and `digest_hash` are populated by the
 /// extraction pipeline (a later milestone); the read path leaves them `None`.
+///
+/// `record_commit_sha`, `signer_fingerprint`, and `warning_code` are
+/// scaffolding for the verifier provenance pipeline. Phase 3.5 populates
+/// them only on the local-adapter `Verified` path; cc / codex leave them
+/// `None` because their content is not notebook-git-tracked. The full
+/// population logic (trust events, rotation states, distinguishing
+/// `Invalid` from `Unsigned`) lands with the verifier milestone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     pub source: Source,
@@ -551,6 +619,25 @@ pub struct Provenance {
     pub extractor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest_hash: Option<String>,
+    /// SHA of the last commit that touched the record on the notebook-git
+    /// branch. Captured for the local adapter's verified rows; future
+    /// milestones may use it to anchor recompute decisions when the
+    /// signer set changes. `None` for adapters whose content is not
+    /// notebook-git-tracked (cc, codex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_commit_sha: Option<String>,
+    /// SSH signer fingerprint captured from `git log --format=%GF` on a
+    /// successful verify. `None` when the record is unsigned, when verify
+    /// rejected the signature, or when the adapter does not produce
+    /// signed records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_fingerprint: Option<String>,
+    /// Diagnostic flag from the verifier — currently only
+    /// `"verifier-rejected"` when the local adapter sees a signed commit
+    /// whose signature does not verify against
+    /// `historical_signers`. `None` on the happy path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_code: Option<String>,
 }
 
 /// Unified in-memory record. Every adapter normalizes its on-disk shape to
@@ -671,6 +758,9 @@ mod tests {
                 trust_basis: Some(TrustBasis::Current),
                 extractor: None,
                 digest_hash: None,
+                record_commit_sha: None,
+                signer_fingerprint: None,
+                warning_code: None,
             },
             extras: HashMap::new(),
             content_hash: "ec22deadbeef".into(),
@@ -911,5 +1001,63 @@ mod tests {
         let k = RecordKey::bare("just-an-id");
         assert_eq!(format!("{k}"), "just-an-id");
         assert!(!k.is_exact());
+    }
+
+    #[test]
+    fn trust_basis_round_trip_db_str() {
+        for variant in [
+            TrustBasis::Current,
+            TrustBasis::Historical,
+            TrustBasis::PreReanchor,
+            TrustBasis::Unsigned,
+            TrustBasis::Unknown,
+        ] {
+            assert_eq!(
+                TrustBasis::from_db_str(variant.as_db_str()),
+                variant,
+                "round-trip via {}",
+                variant.as_db_str()
+            );
+        }
+    }
+
+    #[test]
+    fn trust_basis_user_str_canonical_and_unknown() {
+        assert_eq!(
+            TrustBasis::try_from_user_str("current"),
+            Some(TrustBasis::Current)
+        );
+        assert_eq!(
+            TrustBasis::try_from_user_str("historical"),
+            Some(TrustBasis::Historical)
+        );
+        assert_eq!(
+            TrustBasis::try_from_user_str("pre-reanchor"),
+            Some(TrustBasis::PreReanchor)
+        );
+        assert_eq!(
+            TrustBasis::try_from_user_str("unsigned"),
+            Some(TrustBasis::Unsigned)
+        );
+        assert_eq!(
+            TrustBasis::try_from_user_str("unknown"),
+            Some(TrustBasis::Unknown)
+        );
+        assert_eq!(TrustBasis::try_from_user_str("garbage"), None);
+        assert_eq!(TrustBasis::try_from_user_str(""), None);
+    }
+
+    #[test]
+    fn trust_basis_serializes_kebab_case() {
+        // The wire form (JSON / TOML) uses kebab-case via serde; the
+        // db form mirrors it. PreReanchor is the worst-case rename.
+        assert_eq!(
+            serde_json::to_string(&TrustBasis::PreReanchor).unwrap(),
+            "\"pre-reanchor\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TrustBasis::Unsigned).unwrap(),
+            "\"unsigned\""
+        );
     }
 }
