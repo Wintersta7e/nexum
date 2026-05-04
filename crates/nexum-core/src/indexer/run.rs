@@ -248,6 +248,14 @@ where
 {
     let indexed = load_indexed_for_source(tx, source)?;
 
+    // The candidate key is just `id` because adapters cannot universally
+    // resolve `project_id` at list time without doing the read-full work
+    // (e.g., Codex derives it from the threads index inside
+    // `build_record`). Cross-project same-id collisions WITHIN a single
+    // source are improbable in practice (CC: id derived from per-slug
+    // path; Codex: id includes section identity; Local: single-project
+    // notebook), and the composite UNIQUE on the records table still
+    // prevents silent overwrite at upsert time.
     let candidates: std::collections::HashMap<String, String> = pass
         .records
         .iter()
@@ -264,9 +272,11 @@ where
         per_source,
     )?;
 
-    let gone: Vec<String> = indexed
+    // `indexed` is keyed by (project_id, id); a candidate id absent from
+    // the candidate set is "gone" REGARDLESS of project_id.
+    let gone: Vec<(String, String)> = indexed
         .keys()
-        .filter(|k| !candidates.contains_key(*k))
+        .filter(|(_pid, id)| !candidates.contains_key(id))
         .cloned()
         .collect();
 
@@ -284,16 +294,22 @@ where
 fn load_indexed_for_source(
     tx: &Transaction<'_>,
     source: Source,
-) -> Result<std::collections::HashMap<String, String>, IndexerError> {
-    let mut indexed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let mut stmt = tx.prepare("SELECT id, content_hash FROM records WHERE source = ?1")?;
+) -> Result<std::collections::HashMap<(String, String), String>, IndexerError> {
+    let mut indexed: std::collections::HashMap<(String, String), String> =
+        std::collections::HashMap::new();
+    let mut stmt =
+        tx.prepare("SELECT project_id, id, content_hash FROM records WHERE source = ?1")?;
     let src_str = source.as_db_str();
     let rows = stmt.query_map(params![src_str], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
     })?;
     for row in rows {
-        let (id, hash) = row?;
-        indexed.insert(id, hash);
+        let (project_id, id, hash) = row?;
+        indexed.insert((project_id, id), hash);
     }
     Ok(indexed)
 }
@@ -302,7 +318,7 @@ fn apply_upserts<F>(
     tx: &Transaction<'_>,
     source: Source,
     candidates: &std::collections::HashMap<String, String>,
-    indexed: &std::collections::HashMap<String, String>,
+    indexed: &std::collections::HashMap<(String, String), String>,
     read_full: &F,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
@@ -311,7 +327,13 @@ where
     F: Fn(&RecordId) -> Option<UnifiedRecord>,
 {
     for (id, hash) in candidates {
-        let cached_matches = indexed.get(id) == Some(hash);
+        // "Unchanged" matches if ANY indexed row with this id (under this
+        // source) shares the candidate's hash. Cross-project same-id
+        // collisions within a source are not modeled here — see the note
+        // on `candidates`.
+        let cached_matches = indexed
+            .iter()
+            .any(|((_pid, indexed_id), indexed_hash)| indexed_id == id && indexed_hash == hash);
         if cached_matches {
             // Present + unchanged: refresh the miss counter — it may have been
             // bumped on a prior pass that observed this id as gone.
@@ -338,14 +360,14 @@ fn apply_deletes(
     tx: &Transaction<'_>,
     source: Source,
     completeness: &PassCompleteness,
-    gone: &[String],
+    gone: &[(String, String)],
     force: bool,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError> {
     if force {
-        for id in gone {
-            hard_delete(tx, source, id)?;
+        for (project_id, id) in gone {
+            hard_delete(tx, source, project_id, id)?;
             per_source.deletes += 1;
             outcome.deletes += 1;
         }
@@ -353,10 +375,14 @@ fn apply_deletes(
     }
     match completeness {
         PassCompleteness::Authoritative => {
-            for id in gone {
+            for (project_id, id) in gone {
+                // `index_state` is keyed by (source, id) only; cross-project
+                // same-id collisions in miss-tracking are deferred to a
+                // follow-up. The composite delete still scopes correctly
+                // because hard_delete uses (source, project_id, id).
                 let counter = bump_miss(tx, source, id)?;
                 if counter >= STALE_THRESHOLD {
-                    hard_delete(tx, source, id)?;
+                    hard_delete(tx, source, project_id, id)?;
                     per_source.deletes += 1;
                     outcome.deletes += 1;
                 } else {
@@ -394,14 +420,16 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
     let signature_status = r.provenance.signature_status.as_db_str();
     let body_origin_path = r.body_origin_path.as_ref().map(|p| p.display().to_string());
 
-    // Look up rowid; if a row exists we mirror the vec0-before-records ordering
-    // rule on the UPDATE path (DELETE the embedding row first, then UPDATE the
-    // record). vec0 INSERT is skipped — `record_embeddings` is empty in this
-    // phase. The records UPDATE / INSERT statements fire the FTS triggers.
+    // Look up rowid by composite (source, project_id, id) — the natural
+    // identity. If a row exists we mirror the vec0-before-records ordering
+    // rule on the UPDATE path (DELETE the embedding row first, then UPDATE
+    // the record). vec0 INSERT is skipped — `record_embeddings` is empty in
+    // this phase. The records UPDATE / INSERT statements fire the FTS
+    // triggers.
     let existing_rowid: Option<i64> = tx
         .query_row(
-            "SELECT rowid FROM records WHERE id = ?1",
-            params![r.id],
+            "SELECT rowid FROM records WHERE source = ?1 AND project_id = ?2 AND id = ?3",
+            params![source.as_db_str(), r.project_id, r.id],
             |row| row.get(0),
         )
         .optional()?;
@@ -412,15 +440,13 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
             params![rid],
         )?;
         tx.execute(
-            "UPDATE records SET source = ?1, project_id = ?2, record_type = ?3, title = ?4, \
-             summary = ?5, body = ?6, body_origin_path = ?7, tags = ?8, tags_fts = ?9, \
-             confidence = ?10, outcome = ?11, agent = ?12, session_refs = ?13, files = ?14, \
-             commits = ?15, created = ?16, updated = ?17, content_hash = ?18, \
-             signature_status = ?19, extras = ?20, indexed_at = ?21 \
-             WHERE id = ?22",
+            "UPDATE records SET record_type = ?1, title = ?2, \
+             summary = ?3, body = ?4, body_origin_path = ?5, tags = ?6, tags_fts = ?7, \
+             confidence = ?8, outcome = ?9, agent = ?10, session_refs = ?11, files = ?12, \
+             commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
+             signature_status = ?17, extras = ?18, indexed_at = ?19 \
+             WHERE rowid = ?20",
             params![
-                source.as_db_str(),
-                r.project_id,
                 r.record_type.as_db_str(),
                 r.title,
                 r.summary,
@@ -440,7 +466,7 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
                 signature_status,
                 extras_json,
                 now,
-                r.id,
+                rid,
             ],
         )?;
     } else {
@@ -480,12 +506,17 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
     Ok(())
 }
 
-fn hard_delete(tx: &Transaction<'_>, source: Source, id: &str) -> Result<(), IndexerError> {
+fn hard_delete(
+    tx: &Transaction<'_>,
+    source: Source,
+    project_id: &str,
+    id: &str,
+) -> Result<(), IndexerError> {
     let id_owned = id.to_owned();
     let rowid: Option<i64> = tx
         .query_row(
-            "SELECT rowid FROM records WHERE id = ?1",
-            params![id],
+            "SELECT rowid FROM records WHERE source = ?1 AND project_id = ?2 AND id = ?3",
+            params![source.as_db_str(), project_id, id],
             |r| r.get(0),
         )
         .optional()?;
@@ -496,7 +527,7 @@ fn hard_delete(tx: &Transaction<'_>, source: Source, id: &str) -> Result<(), Ind
             "DELETE FROM record_embeddings WHERE record_rowid = ?1",
             params![rid],
         )?;
-        tx.execute("DELETE FROM records WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM records WHERE rowid = ?1", params![rid])?;
     }
     drop_state(tx, source, &id_owned)?;
     Ok(())

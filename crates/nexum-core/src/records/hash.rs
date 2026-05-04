@@ -34,6 +34,13 @@ pub fn content_hash(title: &str, summary: Option<&str>, body: &str) -> ContentHa
 /// `(id, content_hash)` tuple — the lightweight row `AdapterPass.records`
 /// carries. The indexer joins these against the cached `records` table to
 /// compute the new / changed / gone sets per the reindex algorithm.
+///
+/// The summary deliberately omits `project_id`: adapters cannot always
+/// resolve it without doing the read-full work (e.g., Codex resolves it
+/// from the threads index in `build_record`). The composite identity is
+/// still enforced at upsert / delete time via the records-table
+/// `UNIQUE (source, project_id, id)` and the `read_full` `project_id` is
+/// authoritative.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordSummary {
     pub id: RecordId,

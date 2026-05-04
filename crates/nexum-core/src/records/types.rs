@@ -72,7 +72,7 @@ impl RecordType {
 
 /// Source-of-record enum. JSON form is kebab-case (`"cc-native"`,
 /// `"codex-native"`, `"local"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Source {
     CcNative,
@@ -412,6 +412,75 @@ pub enum GetOutcome {
     /// `signature_status` lets callers decide whether retrying with
     /// `--include-unsigned` would help.
     HiddenByPolicy { signature_status: SignatureStatus },
+}
+
+/// Composite record identity: `(source, project_id, id)`. The same `id`
+/// can legitimately appear under different sources (e.g., a CC-native
+/// memory and a local YAML record both named `2026-04-29-x`) or different
+/// projects, so the natural key is the triple, not just the id.
+///
+/// Three modes:
+/// - **Exact** (`source` and `project_id` both `Some`) — fully qualified
+///   key, looked up via the `UNIQUE (source, project_id, id)` index.
+/// - **Bare** (`source` and `project_id` both `None`) — id-only lookup;
+///   the query layer disambiguates and may return `QueryError::Ambiguous`.
+/// - **Partial** (one side `Some`) — narrows by either source or project
+///   alone; same disambiguation contract.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct RecordKey {
+    pub source: Option<Source>,
+    pub project_id: Option<String>,
+    pub id: String,
+}
+
+impl RecordKey {
+    /// Construct a fully-qualified key — `(source, project_id, id)` all known.
+    pub fn exact(source: Source, project_id: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            source: Some(source),
+            project_id: Some(project_id.into()),
+            id: id.into(),
+        }
+    }
+
+    /// Construct from a bare id; lookups will need to disambiguate.
+    pub fn bare(id: impl Into<String>) -> Self {
+        Self {
+            source: None,
+            project_id: None,
+            id: id.into(),
+        }
+    }
+
+    /// Parse the CLI form `<source>:<project_id>:<id>`. The `project_id` may
+    /// itself contain colons (e.g., `git:abc123`); we split source off the
+    /// front and id off the back.
+    #[must_use]
+    pub fn parse_qualified(s: &str) -> Option<Self> {
+        let (source_str, rest) = s.split_once(':')?;
+        let (project_id, id) = rest.rsplit_once(':')?;
+        let source = Source::try_from_user_str(source_str)?;
+        if project_id.is_empty() || id.is_empty() {
+            return None;
+        }
+        Some(Self::exact(source, project_id, id))
+    }
+
+    /// `true` when both `source` and `project_id` are present, so the key
+    /// addresses exactly one row via the composite UNIQUE index.
+    #[must_use]
+    pub fn is_exact(&self) -> bool {
+        self.source.is_some() && self.project_id.is_some()
+    }
+}
+
+impl std::fmt::Display for RecordKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.source, self.project_id.as_deref()) {
+            (Some(s), Some(p)) => write!(f, "{}:{}:{}", s.as_db_str(), p, self.id),
+            _ => write!(f, "{}", self.id),
+        }
+    }
 }
 
 /// Trust basis (recomputed per query). JSON form is kebab-case.
@@ -804,5 +873,41 @@ mod tests {
             let back: FileEvidence = serde_json::from_str(&s).unwrap();
             assert_eq!(r, back);
         }
+    }
+
+    #[test]
+    fn record_key_parses_qualified_form() {
+        let k = RecordKey::parse_qualified("cc-native:git:abc123:my-record").unwrap();
+        assert_eq!(k.source, Some(Source::CcNative));
+        assert_eq!(k.project_id.as_deref(), Some("git:abc123"));
+        assert_eq!(k.id, "my-record");
+        assert!(k.is_exact());
+    }
+
+    #[test]
+    fn record_key_rejects_unqualified() {
+        assert!(RecordKey::parse_qualified("just-an-id").is_none());
+        // Missing id segment.
+        assert!(RecordKey::parse_qualified("local:proj").is_none());
+        // Unknown source.
+        assert!(RecordKey::parse_qualified("nope:git:abc:rec").is_none());
+        // Empty id segment.
+        assert!(RecordKey::parse_qualified("local:git:abc:").is_none());
+    }
+
+    #[test]
+    fn record_key_display_round_trip() {
+        let k = RecordKey::exact(Source::Local, "git:abc", "my-record");
+        let s = format!("{k}");
+        assert_eq!(s, "local:git:abc:my-record");
+        let parsed = RecordKey::parse_qualified(&s).unwrap();
+        assert_eq!(parsed, k);
+    }
+
+    #[test]
+    fn record_key_bare_display_omits_qualifiers() {
+        let k = RecordKey::bare("just-an-id");
+        assert_eq!(format!("{k}"), "just-an-id");
+        assert!(!k.is_exact());
     }
 }

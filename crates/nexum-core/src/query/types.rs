@@ -4,7 +4,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    Confidence, ProjectId, RecordId, RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy,
+    Confidence, ProjectId, RecordId, RecordKey, RecordType, SignatureStatus, Source, TrustBasis,
+    TrustPolicy,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -17,6 +18,11 @@ pub enum QueryError {
     InvalidFilter { detail: String },
     #[error("index missing — run `nexum index` first")]
     IndexMissing,
+    /// A bare-id or partial-key lookup matched more than one row. The
+    /// caller should disambiguate by supplying a fully-qualified
+    /// `RecordKey` (e.g. `local:git:abc:my-record`).
+    #[error("ambiguous record id; {} candidates match", matches.len())]
+    Ambiguous { matches: Vec<RecordKey> },
 }
 
 /// Filter set shared across `search` / `list` / `recent` / `by_session`.

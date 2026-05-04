@@ -7,6 +7,6 @@ pub mod types;
 pub use hash::{RecordSummary, content_hash};
 pub use types::{
     Agent, Confidence, ContentHash, FileEvidence, FileEvidenceKind, GetOutcome, Outcome, ProjectId,
-    Provenance, RecordId, RecordType, SessionRef, SignatureStatus, Source, TrustBasis, TrustPolicy,
-    UnifiedRecord,
+    Provenance, RecordId, RecordKey, RecordType, SessionRef, SignatureStatus, Source, TrustBasis,
+    TrustPolicy, UnifiedRecord,
 };

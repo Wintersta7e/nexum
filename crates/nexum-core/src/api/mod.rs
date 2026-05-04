@@ -15,7 +15,7 @@ use crate::{
         by_session::by_session as query_by_session, get::get as query_get,
         list::list as query_list, recent::recent as query_recent, search::search as query_search,
     },
-    records::GetOutcome,
+    records::{GetOutcome, RecordKey},
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -64,16 +64,20 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
     Ok(query_search(&conn, &effective_opts)?)
 }
 
-/// Get one record by id; honors the `include_unsigned` escape hatch under
-/// `trust_policy = Hide` (an unsigned record returns `HiddenByPolicy` unless
-/// the caller opts in).
+/// Get one record by composite key; honors the `include_unsigned` escape
+/// hatch under `trust_policy = Hide` (an unsigned record returns
+/// `HiddenByPolicy` unless the caller opts in).
+///
+/// `key` may be exact, partial, or bare; partial / bare keys that match
+/// more than one row produce `ApiError::Query(QueryError::Ambiguous)`.
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite or deserialization failure.
-pub fn get(paths: &Paths, id: &str, opts: &GetOpts) -> Result<GetOutcome, ApiError> {
+/// Returns `ApiError::Query` on rusqlite / deserialization failure or
+/// when the key matches multiple records (`QueryError::Ambiguous`).
+pub fn get(paths: &Paths, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome, ApiError> {
     let conn = open_or_create(&paths.index_db)?;
-    Ok(query_get(&conn, id, opts)?)
+    Ok(query_get(&conn, key, opts)?)
 }
 
 /// List with filters + pagination.

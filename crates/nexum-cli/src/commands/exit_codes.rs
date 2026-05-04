@@ -11,9 +11,13 @@
 //! - `6` ([`NOT_FOUND`]): no record matches the requested id.
 //! - `7` ([`HIDDEN_BY_POLICY`]): record exists but suppressed by trust policy
 //!   (suggests retrying with `--include-unsigned`).
+//! - `8` ([`AMBIGUOUS`]): the bare id matched multiple records; the user
+//!   must re-invoke with the fully-qualified key
+//!   `<source>:<project_id>:<id>`.
 
 pub(crate) const USAGE: u8 = 2;
 pub(crate) const NOT_INITIALIZED: u8 = 3;
 pub(crate) const RUNTIME: u8 = 4;
 pub(crate) const NOT_FOUND: u8 = 6;
 pub(crate) const HIDDEN_BY_POLICY: u8 = 7;
+pub(crate) const AMBIGUOUS: u8 = 8;
