@@ -22,6 +22,7 @@ CREATE TABLE records (
     created TEXT NOT NULL,
     updated TEXT NOT NULL,
     content_hash TEXT NOT NULL,
+    index_hash TEXT NOT NULL,
     signature_status TEXT NOT NULL,
     extras JSON,
     indexed_at TEXT NOT NULL,

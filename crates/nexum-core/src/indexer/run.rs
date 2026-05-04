@@ -35,7 +35,7 @@ use crate::{
         },
     },
     paths::Paths,
-    records::{RecordId, Source, UnifiedRecord},
+    records::{RecordId, Source, UnifiedRecord, hash::compute_index_hash},
 };
 
 impl From<IndexStateError> for IndexerError {
@@ -297,25 +297,30 @@ where
     )
 }
 
+/// Map of `(project_id, id)` -> `(content_hash, index_hash)` for the indexed
+/// rows under one source. Both hashes are needed for the upsert skip check.
+type IndexedHashes = std::collections::HashMap<(String, String), (String, String)>;
+
 fn load_indexed_for_source(
     tx: &Transaction<'_>,
     source: Source,
-) -> Result<std::collections::HashMap<(String, String), String>, IndexerError> {
-    let mut indexed: std::collections::HashMap<(String, String), String> =
-        std::collections::HashMap::new();
-    let mut stmt =
-        tx.prepare("SELECT project_id, id, content_hash FROM records WHERE source = ?1")?;
+) -> Result<IndexedHashes, IndexerError> {
+    let mut indexed: IndexedHashes = std::collections::HashMap::new();
+    let mut stmt = tx.prepare(
+        "SELECT project_id, id, content_hash, index_hash FROM records WHERE source = ?1",
+    )?;
     let src_str = source.as_db_str();
     let rows = stmt.query_map(params![src_str], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
         ))
     })?;
     for row in rows {
-        let (project_id, id, hash) = row?;
-        indexed.insert((project_id, id), hash);
+        let (project_id, id, content_hash, index_hash) = row?;
+        indexed.insert((project_id, id), (content_hash, index_hash));
     }
     Ok(indexed)
 }
@@ -324,7 +329,7 @@ fn apply_upserts<F>(
     tx: &Transaction<'_>,
     source: Source,
     candidates: &std::collections::HashMap<String, String>,
-    indexed: &std::collections::HashMap<(String, String), String>,
+    indexed: &IndexedHashes,
     read_full: &F,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
@@ -332,20 +337,14 @@ fn apply_upserts<F>(
 where
     F: Fn(&RecordId) -> Option<UnifiedRecord>,
 {
-    for (id, hash) in candidates {
-        // "Unchanged" matches if ANY indexed row with this id (under this
-        // source) shares the candidate's hash. Cross-project same-id
-        // collisions within a source are not modeled here — see the note
-        // on `candidates`.
-        let cached_matches = indexed
+    for (id, candidate_content_hash) in candidates {
+        // Look up cached hashes for any indexed row under this source with this
+        // id. Cross-project same-id collisions within a source are not modeled
+        // here — see the note on `candidates`.
+        let cached_hashes = indexed
             .iter()
-            .any(|((_pid, indexed_id), indexed_hash)| indexed_id == id && indexed_hash == hash);
-        if cached_matches {
-            // Present + unchanged: refresh the miss counter — it may have been
-            // bumped on a prior pass that observed this id as gone.
-            reset_miss_for_id(tx, source, id)?;
-            continue;
-        }
+            .find(|((_pid, indexed_id), _)| indexed_id == id)
+            .map(|(_, hashes)| hashes);
         let Some(record) = read_full(id) else {
             warn!(
                 ?source,
@@ -354,7 +353,21 @@ where
             );
             continue;
         };
-        upsert(tx, source, &record)?;
+        // The "skip upsert" shortcut requires BOTH hashes to match: the
+        // user-visible content_hash (title/summary/body) AND the index_hash
+        // (every other load-bearing field — tags, signature_status, etc.).
+        // content_hash alone misses tag-only / status-only edits.
+        let new_index_hash = compute_index_hash(&record);
+        if let Some((cached_content, cached_index)) = cached_hashes
+            && cached_content == candidate_content_hash
+            && cached_index == &new_index_hash
+        {
+            // Present + unchanged: refresh the miss counter — it may have been
+            // bumped on a prior pass that observed this id as gone.
+            reset_miss_for_id(tx, source, id)?;
+            continue;
+        }
+        upsert(tx, source, &record, &new_index_hash)?;
         per_source.upserts += 1;
         outcome.upserts += 1;
         reset_miss_for_id(tx, source, id)?;
@@ -414,7 +427,12 @@ fn apply_deletes(
     Ok(())
 }
 
-fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(), IndexerError> {
+fn upsert(
+    tx: &Transaction<'_>,
+    source: Source,
+    r: &UnifiedRecord,
+    index_hash: &str,
+) -> Result<(), IndexerError> {
     let tags_json = serde_json::to_string(&r.tags).expect("serializable record fields");
     let tags_fts = normalize_tags_for_fts(&tags_json);
     let session_refs_json =
@@ -450,8 +468,8 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
              summary = ?3, body = ?4, body_origin_path = ?5, tags = ?6, tags_fts = ?7, \
              confidence = ?8, outcome = ?9, agent = ?10, session_refs = ?11, files = ?12, \
              commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
-             signature_status = ?17, extras = ?18, indexed_at = ?19 \
-             WHERE rowid = ?20",
+             index_hash = ?17, signature_status = ?18, extras = ?19, indexed_at = ?20 \
+             WHERE rowid = ?21",
             params![
                 r.record_type.as_db_str(),
                 r.title,
@@ -469,6 +487,7 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
                 r.created.to_rfc3339(),
                 r.updated.to_rfc3339(),
                 r.content_hash,
+                index_hash,
                 signature_status,
                 extras_json,
                 now,
@@ -479,10 +498,10 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
         tx.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, summary, body, \
              body_origin_path, tags, tags_fts, confidence, outcome, agent, session_refs, \
-             files, commits, created, updated, content_hash, signature_status, extras, \
-             indexed_at) VALUES \
+             files, commits, created, updated, content_hash, index_hash, signature_status, \
+             extras, indexed_at) VALUES \
              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-              ?19, ?20, ?21, ?22)",
+              ?19, ?20, ?21, ?22, ?23)",
             params![
                 r.id,
                 source.as_db_str(),
@@ -503,6 +522,7 @@ fn upsert(tx: &Transaction<'_>, source: Source, r: &UnifiedRecord) -> Result<(),
                 r.created.to_rfc3339(),
                 r.updated.to_rfc3339(),
                 r.content_hash,
+                index_hash,
                 signature_status,
                 extras_json,
                 now,

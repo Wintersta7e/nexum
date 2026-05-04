@@ -299,9 +299,9 @@ mod tests {
         let sig = if signed { "verified" } else { "unsigned" };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, created, updated, content_hash, signature_status, indexed_at) \
+             tags_fts, created, updated, content_hash, index_hash, signature_status, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?2, ?3, '[]', '', \
-                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', ?4, '2026-04-29T00:00:00Z')",
+                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, '2026-04-29T00:00:00Z')",
             rusqlite::params![id, title, body, sig],
         )
         .unwrap();

@@ -90,11 +90,11 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
-             content_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, signature_status, indexed_at) VALUES \
              ('a','local','p','decision','x','','[]','','manual','[]','[]','[]','medium', \
-              '2026-04-01T00:00:00Z','2026-04-01T00:00:00Z','h','unsigned','2026-04-29T00:00:00Z'), \
+              '2026-04-01T00:00:00Z','2026-04-01T00:00:00Z','h','ih','unsigned','2026-04-29T00:00:00Z'), \
              ('b','cc-native','p','decision','y','','[]','','claude-code','[]','[]','[]','medium', \
-              '2026-04-02T00:00:00Z','2026-04-02T00:00:00Z','h','unsigned','2026-04-29T00:00:00Z')",
+              '2026-04-02T00:00:00Z','2026-04-02T00:00:00Z','h','ih','unsigned','2026-04-29T00:00:00Z')",
             [],
         )
         .unwrap();

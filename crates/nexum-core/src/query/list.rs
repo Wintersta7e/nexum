@@ -188,10 +188,10 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, \
-             created, updated, content_hash, signature_status, indexed_at) \
+             created, updated, content_hash, index_hash, signature_status, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
                      '[]', '[]', '[]', 'medium', \
-                     '2026-01-01T00:00:00Z', ?2, 'h', 'verified', '2026-04-29T00:01:00Z')",
+                     '2026-01-01T00:00:00Z', ?2, 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             rusqlite::params![id, updated],
         )
         .unwrap();
@@ -244,9 +244,9 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
-             content_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, signature_status, indexed_at) VALUES \
              ('r1', 'local', 'p', 'recommendation', 't', '', '[]', '', 'manual', '[]', '[]', '[]', \
-              'medium', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'verified', '2026-04-29T00:01:00Z')",
+              'medium', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

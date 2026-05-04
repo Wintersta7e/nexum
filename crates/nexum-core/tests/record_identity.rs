@@ -21,11 +21,11 @@ fn insert_minimal(conn: &Connection, id: &str, source: Source, project_id: &str)
         "INSERT INTO records (
             id, record_type, title, body, source, project_id,
             agent, confidence, outcome, signature_status, tags, tags_fts,
-            session_refs, commits, files, created, updated, content_hash, indexed_at
+            session_refs, commits, files, created, updated, content_hash, index_hash, indexed_at
          ) VALUES (?1, 'decision', ?2, 'b', ?3, ?4,
             'claude-code', 'medium', 'working', 'verified', '[]', '',
             '[]', '[]', '[]', '2026-05-04T00:00:00Z',
-            '2026-05-04T00:00:00Z', 'h', '2026-05-04T00:00:00Z')",
+            '2026-05-04T00:00:00Z', 'h', 'ih', '2026-05-04T00:00:00Z')",
         rusqlite::params![id, format!("t-{id}"), source.as_db_str(), project_id],
     )
     .unwrap();
@@ -70,11 +70,11 @@ fn same_source_project_id_triple_is_unique() {
         "INSERT INTO records (
             id, record_type, title, body, source, project_id,
             agent, confidence, outcome, signature_status, tags, tags_fts,
-            session_refs, commits, files, created, updated, content_hash, indexed_at
+            session_refs, commits, files, created, updated, content_hash, index_hash, indexed_at
          ) VALUES ('x', 'decision', 't', 'b', 'cc-native', 'git:p',
             'claude-code', 'medium', 'working', 'verified', '[]', '',
             '[]', '[]', '[]', '2026-05-04T00:00:00Z',
-            '2026-05-04T00:00:00Z', 'h', '2026-05-04T00:00:00Z')",
+            '2026-05-04T00:00:00Z', 'h', 'ih', '2026-05-04T00:00:00Z')",
         [],
     );
     assert!(result.is_err(), "duplicate composite key must error");

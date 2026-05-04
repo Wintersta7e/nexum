@@ -38,10 +38,10 @@ pub(crate) fn insert_minimal_record(
         "INSERT INTO records (
             id, record_type, title, body, source, project_id,
             signature_status, tags, tags_fts,
-            created, updated, content_hash, indexed_at
+            created, updated, content_hash, index_hash, indexed_at
          ) VALUES (?1, 'feedback', ?2, 'b', 'local', 'git:test',
             ?3, '[]', '',
-            ?4, ?4, 'h', ?4)",
+            ?4, ?4, 'h', 'ih', ?4)",
         params![
             id,
             format!("title-{id}"),

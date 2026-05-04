@@ -114,3 +114,79 @@ fn second_pass_with_unchanged_corpus_is_zero_upserts() {
     let second = indexer_run(&mut conn, &cfg, &paths).unwrap();
     assert_eq!(second.upserts, 0);
 }
+
+#[test]
+fn tag_change_alone_triggers_reindex() {
+    // Regression: editing only the tag list of a record (title / summary /
+    // body unchanged) must still re-upsert. Before index_hash landed the
+    // indexer skipped on content_hash alone, silently dropping tag edits.
+    let home = NexumTestHome::new().unwrap();
+    let paths = home.paths();
+    let nb = home.path().join("notebook.git");
+    std::fs::create_dir_all(&nb).unwrap();
+
+    let yaml_path = nb.join("decisions").join("rec.yml");
+    std::fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
+    let yaml_v1 = "schema_version: 1\n\
+         id: rec\n\
+         record_type: decision\n\
+         title: rec\n\
+         body: |\n  same body\n\
+         project_id: example\n\
+         tags: [a]\n\
+         agent: manual\n\
+         created: 2026-04-29T00:00:00Z\n\
+         updated: 2026-04-29T00:00:00Z\n\
+         confidence: high\n\
+         outcome: working\n";
+    std::fs::write(&yaml_path, yaml_v1).unwrap();
+
+    let cfg = common::test_cfg_local_only();
+    let mut conn = open_or_create(&paths.index_db).unwrap();
+    let first = indexer_run(&mut conn, &cfg, &paths).unwrap();
+    assert_eq!(first.upserts, 1);
+    let index_hash_v1: String = conn
+        .query_row("SELECT index_hash FROM records WHERE id = 'rec'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let content_hash_v1: String = conn
+        .query_row(
+            "SELECT content_hash FROM records WHERE id = 'rec'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Edit ONLY tags. title / summary / body stay byte-identical, so
+    // content_hash must NOT change. index_hash MUST change.
+    let yaml_v2 = yaml_v1.replace("tags: [a]", "tags: [a, b]");
+    assert_ne!(yaml_v1, yaml_v2, "test must actually mutate tags");
+    std::fs::write(&yaml_path, yaml_v2).unwrap();
+
+    let second = indexer_run(&mut conn, &cfg, &paths).unwrap();
+    assert_eq!(
+        second.upserts, 1,
+        "tag-only edit must trigger re-upsert (regression: previously 0)"
+    );
+    let index_hash_v2: String = conn
+        .query_row("SELECT index_hash FROM records WHERE id = 'rec'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let content_hash_v2: String = conn
+        .query_row(
+            "SELECT content_hash FROM records WHERE id = 'rec'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        index_hash_v1, index_hash_v2,
+        "index_hash must change when tags change"
+    );
+    assert_eq!(
+        content_hash_v1, content_hash_v2,
+        "content_hash must NOT change when only tags change"
+    );
+}
