@@ -3,7 +3,9 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
+use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustPolicy};
+
+use super::resolve_trust_basis;
 
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
 
@@ -88,7 +90,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             body: row.get::<_, String>(4)?,
             source: row.get::<_, String>(5)?,
             project_id: row.get(6)?,
-            signature_status: row.get::<_, String>(7)?,
+            signature_status: SignatureStatus::from_db_str(&row.get::<_, String>(7)?),
             updated: row.get(8)?,
             trust_basis: row.get::<_, Option<String>>(9)?,
             warning_code: row.get::<_, Option<String>>(10)?,
@@ -114,7 +116,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             // ordinal above is the actual ranking signal; the underlying
             // bm25 value is intentionally not surfaced here.
 
-            let is_unsigned = r.signature_status.as_str() != "verified";
+            let is_unsigned = r.signature_status != SignatureStatus::Verified;
             if is_unsigned && !opts.filters.no_unsigned_penalty {
                 score *= opts.unsigned_ranking_penalty;
             }
@@ -125,11 +127,11 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
 
     // require_signed override.
     if opts.filters.require_signed {
-        scored.retain(|(r, _)| r.signature_status == "verified");
+        scored.retain(|(r, _)| r.signature_status == SignatureStatus::Verified);
     }
     // hide policy: drop unverified.
     if opts.trust_policy == TrustPolicy::Hide {
-        scored.retain(|(r, _)| r.signature_status == "verified");
+        scored.retain(|(r, _)| r.signature_status == SignatureStatus::Verified);
     }
 
     let total = u32::try_from(scored.len()).unwrap_or(u32::MAX);
@@ -167,19 +169,10 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
     } else {
         None
     };
-    let signature_status = SignatureStatus::from_db_str(&r.signature_status);
-    // Prefer the persisted basis when the verifier wrote one; fall back
-    // to deriving Current-on-verified for rows that pre-date the
-    // verifier-provenance column.
-    let trust_basis = r.trust_basis.as_deref().map(TrustBasis::from_db_str).or({
-        if matches!(signature_status, SignatureStatus::Verified) {
-            Some(TrustBasis::Current)
-        } else {
-            None
-        }
-    });
+    // `r.signature_status` is already parsed into the enum at query_map time.
+    let trust_basis = resolve_trust_basis(r.trust_basis.as_deref(), r.signature_status);
     let mut warnings: Vec<String> = Vec::new();
-    if signature_status != SignatureStatus::Verified {
+    if r.signature_status != SignatureStatus::Verified {
         warnings.push("unsigned".into());
     }
     if let Some(code) = r.warning_code.filter(|s| !s.is_empty()) {
@@ -193,7 +186,7 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         score,
         source: Source::from_db_str(&r.source),
         project_id: r.project_id,
-        signature_status,
+        signature_status: r.signature_status,
         trust_basis,
         record_commit_sha: r.record_commit_sha,
         signer_fingerprint: r.signer_fingerprint,
@@ -212,7 +205,7 @@ struct FtsRow {
     body: String,
     source: String,
     project_id: String,
-    signature_status: String,
+    signature_status: SignatureStatus,
     updated: String,
     trust_basis: Option<String>,
     warning_code: Option<String>,

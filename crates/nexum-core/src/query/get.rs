@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{
     Agent, Confidence, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey, RecordType,
-    SessionRef, SignatureStatus, Source, TrustBasis, TrustPolicy, UnifiedRecord,
+    SessionRef, SignatureStatus, Source, TrustPolicy, UnifiedRecord,
 };
 
-use super::types::QueryError;
+use super::{resolve_trust_basis, types::QueryError};
 
 /// `get` options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,13 +155,7 @@ fn build_record(
     // Prefer the persisted `trust_basis` column when present; fall back to the
     // signature-status default for rows written before the column existed
     // or by adapters that don't track basis.
-    let trust_basis = raw.trust_basis.as_deref().map(TrustBasis::from_db_str).or(
-        if signature_status == SignatureStatus::Verified {
-            Some(TrustBasis::Current)
-        } else {
-            None
-        },
-    );
+    let trust_basis = resolve_trust_basis(raw.trust_basis.as_deref(), signature_status);
     let extras: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(raw.extras.as_deref().unwrap_or("{}"))?;
     let tags: Vec<String> = serde_json::from_str(&raw.tags)?;

@@ -4,8 +4,11 @@
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use super::types::{Meta, QueryError, ResultSet, SearchResult};
-use crate::records::{RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
+use super::{
+    resolve_trust_basis,
+    types::{Meta, QueryError, ResultSet, SearchResult},
+};
+use crate::records::{RecordType, SignatureStatus, Source, TrustPolicy};
 
 /// Discriminator for [`by_session`] queries — names the kind of session
 /// reference to look up.
@@ -73,13 +76,21 @@ pub fn by_session(
                ORDER BY records.updated DESC";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![pattern], |r| {
-        // Materialize trust_basis and warning_code from the persisted
-        // columns when present; the verified-row default is filled in
-        // below alongside the unsigned-warning push.
+        let signature_status = SignatureStatus::from_db_str(&r.get::<_, String>(6)?);
         let basis_db: Option<String> = r.get(8)?;
         let warn_code: Option<String> = r.get(9)?;
         let record_commit_sha: Option<String> = r.get(10)?;
         let signer_fingerprint: Option<String> = r.get(11)?;
+        // Build warnings and trust_basis at construction time, matching
+        // the same projection shape used by the other read verbs.
+        let trust_basis = resolve_trust_basis(basis_db.as_deref(), signature_status);
+        let mut warnings: Vec<String> = Vec::new();
+        if signature_status != SignatureStatus::Verified {
+            warnings.push("unsigned".into());
+        }
+        if let Some(code) = warn_code.filter(|s| !s.is_empty()) {
+            warnings.push(code);
+        }
         Ok(SearchResult {
             id: r.get(0)?,
             record_type: RecordType::from_db_str(&r.get::<_, String>(1)?),
@@ -88,23 +99,20 @@ pub fn by_session(
             score: 0.0,
             source: Source::from_db_str(&r.get::<_, String>(4)?),
             project_id: r.get(5)?,
-            signature_status: SignatureStatus::from_db_str(&r.get::<_, String>(6)?),
-            trust_basis: basis_db.as_deref().map(TrustBasis::from_db_str),
+            signature_status,
+            trust_basis,
             record_commit_sha,
             signer_fingerprint,
-            warnings: warn_code
-                .filter(|s| !s.is_empty())
-                .map_or_else(Vec::new, |c| vec![c]),
+            warnings,
             body: None,
             updated: r.get(7)?,
         })
     })?;
-    let mut results: Vec<SearchResult> = rows.collect::<Result<Vec<_>, _>>()?;
+    let results: Vec<SearchResult> = rows.collect::<Result<Vec<_>, _>>()?;
 
-    // Empty-result fast path: skip the trust-basis loop and any further
-    // bookkeeping. Returning a fresh `ResultSet` is also more honest — an
-    // empty session lookup shouldn't paint the global meta envelope onto
-    // the response.
+    // Empty-result fast path: skip any further bookkeeping. Returning a
+    // fresh `ResultSet` is also more honest — an empty session lookup
+    // shouldn't paint the global meta envelope onto the response.
     if results.is_empty() {
         return Ok(ResultSet {
             results,
@@ -115,19 +123,6 @@ pub fn by_session(
                 ..Default::default()
             },
         });
-    }
-
-    for r in &mut results {
-        if r.signature_status == SignatureStatus::Verified {
-            // Only fill the verified default when the verifier hasn't
-            // already written a basis; future verifier work may persist a
-            // richer value such as `historical` or `pre-reanchor`.
-            if r.trust_basis.is_none() {
-                r.trust_basis = Some(TrustBasis::Current);
-            }
-        } else {
-            r.warnings.push("unsigned".into());
-        }
     }
 
     // Apply trust-policy filter: under Hide, strip unsigned and invalid rows

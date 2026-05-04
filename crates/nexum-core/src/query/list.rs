@@ -4,10 +4,11 @@
 use rusqlite::Connection;
 
 use super::{
+    resolve_trust_basis,
     search::build_filter_sql,
     types::{Filters, QueryError, ResultSet, SearchResult},
 };
-use crate::records::{RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
+use crate::records::{RecordType, SignatureStatus, Source, TrustPolicy};
 
 /// Sentinel used in the keyset compare when no cursor is supplied. Any
 /// `updated` string (RFC3339 timestamp) compares strictly less than this
@@ -159,16 +160,7 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
 /// the verb stays under the strict-clippy `too-many-lines` threshold.
 fn row_to_search_result(raw: ListRow) -> SearchResult {
     let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
-    // Prefer the persisted basis when the verifier wrote one; fall back
-    // to deriving Current-on-verified for rows pre-dating the column or
-    // written by adapters that don't track basis.
-    let trust_basis = raw.trust_basis.as_deref().map(TrustBasis::from_db_str).or({
-        if signature_status == SignatureStatus::Verified {
-            Some(TrustBasis::Current)
-        } else {
-            None
-        }
-    });
+    let trust_basis = resolve_trust_basis(raw.trust_basis.as_deref(), signature_status);
     let mut warnings: Vec<String> = Vec::new();
     if signature_status != SignatureStatus::Verified {
         warnings.push("unsigned".into());
