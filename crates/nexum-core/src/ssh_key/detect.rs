@@ -1,4 +1,4 @@
-//! SSH key detection — §8 step 2 lookup order.
+//! SSH key detection — standard lookup order for `nexum init`.
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,7 @@ pub enum SshKeyError {
     /// A public key line could not be parsed.
     #[error("failed to parse public key: {0}")]
     ParsePublicKey(String),
-    /// No SSH key was found in the §8 step 2 lookup chain.
+    /// No SSH key was found in the standard lookup chain.
     #[error("no SSH key found — generate one via `ssh-keygen -t ed25519`, then re-run")]
     NoKeyFound,
     /// The override path's `.pub` file does not exist.
@@ -41,7 +41,7 @@ pub enum SshKeyError {
 
 /// Detect the SSH signing key to use for `nexum init`.
 ///
-/// Lookup order (§8 step 2):
+/// Lookup order:
 /// 1. `override_path` (private key path; derives `.pub` by appending `.pub`).
 /// 2. `<home>/.ssh/id_ed25519`
 /// 3. `<home>/.ssh/id_rsa`

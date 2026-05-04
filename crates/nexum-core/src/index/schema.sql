@@ -1,5 +1,5 @@
--- §7 index DDL. Loaded into Rust via include_str! and applied by
--- index::schema::apply(). Keep in sync with §7 of the design spec.
+-- Index DDL. Loaded into Rust via include_str! and applied by
+-- index::schema::apply().
 
 -- CHECK constraints apply on freshly-created records tables. Existing DBs
 -- migrated via migrate_existing (ADD COLUMN only) continue to operate correctly

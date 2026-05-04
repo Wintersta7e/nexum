@@ -1,7 +1,7 @@
 //! Project the canonical `events.yml` event log into the three derived
-//! OpenSSH-format signer files (§9 trust file storage).
+//! OpenSSH-format signer files derived from the trust event log.
 //!
-//! Rules (§9):
+//! Rules:
 //! - `historical_signers` — monotonic union of every `public_key` ever added
 //!   (`BootstrapKey`, `KeyAdded`, `BootstrapReanchor`.`new_fingerprint`). Never removes keys.
 //! - `allowed_signers` — current active signers: those present in historical
@@ -73,8 +73,8 @@ pub fn regenerate_files(
                 new_fingerprint, ..
             } => {
                 // The new key's public_key blob is not inline in this event variant.
-                // Per §9 M1b flow, the reanchor is always preceded by a KeyAdded event
-                // that carries the new public_key, so historical already contains it.
+                // A reanchor is always preceded by a KeyAdded event that carries the
+                // new public_key, so historical already contains it.
                 // Nothing to insert here; silently skip unknown new_fingerprint.
                 let _ = new_fingerprint;
             }

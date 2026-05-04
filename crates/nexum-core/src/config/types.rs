@@ -1,7 +1,7 @@
 //! Serde types for `~/.nexum/config.toml`.
 //!
-//! Mirrors the §8 "Initial config.toml" block verbatim — field names and section
-//! names are canonical. Changes to this file should be accompanied by a spec patch.
+//! Field names and section names mirror the seed shape produced by `Config::seed()`.
+//! They are canonical: changes here should be accompanied by a migration in the I/O layer.
 
 use serde::{Deserialize, Serialize};
 
@@ -120,7 +120,7 @@ pub struct PromoteConfig {
 }
 
 impl Config {
-    /// Produce the §8 seed shape with empty bootstrap fields.
+    /// Produce the default seed shape with empty bootstrap fields.
     /// Caller fills `trust.bootstrap` after key detection.
     #[must_use]
     pub fn seed() -> Self {

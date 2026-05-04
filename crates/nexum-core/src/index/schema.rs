@@ -1,4 +1,4 @@
-//! §7 index DDL constant + `apply()` helper that lands it onto a connection
+//! Index DDL constant + `apply()` helper that lands it onto a connection
 //! and verifies the expected tables / triggers exist post-apply.
 
 use rusqlite::Connection;
@@ -11,7 +11,7 @@ pub enum SchemaError {
     Missing { what: String },
 }
 
-/// Verbatim §7 DDL. Loaded from a sibling .sql file so SQL tooling works.
+/// Verbatim index DDL. Loaded from a sibling .sql file so SQL tooling works.
 pub const DDL: &str = include_str!("schema.sql");
 
 /// Apply the index DDL to a connection.

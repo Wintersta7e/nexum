@@ -1,4 +1,4 @@
-//! Path canonicalization (§13, Linux + WSL2 only).
+//! Path canonicalization (Linux + WSL2 only).
 //!
 //! `canonicalize_path` runs:
 //!   1. Platform normalization: on WSL2, `C:\path` → `/mnt/c/path`. On Linux
@@ -8,7 +8,7 @@
 //!   3. Trailing separator strip.
 //!
 //! `path_hint(canonical)` SHA256-hashes the path and returns the first 16 hex
-//! chars (= 64 bits of identity) per §13 step 5.
+//! chars (= 64 bits of identity).
 //!
 //! Junctions, subst drives, UNC paths, Git Bash form, and case-insensitive FS
 //! are not yet handled.
@@ -25,7 +25,7 @@ pub enum CanonError {
     Io(#[from] std::io::Error),
 }
 
-/// Return the canonical form of `input` per §13 (Linux + WSL2 layer).
+/// Return the canonical form of `input` (Linux + WSL2 layer).
 ///
 /// Note: this calls `std::fs::canonicalize`, which means the input MUST exist
 /// on disk (or the call returns an io error). Callers that need a "best-effort"
@@ -50,13 +50,13 @@ pub fn canonicalize_path(input: &Path) -> Result<PathBuf, CanonError> {
     Ok(strip_trailing_separator(&resolved))
 }
 
-/// SHA256-hash a canonicalized path; return first 16 hex chars per §13 step 5.
+/// SHA256-hash a canonicalized path; return the first 16 hex chars (64 bits of identity).
 #[must_use]
 pub fn path_hint(canonical: &Path) -> String {
     sha256_hex16(canonical.to_string_lossy().as_bytes())
 }
 
-/// Canonicalize a git remote URL per §13:
+/// Canonicalize a git remote URL:
 ///   1. Strip credentials: `https://user:pass@host/repo.git` → `https://host/repo.git`
 ///   2. Normalize SSH form: `git@github.com:user/repo.git` → `ssh://git@github.com/user/repo.git`
 ///   3. Strip trailing `.git`
@@ -73,7 +73,7 @@ pub fn canonicalize_git_url(input: &str) -> String {
     lowercase_host(&s)
 }
 
-/// Hash a canonicalized git URL; returns `git:<16-hex>` per §13 step 5.
+/// Hash a canonicalized git URL; returns `git:<16-hex>`.
 #[must_use]
 pub fn git_url_hint(canonical: &str) -> String {
     format!("git:{}", sha256_hex16(canonical.as_bytes()))

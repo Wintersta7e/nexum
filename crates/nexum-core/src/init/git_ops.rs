@@ -1,8 +1,8 @@
 //! Shell-out git helpers for `nexum init`.
 //!
 //! Production signing requires `git -c gpg.format=ssh …` because `git2` has
-//! no SSH-signing path (confirmed by spike S6). All helpers use
-//! `std::process::Command` and capture stdout/stderr for diagnostic errors.
+//! no SSH-signing path. All helpers use `std::process::Command` and capture
+//! stdout/stderr for diagnostic errors.
 
 use std::{
     path::Path,
@@ -46,8 +46,8 @@ pub fn git_init(repo_path: &Path) -> Result<(), InitError> {
 /// Configures `gpg.format`, `user.signingkey`, `user.email`, `user.name`,
 /// `commit.gpgsign`, `tag.gpgsign`, and `gpg.ssh.allowedSignersFile`.
 ///
-/// `private_key_path` must be an absolute path (§8 step 5 note — bare
-/// fingerprints do not work with git's SSH backend).
+/// `private_key_path` must be an absolute path — bare fingerprints do not
+/// work with git's SSH backend.
 ///
 /// # Errors
 ///

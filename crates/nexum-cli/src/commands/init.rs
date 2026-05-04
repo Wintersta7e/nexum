@@ -1,7 +1,7 @@
 //! `nexum init` CLI handler.
 //!
-//! Parses flags, presents a confirm-key prompt when `--ssh-key` is not given
-//! (§8 step 3), then delegates to `nexum_core::init::run`.
+//! Parses flags, presents a confirm-key prompt when `--ssh-key` is not given,
+//! then delegates to `nexum_core::init::run`.
 //! `nexum_core::init::run` stays non-interactive for testability; the prompt
 //! lives here in the CLI layer.
 
@@ -49,7 +49,7 @@ pub fn run(args: &InitArgs) -> ExitCode {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
 
-    // §8 step 3: if --ssh-key not given, detect candidate and ask user to confirm.
+    // If --ssh-key not given, detect candidate and ask user to confirm.
     let resolved_ssh_key: Option<PathBuf> = if let Some(explicit) = &args.ssh_key {
         Some(explicit.clone())
     } else if args.yes {

@@ -6,7 +6,7 @@ use super::SshKeyError;
 
 /// Parse an OpenSSH public key line (`ssh-ed25519 AAAA... comment`) and return
 /// its SHA-256 fingerprint in the canonical `SHA256:<base64>` form used by
-/// OpenSSH and throughout the nexum trust state machine (§9).
+/// OpenSSH and throughout the nexum trust state machine.
 ///
 /// # Errors
 ///

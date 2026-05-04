@@ -1,6 +1,6 @@
 //! Trust event log types and signer-file projection.
 //!
-//! `events::EventLog` is the canonical structured event log (§9).
+//! `events::EventLog` is the canonical structured event log.
 //! `regenerate::regenerate_files` projects it into the three derived
 //! OpenSSH-format signer files (`historical_signers`, `allowed_signers`,
 //! `revoked_signers`).

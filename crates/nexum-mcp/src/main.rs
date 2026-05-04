@@ -1,7 +1,6 @@
 //! `nexum-mcp` — stdio MCP server binary.
 //!
-//! Stub for the design at `docs/spec/2026-04-29-nexum-design.md` §6.
-//! M1 implementation is gated on the pre-M1 stack-validation spike (§3.6).
+//! Stub. The MCP server implementation is not yet wired up.
 
 #![forbid(unsafe_code)]
 
@@ -17,7 +16,7 @@ async fn main() -> Result<()> {
         .init();
 
     eprintln!(
-        "nexum-mcp {} — pre-M1 stub. See docs/spec/ for the design; MCP server not yet implemented.",
+        "nexum-mcp {} — stub. MCP server not yet implemented.",
         nexum_core::version()
     );
     Ok(())
