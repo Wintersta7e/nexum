@@ -11,13 +11,13 @@ mod common;
 
 use common::NexumTestHome;
 use nexum_core::api;
-use nexum_core::query::{Filters, GetOpts, QueryError, SearchOpts};
+use nexum_core::query::{Filters, GetOpts, QueryError, SearchOpts, SessionLookup};
 use nexum_core::records::RecordKey;
 
-fn assert_index_missing(err_msg: &str, paths_dbg: &str) {
+fn assert_index_missing(err: &api::ApiError) {
     assert!(
-        err_msg.contains("index database not found"),
-        "expected IndexMissing message at `{paths_dbg}`, got: `{err_msg}`"
+        matches!(err, api::ApiError::Query(QueryError::IndexMissing { .. })),
+        "expected ApiError::Query(QueryError::IndexMissing), got: `{err:?}`"
     );
 }
 
@@ -33,12 +33,7 @@ fn search_against_missing_index_errors_without_creating_db() {
 
     let result = api::search(&paths, &cfg, &SearchOpts::new(""));
     let err = result.expect_err("search must error when index is missing");
-    let err_str = format!("{err}");
-    assert_index_missing(&err_str, &paths.index_db.display().to_string());
-    assert!(
-        matches!(err, api::ApiError::Query(QueryError::IndexMissing { .. })),
-        "expected ApiError::Query(QueryError::IndexMissing), got `{err:?}`"
-    );
+    assert_index_missing(&err);
     assert!(
         !paths.index_db.exists(),
         "search must not create the index DB"
@@ -54,11 +49,7 @@ fn list_against_missing_index_errors_without_creating_db() {
 
     let result = api::list(&paths, &cfg, &Filters::default(), 50, None);
     let err = result.expect_err("list must error when index is missing");
-    assert_index_missing(&format!("{err}"), &paths.index_db.display().to_string());
-    assert!(
-        matches!(err, api::ApiError::Query(QueryError::IndexMissing { .. })),
-        "expected ApiError::Query(QueryError::IndexMissing), got `{err:?}`"
-    );
+    assert_index_missing(&err);
     assert!(
         !paths.index_db.exists(),
         "list must not create the index DB"
@@ -74,11 +65,7 @@ fn get_against_missing_index_errors_without_creating_db() {
     let key = RecordKey::bare("anything");
     let result = api::get(&paths, &key, &GetOpts::default());
     let err = result.expect_err("get must error when index is missing");
-    assert_index_missing(&format!("{err}"), &paths.index_db.display().to_string());
-    assert!(
-        matches!(err, api::ApiError::Query(QueryError::IndexMissing { .. })),
-        "expected ApiError::Query(QueryError::IndexMissing), got `{err:?}`"
-    );
+    assert_index_missing(&err);
     assert!(!paths.index_db.exists(), "get must not create the index DB");
 }
 
@@ -91,11 +78,7 @@ fn recent_against_missing_index_errors_without_creating_db() {
 
     let result = api::recent(&paths, &cfg, 10, None);
     let err = result.expect_err("recent must error when index is missing");
-    assert_index_missing(&format!("{err}"), &paths.index_db.display().to_string());
-    assert!(
-        matches!(err, api::ApiError::Query(QueryError::IndexMissing { .. })),
-        "expected ApiError::Query(QueryError::IndexMissing), got `{err:?}`"
-    );
+    assert_index_missing(&err);
     assert!(
         !paths.index_db.exists(),
         "recent must not create the index DB"
@@ -110,13 +93,28 @@ fn list_projects_against_missing_index_errors_without_creating_db() {
 
     let result = api::list_projects(&paths);
     let err = result.expect_err("list_projects must error when index is missing");
-    assert_index_missing(&format!("{err}"), &paths.index_db.display().to_string());
-    assert!(
-        matches!(err, api::ApiError::Query(QueryError::IndexMissing { .. })),
-        "expected ApiError::Query(QueryError::IndexMissing), got `{err:?}`"
-    );
+    assert_index_missing(&err);
     assert!(
         !paths.index_db.exists(),
         "list_projects must not create the index DB"
+    );
+}
+
+#[test]
+fn by_session_against_missing_index_errors_without_creating_db() {
+    let home = NexumTestHome::new().unwrap();
+    let paths = home.paths();
+    let cfg = common::test_cfg_local_only();
+    assert!(!paths.index_db.exists());
+
+    let lookup = SessionLookup::CcSession {
+        uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+    };
+    let result = api::by_session(&paths, &cfg, &lookup);
+    let err = result.expect_err("by_session must error when index is missing");
+    assert_index_missing(&err);
+    assert!(
+        !paths.index_db.exists(),
+        "by_session must not create the index DB"
     );
 }

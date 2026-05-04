@@ -33,6 +33,10 @@ pub enum IndexerError {
 /// fails fast, and `busy_timeout = 5000` so a concurrent indexer
 /// writer doesn't immediately error out reads. Does not run DDL.
 ///
+/// Uses `OpenFlags` without `SQLITE_OPEN_CREATE` so `SQLite` itself
+/// enforces the no-create invariant even if the `path.exists()` pre-check
+/// loses a race with a concurrent delete.
+///
 /// # Errors
 /// Returns `QueryError::IndexMissing { path }` when the database file
 /// is absent. Returns `QueryError::Rusqlite` on any rusqlite error
@@ -44,7 +48,10 @@ pub fn open_existing(path: &Path) -> Result<Connection, crate::query::QueryError
         });
     }
     register_sqlite_vec_once();
-    let conn = Connection::open(path)?;
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     conn.execute_batch(
         "PRAGMA query_only = ON; \
          PRAGMA busy_timeout = 5000;",
