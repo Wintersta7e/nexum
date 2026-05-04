@@ -16,8 +16,11 @@ pub enum QueryError {
     Json(#[from] serde_json::Error),
     #[error("invalid filter value: {detail}")]
     InvalidFilter { detail: String },
-    #[error("index missing — run `nexum index` first")]
-    IndexMissing,
+    #[error(
+        "index database not found at `{}`; run `nexum index` first to populate it",
+        path.display()
+    )]
+    IndexMissing { path: std::path::PathBuf },
     /// A bare-id or partial-key lookup matched more than one row. The
     /// caller should disambiguate by supplying a fully-qualified
     /// `RecordKey` (e.g. `local:git:abc:my-record`).

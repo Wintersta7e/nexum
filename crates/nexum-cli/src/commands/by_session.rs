@@ -3,7 +3,10 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, query::SessionLookup};
+use nexum_core::{
+    api,
+    query::{QueryError, SessionLookup},
+};
 
 #[derive(Args, Debug)]
 pub struct BySessionArgs {
@@ -45,6 +48,13 @@ pub fn run(args: &BySessionArgs) -> ExitCode {
                 }
             }
             ExitCode::SUCCESS
+        }
+        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
+            eprintln!(
+                "error: no index database at `{}`; run `nexum index` to populate it",
+                path.display()
+            );
+            ExitCode::from(super::exit_codes::NOT_INDEXED)
         }
         Err(e) => {
             eprintln!("error: {e}");

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    query::{Filters, SearchOpts},
+    query::{Filters, QueryError, SearchOpts},
     records::{Confidence, RecordType, Source},
 };
 
@@ -55,6 +55,13 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     opts.filters = build_filters(args);
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,
+        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
+            eprintln!(
+                "error: no index database at `{}`; run `nexum index` to populate it",
+                path.display()
+            );
+            return ExitCode::from(super::exit_codes::NOT_INDEXED);
+        }
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::from(super::exit_codes::RUNTIME);

@@ -24,9 +24,41 @@ pub enum IndexerError {
     Config(String),
 }
 
+/// Open an existing `index.db` for read-only-ish access. Returns
+/// [`crate::query::QueryError::IndexMissing`] if the file does not exist,
+/// rather than silently creating an empty database — that would mask a
+/// "you forgot to run `nexum index`" error as "no results".
+///
+/// Sets `query_only = ON` so a stray write through this connection
+/// fails fast, and `busy_timeout = 5000` so a concurrent indexer
+/// writer doesn't immediately error out reads. Does not run DDL.
+///
+/// # Errors
+/// Returns `QueryError::IndexMissing { path }` when the database file
+/// is absent. Returns `QueryError::Rusqlite` on any rusqlite error
+/// after the file has been opened.
+pub fn open_existing(path: &Path) -> Result<Connection, crate::query::QueryError> {
+    if !path.exists() {
+        return Err(crate::query::QueryError::IndexMissing {
+            path: path.to_owned(),
+        });
+    }
+    register_sqlite_vec_once();
+    let conn = Connection::open(path)?;
+    conn.execute_batch(
+        "PRAGMA query_only = ON; \
+         PRAGMA busy_timeout = 5000;",
+    )?;
+    Ok(conn)
+}
+
 /// Open `index.db` at `path`, creating + applying the index DDL if the records
 /// table is absent. Registers the sqlite-vec extension globally on first
 /// invocation so subsequent connections see vec0 too.
+///
+/// This is the writer entry point — read verbs should call
+/// [`open_existing`] instead so they surface a clear error when the
+/// index has not been populated yet.
 ///
 /// # Errors
 /// Returns `IndexerError::Rusqlite` if the database can't be opened, or

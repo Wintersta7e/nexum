@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::api;
+use nexum_core::{api, query::QueryError};
 
 #[derive(Args, Debug)]
 pub struct RecentArgs {
@@ -36,6 +36,13 @@ pub fn run(args: &RecentArgs) -> ExitCode {
                 }
             }
             ExitCode::SUCCESS
+        }
+        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
+            eprintln!(
+                "error: no index database at `{}`; run `nexum index` to populate it",
+                path.display()
+            );
+            ExitCode::from(super::exit_codes::NOT_INDEXED)
         }
         Err(e) => {
             eprintln!("error: {e}");

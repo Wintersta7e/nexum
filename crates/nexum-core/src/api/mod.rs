@@ -6,7 +6,7 @@ use crate::{
     config::types::Config,
     indexer::{
         IndexerOutcome,
-        db::open_or_create,
+        db::{open_existing, open_or_create},
         run::{run as indexer_run, run_force as indexer_run_force},
     },
     paths::Paths,
@@ -58,7 +58,7 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
 ///
 /// Returns `ApiError::Query` on rusqlite or filter encoding failure.
 pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
-    let conn = open_or_create(&paths.index_db)?;
+    let conn = open_existing(&paths.index_db)?;
     let mut effective_opts = opts.clone();
     effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
     Ok(query_search(&conn, &effective_opts)?)
@@ -76,7 +76,7 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
 /// Returns `ApiError::Query` on rusqlite / deserialization failure or
 /// when the key matches multiple records (`QueryError::Ambiguous`).
 pub fn get(paths: &Paths, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome, ApiError> {
-    let conn = open_or_create(&paths.index_db)?;
+    let conn = open_existing(&paths.index_db)?;
     Ok(query_get(&conn, key, opts)?)
 }
 
@@ -96,7 +96,7 @@ pub fn list(
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
-    let conn = open_or_create(&paths.index_db)?;
+    let conn = open_existing(&paths.index_db)?;
     Ok(query_list(
         &conn,
         filters,
@@ -121,7 +121,7 @@ pub fn recent(
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
-    let conn = open_or_create(&paths.index_db)?;
+    let conn = open_existing(&paths.index_db)?;
     Ok(query_recent(
         &conn,
         cfg.trust.unsigned_default,
@@ -144,7 +144,7 @@ pub fn by_session(
     cfg: &Config,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, ApiError> {
-    let conn = open_or_create(&paths.index_db)?;
+    let conn = open_existing(&paths.index_db)?;
     Ok(query_by_session(&conn, cfg.trust.unsigned_default, lookup)?)
 }
 
@@ -166,7 +166,7 @@ pub struct ProjectSummary {
 ///
 /// Returns `ApiError::Query` on rusqlite failure.
 pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
-    let conn = open_or_create(&paths.index_db)?;
+    let conn = open_existing(&paths.index_db)?;
     let mut stmt = conn
         .prepare(
             "SELECT project_id, count(*), \
