@@ -26,6 +26,8 @@ pub enum ApiError {
     Query(#[from] crate::query::QueryError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
+    #[error("index schema v{v_disk} is older than this binary (v{v_code}); run `nexum migrate`")]
+    MigrationRequired { v_disk: u32, v_code: u32 },
 }
 
 /// Run a reindex pass (default: incremental).
@@ -170,7 +172,7 @@ pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
     let mut stmt = conn
         .prepare(
             "SELECT project_id, count(*), \
-                sum(CASE WHEN signature_status = 'verified' THEN 1 ELSE 0 END) \
+                sum(CASE WHEN crypto_result = 'good' THEN 1 ELSE 0 END) \
          FROM records \
          GROUP BY project_id \
          ORDER BY count(*) DESC",
@@ -240,13 +242,13 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              ('a','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
-              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','verified','2026-04-29T00:01:00Z'), \
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','good','2026-04-29T00:01:00Z'), \
              ('b','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
-              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','unsigned','2026-04-29T00:01:00Z'), \
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','no-signature','2026-04-29T00:01:00Z'), \
              ('c','local','name:projx','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
-              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','verified','2026-04-29T00:01:00Z')",
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','good','2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

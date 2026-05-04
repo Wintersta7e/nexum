@@ -34,16 +34,16 @@ fn register_sqlite_vec() {
 fn apply_succeeds_on_fresh_connection() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 }
 
 #[test]
 fn apply_creates_all_expected_tables_and_triggers() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -53,8 +53,15 @@ fn apply_creates_all_expected_tables_and_triggers() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     // sqlite-vec creates internal companion tables for vec0 (e.g.,
-    // record_embeddings_chunks, _info, _rowids); just check our 3 are there.
-    for required in ["records", "record_embeddings", "records_fts"] {
+    // record_embeddings_chunks, _info, _rowids); just check our 6 are there.
+    for required in [
+        "records",
+        "record_embeddings",
+        "records_fts",
+        "trust_events",
+        "trust_chain_tampering",
+        "meta",
+    ] {
         assert!(
             tables.iter().any(|t| t == required),
             "missing table {required} in {tables:?}"
@@ -79,19 +86,19 @@ fn apply_creates_all_expected_tables_and_triggers() {
 fn insert_record_propagates_to_records_fts_via_trigger() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 
     // Minimal record insert covering the NOT NULL columns.
     conn.execute(
         "INSERT INTO records (
             id, source, project_id, record_type, title, body, tags, tags_fts,
             agent, confidence, outcome,
-            created, updated, content_hash, index_hash, signature_status, indexed_at
+            created, updated, content_hash, index_hash, crypto_result, indexed_at
         ) VALUES (?1, 'local', 'p', 'decision', ?2, '', ?3, ?4,
                   'manual', 'medium', 'working',
                   '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z',
-                  'h', 'ih', 'unsigned', '2026-04-30T00:00:00Z')",
+                  'h', 'ih', 'no-signature', '2026-04-30T00:00:00Z')",
         rusqlite::params![
             "rec-A",
             "alpha title",
@@ -136,19 +143,19 @@ fn insert_record_propagates_to_records_fts_via_trigger() {
 fn delete_in_correct_order_leaves_no_orphans() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 
     // Insert one record (FTS row populated by records_ai trigger).
     conn.execute(
         "INSERT INTO records (
             id, source, project_id, record_type, title, body, tags, tags_fts,
             agent, confidence, outcome,
-            created, updated, content_hash, index_hash, signature_status, indexed_at
+            created, updated, content_hash, index_hash, crypto_result, indexed_at
         ) VALUES (?1, 'local', 'p', 'decision', ?2, '', ?3, ?4,
                   'manual', 'medium', 'working',
                   '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z',
-                  'h', 'ih', 'unsigned', '2026-04-30T00:00:00Z')",
+                  'h', 'ih', 'no-signature', '2026-04-30T00:00:00Z')",
         rusqlite::params!["rec-B", "beta", r#"["t1"]"#, "t1"],
     )
     .expect("insert");

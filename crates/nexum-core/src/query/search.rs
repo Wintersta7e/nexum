@@ -64,8 +64,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let fts_sql = format!(
         "SELECT records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
-                records.signature_status, records.updated, records.trust_basis, \
-                records.warning_code, records.record_commit_sha, records.signer_fingerprint \
+                records.crypto_result, records.updated, \
+                records.record_commit_sha, records.signer_fingerprint \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -90,12 +90,10 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             body: row.get::<_, String>(4)?,
             source: row.get::<_, String>(5)?,
             project_id: row.get(6)?,
-            signature_status: SignatureStatus::from_db_str(&row.get::<_, String>(7)?),
+            signature_status: SignatureStatus::from_crypto_result_str(&row.get::<_, String>(7)?),
             updated: row.get(8)?,
-            trust_basis: row.get::<_, Option<String>>(9)?,
-            warning_code: row.get::<_, Option<String>>(10)?,
-            record_commit_sha: row.get::<_, Option<String>>(11)?,
-            signer_fingerprint: row.get::<_, Option<String>>(12)?,
+            record_commit_sha: row.get::<_, Option<String>>(9)?,
+            signer_fingerprint: row.get::<_, Option<String>>(10)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -170,13 +168,13 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         None
     };
     // `r.signature_status` is already parsed into the enum at query_map time.
-    let trust_basis = resolve_trust_basis(r.trust_basis.as_deref(), r.signature_status);
+    // `trust_basis` is no longer persisted as a SQL column; pass `None` so the
+    // resolver derives the basis from `signature_status` (Verified -> Current,
+    // otherwise None). Per-record basis projection lands in a later task.
+    let trust_basis = resolve_trust_basis(None, r.signature_status);
     let mut warnings: Vec<String> = Vec::new();
     if r.signature_status != SignatureStatus::Verified {
         warnings.push("unsigned".into());
-    }
-    if let Some(code) = r.warning_code.filter(|s| !s.is_empty()) {
-        warnings.push(code);
     }
     SearchResult {
         id: r.id,
@@ -207,8 +205,6 @@ struct FtsRow {
     project_id: String,
     signature_status: SignatureStatus,
     updated: String,
-    trust_basis: Option<String>,
-    warning_code: Option<String>,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
 }
@@ -308,15 +304,15 @@ mod tests {
     }
 
     fn insert_minimal(conn: &Connection, id: &str, title: &str, body: &str, signed: bool) {
-        let sig = if signed { "verified" } else { "unsigned" };
+        let cr = if signed { "good" } else { "no-signature" };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, confidence, outcome, created, updated, content_hash, index_hash, \
-             signature_status, indexed_at) \
+             crypto_result, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?2, ?3, '[]', '', \
                      'manual', 'medium', 'working', \
                      '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, '2026-04-29T00:00:00Z')",
-            rusqlite::params![id, title, body, sig],
+            rusqlite::params![id, title, body, cr],
         )
         .unwrap();
     }

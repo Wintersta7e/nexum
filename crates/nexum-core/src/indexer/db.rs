@@ -80,14 +80,14 @@ pub fn open_or_create(path: &Path) -> Result<Connection, IndexerError> {
             source: e,
         })?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     let exists: i64 = conn.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='records'",
         [],
         |row| row.get(0),
     )?;
     if exists == 0 {
-        crate::index::schema::apply(&conn)?;
+        crate::index::schema::apply(&mut conn)?;
     } else {
         // Set pragmas on the open connection regardless (WAL is per-DB but
         // busy_timeout / foreign_keys are per-connection).
@@ -143,8 +143,8 @@ fn register_sqlite_vec_once() {
 #[cfg(test)]
 pub(crate) fn open_or_create_in_memory_for_tests() -> rusqlite::Connection {
     register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    crate::index::schema::apply(&conn).unwrap();
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::index::schema::apply(&mut conn).unwrap();
     conn
 }
 
@@ -196,10 +196,10 @@ mod tests {
             conn.execute(
                 "INSERT INTO records (id, source, project_id, record_type, title, body, \
                  tags, tags_fts, agent, confidence, outcome, created, updated, content_hash, \
-                 index_hash, signature_status, indexed_at) VALUES \
+                 index_hash, crypto_result, indexed_at) VALUES \
                  ('rec1', 'local', 'p', 'decision', 'titlec', '', '[]', '', \
                   'manual', 'medium', 'working', \
-                  '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'hashc', 'ih', 'unsigned', \
+                  '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'hashc', 'ih', 'no-signature', \
                   '2026-04-29T00:01:00Z')",
                 [],
             )

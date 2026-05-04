@@ -68,28 +68,24 @@ pub fn by_session(
     let escaped = escape_like(&needle);
     let pattern = format!("%{escaped}%");
     let sql = "SELECT records.id, records.record_type, records.title, records.summary, \
-                      records.source, records.project_id, records.signature_status, records.updated, \
-                      records.trust_basis, records.warning_code, \
+                      records.source, records.project_id, records.crypto_result, records.updated, \
                       records.record_commit_sha, records.signer_fingerprint \
                FROM records \
                WHERE session_refs LIKE ?1 ESCAPE '\\' \
                ORDER BY records.updated DESC";
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![pattern], |r| {
-        let signature_status = SignatureStatus::from_db_str(&r.get::<_, String>(6)?);
-        let basis_db: Option<String> = r.get(8)?;
-        let warn_code: Option<String> = r.get(9)?;
-        let record_commit_sha: Option<String> = r.get(10)?;
-        let signer_fingerprint: Option<String> = r.get(11)?;
-        // Build warnings and trust_basis at construction time, matching
-        // the same projection shape used by the other read verbs.
-        let trust_basis = resolve_trust_basis(basis_db.as_deref(), signature_status);
+        let signature_status = SignatureStatus::from_crypto_result_str(&r.get::<_, String>(6)?);
+        let record_commit_sha: Option<String> = r.get(8)?;
+        let signer_fingerprint: Option<String> = r.get(9)?;
+        // `trust_basis` is no longer persisted as a SQL column; pass `None`
+        // so the resolver derives the basis from `signature_status` (Verified
+        // -> Current, otherwise None). Per-record basis projection lands in
+        // a later task.
+        let trust_basis = resolve_trust_basis(None, signature_status);
         let mut warnings: Vec<String> = Vec::new();
         if signature_status != SignatureStatus::Verified {
             warnings.push("unsigned".into());
-        }
-        if let Some(code) = warn_code.filter(|s| !s.is_empty()) {
-            warnings.push(code);
         }
         Ok(SearchResult {
             id: r.get(0)?,
@@ -163,9 +159,9 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             rusqlite::params![id, session_refs_json],
         )
         .unwrap();
@@ -221,27 +217,27 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             rusqlite::params!["sv1", session_json],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h2', 'ih2', 'unsigned', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h2', 'ih2', 'no-signature', '2026-04-29T00:01:00Z')",
             rusqlite::params!["su1", session_json],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h3', 'ih3', 'invalid', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h3', 'ih3', 'bad-signature', '2026-04-29T00:01:00Z')",
             rusqlite::params!["si1", session_json],
         )
         .unwrap();

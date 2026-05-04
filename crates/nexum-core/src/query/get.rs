@@ -69,7 +69,7 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     }
     // Exactly one candidate — apply hide-policy then materialize.
     let raw = candidates.swap_remove(0);
-    let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
+    let signature_status = SignatureStatus::from_crypto_result_str(&raw.crypto_result);
     if opts.trust_policy == TrustPolicy::Hide
         && !opts.include_unsigned
         && signature_status != SignatureStatus::Verified
@@ -83,9 +83,8 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
 fn fetch_candidates(conn: &Connection, key: &RecordKey) -> Result<Vec<RawRow>, QueryError> {
     const COLUMNS: &str = "id, source, project_id, record_type, title, summary, body, \
                            body_origin_path, tags, confidence, outcome, agent, session_refs, \
-                           files, commits, created, updated, content_hash, signature_status, \
-                           extras, record_commit_sha, signer_fingerprint, trust_basis, \
-                           warning_code";
+                           files, commits, created, updated, content_hash, crypto_result, \
+                           extras, record_commit_sha, signer_fingerprint";
 
     let (where_clause, params): (&str, Vec<Box<dyn ToSql>>) =
         match (key.source, key.project_id.as_deref()) {
@@ -139,12 +138,10 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
         created: r.get::<_, String>(15)?,
         updated: r.get::<_, String>(16)?,
         content_hash: r.get(17)?,
-        signature_status: r.get::<_, String>(18)?,
+        crypto_result: r.get::<_, String>(18)?,
         extras: r.get::<_, Option<String>>(19)?,
         record_commit_sha: r.get::<_, Option<String>>(20)?,
         signer_fingerprint: r.get::<_, Option<String>>(21)?,
-        trust_basis: r.get::<_, Option<String>>(22)?,
-        warning_code: r.get::<_, Option<String>>(23)?,
     })
 }
 
@@ -152,10 +149,10 @@ fn build_record(
     raw: RawRow,
     signature_status: SignatureStatus,
 ) -> Result<UnifiedRecord, QueryError> {
-    // Prefer the persisted `trust_basis` column when present; fall back to the
-    // signature-status default for rows written before the column existed
-    // or by adapters that don't track basis.
-    let trust_basis = resolve_trust_basis(raw.trust_basis.as_deref(), signature_status);
+    // `trust_basis` is no longer persisted as a SQL column; pass `None` so the
+    // resolver derives the basis from `signature_status` (Verified -> Current,
+    // otherwise None). Per-record basis projection lands in a later task.
+    let trust_basis = resolve_trust_basis(None, signature_status);
     let extras: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(raw.extras.as_deref().unwrap_or("{}"))?;
     let tags: Vec<String> = serde_json::from_str(&raw.tags)?;
@@ -211,7 +208,7 @@ fn build_record(
             digest_hash: None,
             record_commit_sha: raw.record_commit_sha,
             signer_fingerprint: raw.signer_fingerprint,
-            warning_code: raw.warning_code,
+            warning_code: None,
         },
         extras,
         content_hash: raw.content_hash,
@@ -238,12 +235,11 @@ struct RawRow {
     created: String,
     updated: String,
     content_hash: String,
-    signature_status: String,
+    /// `records.crypto_result` SQL column.
+    crypto_result: String,
     extras: Option<String>,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
-    trust_basis: Option<String>,
-    warning_code: Option<String>,
 }
 
 #[cfg(test)]
@@ -259,15 +255,15 @@ mod tests {
     }
 
     fn insert(conn: &rusqlite::Connection, id: &str, signed: bool) {
-        let sig = if signed { "verified" } else { "unsigned" };
+        let cr = if signed { "good" } else { "no-signature" };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, \
-             created, updated, content_hash, index_hash, signature_status, indexed_at) \
+             created, updated, content_hash, index_hash, crypto_result, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
                      '[]', '[]', '[]', 'medium', 'working', \
                      '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?2, '2026-04-29T00:01:00Z')",
-            rusqlite::params![id, sig],
+            rusqlite::params![id, cr],
         )
         .unwrap();
     }
@@ -346,13 +342,13 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              ('shared', 'local', 'p', 'decision', 'shared', '', '[]', '', 'manual', \
               '[]', '[]', '[]', 'medium', 'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
-              'h', 'ih', 'verified', '2026-04-29T00:01:00Z'), \
+              'h', 'ih', 'good', '2026-04-29T00:01:00Z'), \
              ('shared', 'cc-native', 'p', 'decision', 'shared', '', '[]', '', 'manual', \
               '[]', '[]', '[]', 'medium', 'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
-              'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

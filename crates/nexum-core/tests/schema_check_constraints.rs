@@ -1,5 +1,5 @@
 //! Verify `SQLite` CHECK constraints on the `records` table reject out-of-range
-//! enum values and that NULL `trust_basis` is still permitted.
+//! enum values, including the four-valued `crypto_result` column.
 
 use nexum_core::indexer::db::open_or_create;
 use rusqlite::Connection;
@@ -24,7 +24,7 @@ fn insert_with_field(conn: &Connection, column: &str, bad_value: &str) -> rusqli
         ("agent", "codex"),
         ("confidence", "medium"),
         ("outcome", "working"),
-        ("signature_status", "unsigned"),
+        ("crypto_result", "no-signature"),
         ("tags", "[]"),
         ("tags_fts", ""),
         ("session_refs", "[]"),
@@ -99,51 +99,38 @@ fn check_constraint_rejects_bad_outcome() {
 }
 
 #[test]
-fn check_constraint_rejects_bad_signature_status() {
+fn check_constraint_rejects_bad_crypto_result() {
     let (_dir, conn) = open();
     assert!(
-        insert_with_field(&conn, "signature_status", "questionable").is_err(),
-        "bad signature_status must violate CHECK"
+        insert_with_field(&conn, "crypto_result", "questionable").is_err(),
+        "bad crypto_result must violate CHECK"
     );
 }
 
 #[test]
-fn check_constraint_rejects_bad_trust_basis() {
+fn check_constraint_accepts_each_crypto_result_variant() {
     let (_dir, conn) = open();
-    let r = conn.execute(
-        "INSERT INTO records (
-            id, record_type, title, body, source, project_id, agent,
-            confidence, outcome, signature_status, tags, tags_fts,
-            session_refs, commits, files, created, updated, content_hash,
-            index_hash, indexed_at, trust_basis
-         ) VALUES (
-            'y', 'decision', 't', 'b', 'local', 'git:test', 'codex',
-            'medium', 'working', 'unsigned', '[]', '',
-            '[]', '[]', '[]', '2026-05-04T00:00:00Z',
-            '2026-05-04T00:00:00Z', 'h', 'h', '2026-05-04T00:00:00Z',
-            'made-up'
-         )",
-        [],
-    );
-    assert!(r.is_err(), "bad trust_basis must violate CHECK");
-}
-
-#[test]
-fn check_constraint_allows_null_trust_basis() {
-    let (_dir, conn) = open();
-    let r = conn.execute(
-        "INSERT INTO records (
-            id, record_type, title, body, source, project_id, agent,
-            confidence, outcome, signature_status, tags, tags_fts,
-            session_refs, commits, files, created, updated, content_hash,
-            index_hash, indexed_at
-         ) VALUES (
-            'z', 'decision', 't', 'b', 'local', 'git:test', 'codex',
-            'medium', 'working', 'unsigned', '[]', '',
-            '[]', '[]', '[]', '2026-05-04T00:00:00Z',
-            '2026-05-04T00:00:00Z', 'h', 'h', '2026-05-04T00:00:00Z'
-         )",
-        [],
-    );
-    assert!(r.is_ok(), "NULL trust_basis must be permitted; got: {r:?}");
+    for (i, variant) in ["good", "bad-signature", "unknown-signer", "no-signature"]
+        .iter()
+        .enumerate()
+    {
+        let r = conn.execute(
+            "INSERT INTO records (
+                id, record_type, title, body, source, project_id, agent,
+                confidence, outcome, crypto_result, tags, tags_fts,
+                session_refs, commits, files, created, updated, content_hash,
+                index_hash, indexed_at
+             ) VALUES (
+                ?1, 'decision', 't', 'b', 'local', 'git:test', 'codex',
+                'medium', 'working', ?2, '[]', '',
+                '[]', '[]', '[]', '2026-05-04T00:00:00Z',
+                '2026-05-04T00:00:00Z', 'h', 'h', '2026-05-04T00:00:00Z'
+             )",
+            rusqlite::params![format!("crypto-{i}"), variant],
+        );
+        assert!(
+            r.is_ok(),
+            "crypto_result variant `{variant}` must be accepted; got: {r:?}"
+        );
+    }
 }

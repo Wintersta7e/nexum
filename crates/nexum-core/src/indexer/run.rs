@@ -35,7 +35,7 @@ use crate::{
         },
     },
     paths::Paths,
-    records::{RecordId, Source, TrustBasis, UnifiedRecord, hash::compute_index_hash},
+    records::{RecordId, Source, UnifiedRecord, hash::compute_index_hash},
 };
 
 impl From<IndexStateError> for IndexerError {
@@ -534,11 +534,11 @@ struct UpsertRow<'a> {
     extras_json: String,
     body_origin_path: Option<String>,
     now: String,
-    signature_status: &'a str,
+    /// Encoded for the `records.crypto_result` SQL column (one of
+    /// `good` / `bad-signature` / `unknown-signer` / `no-signature`).
+    crypto_result: &'a str,
     record_commit_sha: Option<&'a str>,
     signer_fingerprint: Option<&'a str>,
-    trust_basis_db: Option<&'static str>,
-    warning_code: Option<&'a str>,
 }
 
 impl<'a> UpsertRow<'a> {
@@ -555,11 +555,9 @@ impl<'a> UpsertRow<'a> {
             extras_json: serde_json::to_string(&r.extras).expect("serializable record fields"),
             body_origin_path: r.body_origin_path.as_ref().map(|p| p.display().to_string()),
             now: Utc::now().to_rfc3339(),
-            signature_status: r.provenance.signature_status.as_db_str(),
+            crypto_result: r.provenance.signature_status.as_crypto_result_str(),
             record_commit_sha: r.provenance.record_commit_sha.as_deref(),
             signer_fingerprint: r.provenance.signer_fingerprint.as_deref(),
-            trust_basis_db: r.provenance.trust_basis.map(TrustBasis::as_db_str),
-            warning_code: r.provenance.warning_code.as_deref(),
         }
     }
 }
@@ -610,9 +608,8 @@ fn update_record(
          summary = ?3, body = ?4, body_origin_path = ?5, tags = ?6, tags_fts = ?7, \
          confidence = ?8, outcome = ?9, agent = ?10, session_refs = ?11, files = ?12, \
          commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
-         index_hash = ?17, signature_status = ?18, extras = ?19, indexed_at = ?20, \
-         record_commit_sha = ?22, signer_fingerprint = ?23, trust_basis = ?24, \
-         warning_code = ?25 \
+         index_hash = ?17, crypto_result = ?18, extras = ?19, indexed_at = ?20, \
+         record_commit_sha = ?22, signer_fingerprint = ?23 \
          WHERE rowid = ?21",
         params![
             r.record_type.as_db_str(),
@@ -632,14 +629,12 @@ fn update_record(
             r.updated.to_rfc3339(),
             r.content_hash,
             index_hash,
-            row.signature_status,
+            row.crypto_result,
             row.extras_json,
             row.now,
             rid,
             row.record_commit_sha,
             row.signer_fingerprint,
-            row.trust_basis_db,
-            row.warning_code,
         ],
     )?;
     Ok(())
@@ -655,11 +650,10 @@ fn insert_record(
     tx.execute(
         "INSERT INTO records (id, source, project_id, record_type, title, summary, body, \
          body_origin_path, tags, tags_fts, confidence, outcome, agent, session_refs, \
-         files, commits, created, updated, content_hash, index_hash, signature_status, \
-         extras, indexed_at, record_commit_sha, signer_fingerprint, trust_basis, \
-         warning_code) VALUES \
+         files, commits, created, updated, content_hash, index_hash, crypto_result, \
+         extras, indexed_at, record_commit_sha, signer_fingerprint) VALUES \
          (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-          ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+          ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             r.id,
             source.as_db_str(),
@@ -681,13 +675,11 @@ fn insert_record(
             r.updated.to_rfc3339(),
             r.content_hash,
             index_hash,
-            row.signature_status,
+            row.crypto_result,
             row.extras_json,
             row.now,
             row.record_commit_sha,
             row.signer_fingerprint,
-            row.trust_basis_db,
-            row.warning_code,
         ],
     )?;
     Ok(())

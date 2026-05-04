@@ -193,7 +193,7 @@ fn tag_change_alone_triggers_reindex() {
 }
 
 #[test]
-fn verified_local_record_persists_signer_fingerprint_and_basis() {
+fn verified_local_record_persists_signer_fingerprint_and_crypto_result() {
     // End-to-end smoke for verifier-provenance scaffolding:
     //   1. `nexum init` brings up `notebook.git` with a signed bootstrap
     //      commit and `.trust/historical_signers`.
@@ -202,7 +202,7 @@ fn verified_local_record_persists_signer_fingerprint_and_basis() {
     //      against `historical_signers`.
     //   3. The indexer runs and the local adapter populates
     //      `record_commit_sha`, `signer_fingerprint`, and
-    //      `trust_basis = "current"` for that row.
+    //      `crypto_result = 'good'` for that row.
     use common::write_ephemeral_keypair;
     use nexum_core::init::{InitOpts, git_ops::git_commit_signed, run as init_run};
 
@@ -243,23 +243,17 @@ fn verified_local_record_persists_signer_fingerprint_and_basis() {
     let mut conn = open_or_create(&paths.index_db).unwrap();
     indexer_run(&mut conn, &cfg, &paths).unwrap();
 
-    let (basis, fp, sha, warning): (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = conn
+    let (crypto, fp, sha): (String, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT trust_basis, signer_fingerprint, record_commit_sha, warning_code \
+            "SELECT crypto_result, signer_fingerprint, record_commit_sha \
              FROM records WHERE id = ?1",
             [record_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
     assert_eq!(
-        basis.as_deref(),
-        Some("current"),
-        "verified row must record trust_basis=current"
+        crypto, "good",
+        "verified row must record crypto_result=good"
     );
     assert!(
         fp.as_deref()
@@ -269,10 +263,6 @@ fn verified_local_record_persists_signer_fingerprint_and_basis() {
     assert!(
         sha.as_deref().is_some_and(|s| s.len() == 40),
         "verified row must capture a 40-char commit SHA, got {sha:?}"
-    );
-    assert!(
-        warning.is_none(),
-        "verified row must not raise a warning_code, got {warning:?}"
     );
 }
 
@@ -288,23 +278,25 @@ fn cc_records_leave_provenance_columns_null() {
     let mut conn = open_or_create(&paths.index_db).unwrap();
     indexer_run(&mut conn, &cfg, &paths).unwrap();
 
-    // Count CC rows where any verifier-provenance column is non-NULL —
-    // expectation: zero. Reading the four columns one-shot avoids
-    // surfacing a row-by-row materialization.
+    // Count CC rows where any verifier-provenance column carries non-default
+    // data -- expectation: zero. The remaining persisted verifier columns
+    // after the schema reshape are `record_commit_sha` and
+    // `signer_fingerprint` (both NULL for cc-native rows) plus
+    // `crypto_result` (which CC rows tag with `'no-signature'` since they
+    // have no notebook commit to verify).
     let mut stmt = conn
         .prepare(
             "SELECT count(*) FROM records \
              WHERE source = 'cc-native' \
                AND (record_commit_sha IS NOT NULL \
                  OR signer_fingerprint IS NOT NULL \
-                 OR trust_basis IS NOT NULL \
-                 OR warning_code IS NOT NULL)",
+                 OR crypto_result <> 'no-signature')",
         )
         .unwrap();
     let leaks: i64 = stmt.query_row([], |r| r.get(0)).unwrap();
     assert_eq!(
         leaks, 0,
-        "cc-native rows must leave verifier-provenance columns NULL"
+        "cc-native rows must leave verifier-provenance columns at their NULL / no-signature defaults"
     );
 
     // Sanity: at least one CC row was actually indexed, so the assertion

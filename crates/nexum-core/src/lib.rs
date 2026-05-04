@@ -16,6 +16,7 @@ pub mod config;
 pub mod index;
 pub mod indexer;
 pub mod init;
+pub mod migrate;
 pub mod paths;
 pub mod project;
 pub mod query;

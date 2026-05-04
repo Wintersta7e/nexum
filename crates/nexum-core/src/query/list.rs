@@ -65,8 +65,7 @@ pub fn list(
 
     let sql = format!(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
-                records.source, records.project_id, records.signature_status, records.updated, \
-                records.trust_basis, records.warning_code, \
+                records.source, records.project_id, records.crypto_result, records.updated, \
                 records.record_commit_sha, records.signer_fingerprint \
          FROM records \
          WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
@@ -130,10 +129,10 @@ struct ListRow {
     summary: Option<String>,
     source: String,
     project_id: String,
-    signature_status: String,
+    /// `records.crypto_result` SQL column (one of `good` / `bad-signature` /
+    /// `unknown-signer` / `no-signature`).
+    crypto_result: String,
     updated: String,
-    trust_basis: Option<String>,
-    warning_code: Option<String>,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
 }
@@ -147,26 +146,24 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
         summary: r.get(4)?,
         source: r.get(5)?,
         project_id: r.get(6)?,
-        signature_status: r.get(7)?,
+        crypto_result: r.get(7)?,
         updated: r.get(8)?,
-        trust_basis: r.get(9)?,
-        warning_code: r.get(10)?,
-        record_commit_sha: r.get(11)?,
-        signer_fingerprint: r.get(12)?,
+        record_commit_sha: r.get(9)?,
+        signer_fingerprint: r.get(10)?,
     })
 }
 
 /// Materialize one DB row into a `SearchResult`. Splits out of `list` so
 /// the verb stays under the strict-clippy `too-many-lines` threshold.
 fn row_to_search_result(raw: ListRow) -> SearchResult {
-    let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
-    let trust_basis = resolve_trust_basis(raw.trust_basis.as_deref(), signature_status);
+    let signature_status = SignatureStatus::from_crypto_result_str(&raw.crypto_result);
+    // `trust_basis` is no longer persisted as a SQL column; pass `None` so the
+    // resolver derives the basis from `signature_status` (Verified -> Current,
+    // otherwise None). Per-record basis projection lands in a later task.
+    let trust_basis = resolve_trust_basis(None, signature_status);
     let mut warnings: Vec<String> = Vec::new();
     if signature_status != SignatureStatus::Verified {
         warnings.push("unsigned".into());
-    }
-    if let Some(code) = raw.warning_code.filter(|s| !s.is_empty()) {
-        warnings.push(code);
     }
     SearchResult {
         id: raw.id,
@@ -218,10 +215,10 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, \
-             created, updated, content_hash, index_hash, signature_status, indexed_at) \
+             created, updated, content_hash, index_hash, crypto_result, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
                      '[]', '[]', '[]', 'medium', 'working', \
-                     '2026-01-01T00:00:00Z', ?2, 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+                     '2026-01-01T00:00:00Z', ?2, 'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             rusqlite::params![id, updated],
         )
         .unwrap();
@@ -274,9 +271,9 @@ mod tests {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              ('r1', 'local', 'p', 'recommendation', 't', '', '[]', '', 'manual', '[]', '[]', '[]', \
-              'medium', 'proposed', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'medium', 'proposed', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

@@ -302,7 +302,11 @@ pub enum SignatureStatus {
 }
 
 impl SignatureStatus {
-    /// Short string used in the `records.signature_status` column.
+    /// Short string for the in-memory representation; mirrors the JSON form
+    /// that adapters / wire-format consumers expect (verified/unsigned/invalid/
+    /// unknown). Distinct from [`as_crypto_result_str`], which encodes the
+    /// status into the four `git verify-commit` exit-code states stored in
+    /// the `records.crypto_result` SQL column.
     #[must_use]
     pub fn as_db_str(self) -> &'static str {
         match self {
@@ -313,14 +317,44 @@ impl SignatureStatus {
         }
     }
 
-    /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
+    /// Inverse of [`as_db_str`]: parse a value from the in-memory / JSON form.
     /// Falls through to `Unsigned` for unrecognized values (the safest default —
     /// downstream policy treats unknown trust as untrusted).
+    // Forward-compat: kept available for future JSON-form parse paths even
+    // though the current SQL boundary uses `from_crypto_result_str` instead.
+    #[allow(dead_code)]
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "verified" => SignatureStatus::Verified,
             "invalid" => SignatureStatus::Invalid,
             "unknown" => SignatureStatus::Unknown,
+            _ => SignatureStatus::Unsigned,
+        }
+    }
+
+    /// Encode the status into the four-valued `crypto_result` SQL column
+    /// (`good` / `bad-signature` / `unknown-signer` / `no-signature`), which
+    /// mirrors the `git verify-commit` exit-code taxonomy. Used at the
+    /// indexer-write boundary; the read path uses
+    /// [`from_crypto_result_str`].
+    #[must_use]
+    pub fn as_crypto_result_str(self) -> &'static str {
+        match self {
+            SignatureStatus::Verified => "good",
+            SignatureStatus::Invalid => "bad-signature",
+            SignatureStatus::Unknown => "unknown-signer",
+            SignatureStatus::Unsigned => "no-signature",
+        }
+    }
+
+    /// Inverse of [`as_crypto_result_str`]: parse from the SQL column form.
+    /// Falls through to `Unsigned` for unrecognized values (no-signature is
+    /// the safest default).
+    pub(crate) fn from_crypto_result_str(s: &str) -> Self {
+        match s {
+            "good" => SignatureStatus::Verified,
+            "bad-signature" => SignatureStatus::Invalid,
+            "unknown-signer" => SignatureStatus::Unknown,
             _ => SignatureStatus::Unsigned,
         }
     }

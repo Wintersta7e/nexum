@@ -76,22 +76,28 @@ pub(crate) fn build_meta(
     // the whole DB so callers can surface an informational count. This is a
     // whole-table count rather than a filter-respecting count; filter-aware
     // hidden counts are deferred to a later cadence.
+    //
+    // Transitional: we group by `crypto_result` and bucket the four
+    // git-verify-commit exit-code states into the existing `hidden_unsigned`
+    // / `hidden_invalid` counters. `no-signature` -> hidden_unsigned;
+    // `bad-signature` and `unknown-signer` -> hidden_invalid; `good` is
+    // visible (Verified) and not counted here. A later cadence wires the
+    // counters off the per-record projected trust outcome instead of off SQL.
     let mut hidden_unsigned: u32 = 0;
     let mut hidden_invalid: u32 = 0;
     if trust_policy == TrustPolicy::Hide {
-        let mut stmt = conn.prepare(
-            "SELECT signature_status, count(*) FROM records \
-             WHERE signature_status IN ('unsigned', 'invalid') \
-             GROUP BY signature_status",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT crypto_result, count(*) FROM records GROUP BY crypto_result")?;
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         for (status, count) in rows {
             let saturated = u32::try_from(count).unwrap_or(u32::MAX);
             match status.as_str() {
-                "unsigned" => hidden_unsigned = saturated,
-                "invalid" => hidden_invalid = saturated,
+                "no-signature" => hidden_unsigned = saturated,
+                "bad-signature" | "unknown-signer" => {
+                    hidden_invalid = hidden_invalid.saturating_add(saturated);
+                }
                 _ => {}
             }
         }

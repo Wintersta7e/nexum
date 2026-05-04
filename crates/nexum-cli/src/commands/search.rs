@@ -60,7 +60,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::from(super::exit_codes::RUNTIME);
+            return ExitCode::from(super::exit_codes::STORE_INTEGRITY);
         }
     };
     if args.json {

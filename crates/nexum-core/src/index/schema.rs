@@ -9,17 +9,26 @@ pub enum SchemaError {
     Sqlite(#[from] rusqlite::Error),
     #[error("expected {what} missing after DDL apply")]
     Missing { what: String },
+    #[error(
+        "migration required: on-disk schema is v{v_disk}; binary supports v{INDEX_DB_LATEST_VERSION}"
+    )]
+    MigrationRequired { v_disk: u32 },
 }
 
 /// Verbatim index DDL. Loaded from a sibling .sql file so SQL tooling works.
 pub const DDL: &str = include_str!("schema.sql");
 
+/// Latest index DB schema version known to this binary. Mirrors the
+/// `PRAGMA user_version` value set inside `schema.sql`.
+pub const INDEX_DB_LATEST_VERSION: u32 = 2;
+
 /// Apply the index DDL to a connection.
 ///
 /// Sets the index pragmas first (WAL mode, `busy_timeout`, `foreign_keys`),
-/// then either runs the full DDL batch on a fresh DB, or runs forward
-/// migrations on an existing DB so rows persist across schema additions.
-/// Verifies the expected tables / triggers / columns exist post-apply; any
+/// then either runs the full DDL batch on a fresh DB, or returns
+/// `SchemaError::MigrationRequired` for an older DB so the caller can dispatch
+/// to `crate::migrate::index_db::migrate_to_latest`. Verifies the expected
+/// tables / triggers / columns exist post-apply on the fresh path; any
 /// missing piece returns `SchemaError::Missing` rather than silently producing
 /// a half-built schema.
 ///
@@ -30,26 +39,65 @@ pub const DDL: &str = include_str!("schema.sql");
 ///
 /// # Errors
 ///
-/// Returns `SchemaError::Sqlite` if any pragma, DDL, or migration statement fails
+/// Returns `SchemaError::Sqlite` if any pragma or DDL statement fails
 /// (including vec0 table creation when the sqlite-vec extension is not
 /// registered). Returns `SchemaError::Missing` if the post-apply verification
 /// finds any expected table, trigger, or column absent from `sqlite_master`.
-pub fn apply(conn: &Connection) -> Result<(), SchemaError> {
+/// Returns `SchemaError::MigrationRequired` when the on-disk
+/// `PRAGMA user_version` is older than `INDEX_DB_LATEST_VERSION`; the caller
+/// must invoke the migration framework.
+pub fn apply(conn: &mut Connection) -> Result<(), SchemaError> {
     // Pragmas first. journal_mode = WAL is per-connection but persists in the file.
     conn.execute_batch(
         "PRAGMA journal_mode = WAL; \
          PRAGMA busy_timeout = 5000; \
          PRAGMA foreign_keys = ON;",
     )?;
-    if records_table_exists(conn)? {
-        // Existing DB — apply additive migrations only. Bringing the DDL
-        // again would `CREATE TABLE records` and fail on the existing table.
-        migrate_existing(conn)?;
-    } else {
+
+    let v_disk = read_user_version(conn)?;
+    let records_exists = records_table_exists(conn)?;
+
+    if v_disk == 0 && !records_exists {
+        // Fresh DB: apply the full DDL. The `PRAGMA user_version = 2` inside
+        // the DDL bumps the version sentinel as part of the same batch.
         conn.execute_batch(DDL)?;
+    } else if v_disk == 0 && records_exists {
+        // Pre-version-tracking DB written before the schema-migration
+        // framework existed (no `PRAGMA user_version` was set). Bump the
+        // version sentinel to 1 in-place so the v1->v2 migrator handles it
+        // cleanly. This only synthesizes the version sentinel; no actual
+        // schema mutation runs here.
+        conn.execute_batch("PRAGMA user_version = 1;")?;
+        return Err(SchemaError::MigrationRequired { v_disk: 1 });
+    } else if v_disk == INDEX_DB_LATEST_VERSION {
+        // Already current. Pragmas are set above; nothing else to do.
+    } else {
+        // Older versioned DB: caller must use
+        // `crate::migrate::index_db::migrate_to_latest`.
+        return Err(SchemaError::MigrationRequired { v_disk });
     }
-    // Verify expected tables exist.
-    for name in ["records", "record_embeddings", "records_fts"] {
+
+    verify_post_apply(conn)?;
+    Ok(())
+}
+
+/// Read the on-disk `PRAGMA user_version` sentinel.
+fn read_user_version(conn: &Connection) -> Result<u32, SchemaError> {
+    let v: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    Ok(v)
+}
+
+/// Verify the v2 schema shape is in place after `apply` returns Ok. Catches
+/// scenarios where the DDL ran partially or a migration left tables missing.
+fn verify_post_apply(conn: &Connection) -> Result<(), SchemaError> {
+    for name in [
+        "records",
+        "record_embeddings",
+        "records_fts",
+        "trust_events",
+        "trust_chain_tampering",
+        "meta",
+    ] {
         let exists: i64 = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
             [name],
@@ -61,7 +109,6 @@ pub fn apply(conn: &Connection) -> Result<(), SchemaError> {
             });
         }
     }
-    // Verify expected triggers exist.
     for name in ["records_ai", "records_ad", "records_au"] {
         let exists: i64 = conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name=?1",
@@ -74,14 +121,12 @@ pub fn apply(conn: &Connection) -> Result<(), SchemaError> {
             });
         }
     }
-    // Verify the verifier-provenance columns are present (added by
-    // migrate_existing on older DBs, by the fresh DDL otherwise).
     let cols = records_columns(conn)?;
     for col in [
         "record_commit_sha",
         "signer_fingerprint",
-        "trust_basis",
-        "warning_code",
+        "crypto_result",
+        "relevant_trust_events_commit",
     ] {
         if !cols.contains(col) {
             return Err(SchemaError::Missing {
@@ -93,8 +138,8 @@ pub fn apply(conn: &Connection) -> Result<(), SchemaError> {
 }
 
 /// True iff the `records` table is already present in `sqlite_master`. Used
-/// to choose between the fresh-DB DDL path and the additive-migration path.
-fn records_table_exists(conn: &Connection) -> Result<bool, SchemaError> {
+/// to choose between the fresh-DB DDL path and the migration-required branch.
+pub(crate) fn records_table_exists(conn: &Connection) -> Result<bool, SchemaError> {
     let exists: i64 = conn.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='records'",
         [],
@@ -111,37 +156,6 @@ fn records_columns(conn: &Connection) -> Result<std::collections::HashSet<String
     let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
     rows.collect::<Result<std::collections::HashSet<_>, _>>()
         .map_err(SchemaError::from)
-}
-
-/// Apply additive migrations to an existing DB. Each step is idempotent
-/// (skips when the target column / trigger / index already exists) so
-/// re-running on an already-migrated DB is a no-op.
-///
-/// All `ALTER TABLE ADD COLUMN` statements run inside a single transaction
-/// so a crash mid-migration cannot leave the table with only some of the
-/// new provenance columns.
-fn migrate_existing(conn: &Connection) -> Result<(), SchemaError> {
-    let existing = records_columns(conn)?;
-    conn.execute_batch("BEGIN;")?;
-    // Verifier-provenance columns. All NULL-able TEXT — readers tolerate
-    // missing values, so the migration is safe to apply mid-flight even
-    // without a re-index pass.
-    for col in [
-        "record_commit_sha",
-        "signer_fingerprint",
-        "trust_basis",
-        "warning_code",
-    ] {
-        if !existing.contains(col) {
-            // SQLite parameter binding is not allowed for column names in
-            // DDL, but the values come from a hardcoded slice (no untrusted
-            // input) so the format-string concatenation is safe here.
-            let stmt = format!("ALTER TABLE records ADD COLUMN {col} TEXT");
-            conn.execute(&stmt, [])?;
-        }
-    }
-    conn.execute_batch("COMMIT;")?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -166,74 +180,24 @@ mod tests {
     }
 
     #[test]
-    fn ddl_constant_includes_verifier_provenance_columns() {
+    fn ddl_constant_includes_v2_columns_and_tables() {
         for col in [
             "record_commit_sha",
             "signer_fingerprint",
-            "trust_basis",
-            "warning_code",
+            "crypto_result",
+            "relevant_trust_events_commit",
         ] {
+            assert!(DDL.contains(col), "DDL must include records column `{col}`");
+        }
+        for table in ["trust_events", "trust_chain_tampering", "meta"] {
             assert!(
-                DDL.contains(col),
-                "DDL must include verifier-provenance column `{col}`"
+                DDL.contains(&format!("CREATE TABLE {table}")),
+                "DDL must define table `{table}`"
             );
         }
-    }
-
-    #[test]
-    fn migrate_existing_adds_missing_provenance_columns_and_is_idempotent() {
-        // Recreate a pre-migration `records` shape (no verifier-provenance
-        // columns) and confirm `apply` — which routes through the
-        // migration branch — adds the four expected columns. A second
-        // `apply` call must be a no-op.
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE records (
-                rowid INTEGER PRIMARY KEY,
-                id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                project_id TEXT NOT NULL
-             );",
-        )
-        .unwrap();
-        // A bare existing DB lacks the FTS / vec0 tables — but `apply`
-        // requires them to be present for the post-apply verification, so
-        // we bring up matching shells before invoking it.
-        conn.execute_batch(
-            "CREATE TABLE record_embeddings (rowid INTEGER PRIMARY KEY); \
-             CREATE VIRTUAL TABLE records_fts USING fts5(title); \
-             CREATE TRIGGER records_ai AFTER INSERT ON records BEGIN SELECT 1; END; \
-             CREATE TRIGGER records_ad AFTER DELETE ON records BEGIN SELECT 1; END; \
-             CREATE TRIGGER records_au AFTER UPDATE ON records BEGIN SELECT 1; END;",
-        )
-        .unwrap();
-
-        // Sanity-check pre-state.
-        let pre = records_columns(&conn).unwrap();
-        for col in [
-            "record_commit_sha",
-            "signer_fingerprint",
-            "trust_basis",
-            "warning_code",
-        ] {
-            assert!(
-                !pre.contains(col),
-                "expected `{col}` to be missing pre-migration"
-            );
-        }
-
-        apply(&conn).expect("first apply must succeed");
-        let post = records_columns(&conn).unwrap();
-        for col in [
-            "record_commit_sha",
-            "signer_fingerprint",
-            "trust_basis",
-            "warning_code",
-        ] {
-            assert!(post.contains(col), "expected `{col}` after migration");
-        }
-
-        // Idempotent: a second apply must not error or duplicate columns.
-        apply(&conn).expect("second apply must be a no-op");
+        assert!(
+            DDL.contains("PRAGMA user_version = 2"),
+            "DDL must bump user_version to 2"
+        );
     }
 }

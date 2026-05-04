@@ -6,5 +6,6 @@
 //! tokenization rule for tags so multi-character punctuation (e.g., hyphens, dots)
 //! survives indexing intact.
 
+pub mod meta;
 pub mod schema;
 pub mod tag_normalization;

@@ -3,6 +3,7 @@
 use std::{path::Path, process::ExitCode};
 
 use nexum_core::{
+    api::ApiError,
     config::{io::load as load_config, types::Config},
     paths::Paths,
 };
@@ -36,4 +37,19 @@ pub(crate) fn handle_index_missing(path: &Path) -> ExitCode {
         path.display()
     );
     ExitCode::from(exit_codes::NOT_INDEXED)
+}
+
+/// Translate an [`ApiError::MigrationRequired`] into the dedicated CLI exit
+/// code. Other `ApiError` variants are caller-specific and stay with their
+/// per-verb handlers; centralizing this one keeps the user-facing message
+/// consistent.
+#[allow(dead_code)]
+pub(crate) fn handle_migration_required(err: &ApiError) -> Option<ExitCode> {
+    if let ApiError::MigrationRequired { v_disk, v_code } = err {
+        eprintln!("error: index schema v{v_disk} is older than this binary (v{v_code}).");
+        eprintln!("Run `nexum migrate` to update, then re-run.");
+        Some(ExitCode::from(exit_codes::MIGRATION_REQUIRED))
+    } else {
+        None
+    }
 }
