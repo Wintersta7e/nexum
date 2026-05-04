@@ -73,11 +73,7 @@ pub fn run(args: &ListArgs) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            eprintln!(
-                "error: no index database at `{}`; run `nexum index` to populate it",
-                path.display()
-            );
-            ExitCode::from(super::exit_codes::NOT_INDEXED)
+            super::common::handle_index_missing(&path)
         }
         Err(e) => {
             eprintln!("error: {e}");

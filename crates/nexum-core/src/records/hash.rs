@@ -71,9 +71,10 @@ pub fn compute_index_hash(r: &UnifiedRecord) -> String {
     hasher.update(r.provenance.signature_status.as_db_str().as_bytes());
     hasher.update(b"\x00");
     // Tags are sorted so insertion order doesn't affect the hash.
-    let mut tags = r.tags.clone();
-    tags.sort();
-    for tag in &tags {
+    // Collect &str references to avoid cloning the owned strings for sorting.
+    let mut tag_refs: Vec<&str> = r.tags.iter().map(String::as_str).collect();
+    tag_refs.sort_unstable();
+    for tag in &tag_refs {
         hasher.update(tag.as_bytes());
         hasher.update(b"\x01");
     }

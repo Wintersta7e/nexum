@@ -1,6 +1,6 @@
-//! Shared CLI handler helpers — runtime resolution.
+//! Shared CLI handler helpers — runtime resolution and common error responses.
 
-use std::process::ExitCode;
+use std::{path::Path, process::ExitCode};
 
 use nexum_core::{
     config::{io::load as load_config, types::Config},
@@ -26,4 +26,14 @@ pub(crate) fn resolve_runtime() -> Result<(Paths, Config), ExitCode> {
         ExitCode::from(exit_codes::NOT_INITIALIZED)
     })?;
     Ok((paths, cfg))
+}
+
+/// Print the "no index database" error and return the appropriate exit code.
+/// Used by every read-side verb to handle `QueryError::IndexMissing`.
+pub(crate) fn handle_index_missing(path: &Path) -> ExitCode {
+    eprintln!(
+        "error: no index database at `{}`; run `nexum index` to populate it",
+        path.display()
+    );
+    ExitCode::from(exit_codes::NOT_INDEXED)
 }

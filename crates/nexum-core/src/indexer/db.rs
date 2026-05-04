@@ -24,14 +24,16 @@ pub enum IndexerError {
     Config(String),
 }
 
-/// Open an existing `index.db` for read-only-ish access. Returns
+/// Open an existing `index.db` for read-only access. Returns
 /// [`crate::query::QueryError::IndexMissing`] if the file does not exist,
 /// rather than silently creating an empty database — that would mask a
 /// "you forgot to run `nexum index`" error as "no results".
 ///
-/// Sets `query_only = ON` so a stray write through this connection
-/// fails fast, and `busy_timeout = 5000` so a concurrent indexer
-/// writer doesn't immediately error out reads. Does not run DDL.
+/// Opens with `SQLITE_OPEN_READ_ONLY` at the OS level, which is a stronger
+/// invariant than `READ_WRITE + PRAGMA query_only`: the connection is
+/// non-writable from the moment it is created, not just after the pragma fires.
+/// Sets `busy_timeout = 5000` so a concurrent indexer writer doesn't
+/// immediately error out reads. Does not run DDL.
 ///
 /// Uses `OpenFlags` without `SQLITE_OPEN_CREATE` so `SQLite` itself
 /// enforces the no-create invariant even if the `path.exists()` pre-check
@@ -50,12 +52,9 @@ pub fn open_existing(path: &Path) -> Result<Connection, crate::query::QueryError
     register_sqlite_vec_once();
     let conn = Connection::open_with_flags(
         path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    conn.execute_batch(
-        "PRAGMA query_only = ON; \
-         PRAGMA busy_timeout = 5000;",
-    )?;
+    conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     Ok(conn)
 }
 

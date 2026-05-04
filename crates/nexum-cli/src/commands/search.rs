@@ -56,11 +56,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,
         Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            eprintln!(
-                "error: no index database at `{}`; run `nexum index` to populate it",
-                path.display()
-            );
-            return ExitCode::from(super::exit_codes::NOT_INDEXED);
+            return super::common::handle_index_missing(&path);
         }
         Err(e) => {
             eprintln!("error: {e}");
