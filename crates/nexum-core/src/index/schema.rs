@@ -76,13 +76,14 @@ pub fn apply(conn: &Connection) -> Result<(), SchemaError> {
     }
     // Verify the verifier-provenance columns are present (added by
     // migrate_existing on older DBs, by the fresh DDL otherwise).
+    let cols = records_columns(conn)?;
     for col in [
         "record_commit_sha",
         "signer_fingerprint",
         "trust_basis",
         "warning_code",
     ] {
-        if !records_has_column(conn, col)? {
+        if !cols.contains(col) {
             return Err(SchemaError::Missing {
                 what: format!("column:records.{col}"),
             });
@@ -102,19 +103,14 @@ fn records_table_exists(conn: &Connection) -> Result<bool, SchemaError> {
     Ok(exists == 1)
 }
 
-/// True iff `records` already has a column named `col`. Read via
-/// `PRAGMA table_info` so the lookup is structured rather than parsing
-/// the stored CREATE statement.
-fn records_has_column(conn: &Connection, col: &str) -> Result<bool, SchemaError> {
+/// Read the full set of column names for the `records` table in one
+/// `PRAGMA table_info` call. Callers check membership against the returned
+/// set instead of issuing a separate PRAGMA per column.
+fn records_columns(conn: &Connection) -> Result<std::collections::HashSet<String>, SchemaError> {
     let mut stmt = conn.prepare("PRAGMA table_info(records)")?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        let name: String = row.get(1)?;
-        if name == col {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+    rows.collect::<Result<std::collections::HashSet<_>, _>>()
+        .map_err(SchemaError::from)
 }
 
 /// Apply additive migrations to an existing DB. Each step is idempotent
@@ -125,6 +121,7 @@ fn records_has_column(conn: &Connection, col: &str) -> Result<bool, SchemaError>
 /// so a crash mid-migration cannot leave the table with only some of the
 /// new provenance columns.
 fn migrate_existing(conn: &Connection) -> Result<(), SchemaError> {
+    let existing = records_columns(conn)?;
     conn.execute_batch("BEGIN;")?;
     // Verifier-provenance columns. All NULL-able TEXT — readers tolerate
     // missing values, so the migration is safe to apply mid-flight even
@@ -135,7 +132,7 @@ fn migrate_existing(conn: &Connection) -> Result<(), SchemaError> {
         "trust_basis",
         "warning_code",
     ] {
-        if !records_has_column(conn, col)? {
+        if !existing.contains(col) {
             // SQLite parameter binding is not allowed for column names in
             // DDL, but the values come from a hardcoded slice (no untrusted
             // input) so the format-string concatenation is safe here.
@@ -212,6 +209,7 @@ mod tests {
         .unwrap();
 
         // Sanity-check pre-state.
+        let pre = records_columns(&conn).unwrap();
         for col in [
             "record_commit_sha",
             "signer_fingerprint",
@@ -219,22 +217,20 @@ mod tests {
             "warning_code",
         ] {
             assert!(
-                !records_has_column(&conn, col).unwrap(),
+                !pre.contains(col),
                 "expected `{col}` to be missing pre-migration"
             );
         }
 
         apply(&conn).expect("first apply must succeed");
+        let post = records_columns(&conn).unwrap();
         for col in [
             "record_commit_sha",
             "signer_fingerprint",
             "trust_basis",
             "warning_code",
         ] {
-            assert!(
-                records_has_column(&conn, col).unwrap(),
-                "expected `{col}` after migration"
-            );
+            assert!(post.contains(col), "expected `{col}` after migration");
         }
 
         // Idempotent: a second apply must not error or duplicate columns.

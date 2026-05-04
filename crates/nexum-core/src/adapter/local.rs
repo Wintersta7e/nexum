@@ -221,6 +221,8 @@ fn parse_local_record(
         .project_id
         .unwrap_or_else(|| "local-no-project".into());
 
+    // TODO: shells out to git twice per record (log + verify-commit). Future
+    // verifier work should batch this across all records in one pass.
     let verification = compute_signature_status(notebook_git, path);
 
     Ok(Box::new(UnifiedRecord {
