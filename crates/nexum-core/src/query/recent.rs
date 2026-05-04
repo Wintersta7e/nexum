@@ -89,11 +89,11 @@ mod tests {
         let (_dir, conn) = open();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
-             ('a','local','p','decision','x','','[]','','manual','[]','[]','[]','medium', \
+             ('a','local','p','decision','x','','[]','','manual','[]','[]','[]','medium','working', \
               '2026-04-01T00:00:00Z','2026-04-01T00:00:00Z','h','ih','unsigned','2026-04-29T00:00:00Z'), \
-             ('b','cc-native','p','decision','y','','[]','','claude-code','[]','[]','[]','medium', \
+             ('b','cc-native','p','decision','y','','[]','','claude-code','[]','[]','[]','medium','working', \
               '2026-04-02T00:00:00Z','2026-04-02T00:00:00Z','h','ih','unsigned','2026-04-29T00:00:00Z')",
             [],
         )

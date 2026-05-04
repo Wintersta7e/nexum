@@ -195,9 +195,10 @@ mod tests {
             let conn = open_or_create(&path).unwrap();
             conn.execute(
                 "INSERT INTO records (id, source, project_id, record_type, title, body, \
-                 tags, tags_fts, created, updated, content_hash, index_hash, signature_status, \
-                 indexed_at) VALUES \
+                 tags, tags_fts, agent, confidence, outcome, created, updated, content_hash, \
+                 index_hash, signature_status, indexed_at) VALUES \
                  ('rec1', 'local', 'p', 'decision', 'titlec', '', '[]', '', \
+                  'manual', 'medium', 'working', \
                   '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'hashc', 'ih', 'unsigned', \
                   '2026-04-29T00:01:00Z')",
                 [],

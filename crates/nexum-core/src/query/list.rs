@@ -225,10 +225,10 @@ mod tests {
     fn insert(conn: &rusqlite::Connection, id: &str, updated: &str) {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, \
              created, updated, content_hash, index_hash, signature_status, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
-                     '[]', '[]', '[]', 'medium', \
+                     '[]', '[]', '[]', 'medium', 'working', \
                      '2026-01-01T00:00:00Z', ?2, 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             rusqlite::params![id, updated],
         )
@@ -281,10 +281,10 @@ mod tests {
         // Insert a recommendation manually so the filter has a target.
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
              ('r1', 'local', 'p', 'recommendation', 't', '', '[]', '', 'manual', '[]', '[]', '[]', \
-              'medium', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'medium', 'proposed', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

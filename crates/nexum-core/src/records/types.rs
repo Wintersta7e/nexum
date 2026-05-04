@@ -43,9 +43,10 @@ impl RecordType {
     }
 
     /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
-    /// Falls through to `Untyped` for unrecognized values; the schema CHECK
-    /// constraint already restricts inserted values to the known set, so the
-    /// fallback exists for forward-compatibility only.
+    /// Falls through to `Untyped` for unrecognized values. The schema CHECK
+    /// constraint on `record_type` restricts inserted values to the known set
+    /// on fresh databases; the fallback exists for forward-compatibility with
+    /// future variants and for databases migrated without a full table rebuild.
     pub(crate) fn from_db_str(s: &str) -> Self {
         match s {
             "decision" => RecordType::Decision,

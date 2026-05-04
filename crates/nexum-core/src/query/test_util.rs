@@ -37,9 +37,11 @@ pub(crate) fn insert_minimal_record(
     conn.execute(
         "INSERT INTO records (
             id, record_type, title, body, source, project_id,
+            agent, confidence, outcome,
             signature_status, tags, tags_fts,
             created, updated, content_hash, index_hash, indexed_at
-         ) VALUES (?1, 'feedback', ?2, 'b', 'local', 'git:test',
+         ) VALUES (?1, 'decision', ?2, 'b', 'local', 'git:test',
+            'manual', 'medium', 'working',
             ?3, '[]', '',
             ?4, ?4, 'h', 'ih', ?4)",
         params![

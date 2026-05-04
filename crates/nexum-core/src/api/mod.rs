@@ -239,13 +239,13 @@ mod tests {
         let conn = open_or_create(&paths.index_db).unwrap();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
-             ('a','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium', \
+             ('a','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
               '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','verified','2026-04-29T00:01:00Z'), \
-             ('b','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium', \
+             ('b','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
               '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','unsigned','2026-04-29T00:01:00Z'), \
-             ('c','local','name:projx','decision','t','b','[]','','manual','[]','[]','[]','medium', \
+             ('c','local','name:projx','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
               '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','verified','2026-04-29T00:01:00Z')",
             [],
         )

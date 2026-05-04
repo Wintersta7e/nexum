@@ -268,10 +268,10 @@ mod tests {
         let sig = if signed { "verified" } else { "unsigned" };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, \
              created, updated, content_hash, index_hash, signature_status, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
-                     '[]', '[]', '[]', 'medium', \
+                     '[]', '[]', '[]', 'medium', 'working', \
                      '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?2, '2026-04-29T00:01:00Z')",
             rusqlite::params![id, sig],
         )
@@ -351,13 +351,13 @@ mod tests {
         // Two rows with the same id, different sources.
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
              ('shared', 'local', 'p', 'decision', 'shared', '', '[]', '', 'manual', \
-              '[]', '[]', '[]', 'medium', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
+              '[]', '[]', '[]', 'medium', 'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
               'h', 'ih', 'verified', '2026-04-29T00:01:00Z'), \
              ('shared', 'cc-native', 'p', 'decision', 'shared', '', '[]', '', 'manual', \
-              '[]', '[]', '[]', 'medium', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
+              '[]', '[]', '[]', 'medium', 'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
               'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             [],
         )

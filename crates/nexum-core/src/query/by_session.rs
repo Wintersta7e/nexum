@@ -167,10 +167,10 @@ mod tests {
     fn insert(conn: &rusqlite::Connection, id: &str, session_refs_json: &str) {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             rusqlite::params![id, session_refs_json],
         )
         .unwrap();
@@ -225,28 +225,28 @@ mod tests {
             r#"[{"kind":"cc_session","uuid":"22222222-2222-4222-8222-222222222222"}]"#;
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
             rusqlite::params!["sv1", session_json],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h2', 'ih2', 'unsigned', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h2', 'ih2', 'unsigned', '2026-04-29T00:01:00Z')",
             rusqlite::params!["su1", session_json],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
              content_hash, index_hash, signature_status, indexed_at) VALUES \
              (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', ?2, '[]', '[]', 'medium', \
-              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h3', 'ih3', 'invalid', '2026-04-29T00:01:00Z')",
+              'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h3', 'ih3', 'invalid', '2026-04-29T00:01:00Z')",
             rusqlite::params!["si1", session_json],
         )
         .unwrap();
