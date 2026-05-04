@@ -96,6 +96,35 @@ impl Adapter for CcAdapter {
     }
 
     fn list(&self) -> Result<AdapterPass, AdapterError> {
+        // Detect missing projects_dir vs other I/O failures BEFORE walking.
+        // Missing root surfaces as `MissingRoot` so the indexer can suppress
+        // both upserts and deletes (a temporarily absent mount must not
+        // prune prior records); other I/O failures surface as `Unreadable`.
+        // An existing-but-empty projects_dir falls through to the normal
+        // walk below and yields `Authoritative` + zero records.
+        match fs::metadata(&self.projects_dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AdapterPass {
+                    source: Source::CcNative,
+                    records: Vec::new(),
+                    completeness: PassCompleteness::MissingRoot {
+                        path: self.projects_dir.clone(),
+                    },
+                });
+            }
+            Err(e) => {
+                return Ok(AdapterPass {
+                    source: Source::CcNative,
+                    records: Vec::new(),
+                    completeness: PassCompleteness::Unreadable {
+                        path: self.projects_dir.clone(),
+                        reason: e.to_string(),
+                    },
+                });
+            }
+        }
+
         let mut records: Vec<RecordSummary> = Vec::new();
         let mut skipped: Vec<SkipReason> = Vec::new();
 
@@ -548,11 +577,15 @@ mod tests {
     }
 
     #[test]
-    fn missing_projects_dir_returns_authoritative_zero_records() {
-        let adapter = CcAdapter::new(PathBuf::from("/nonexistent/cc/projects"), 2);
+    fn missing_projects_dir_returns_missing_root() {
+        let expected = PathBuf::from("/nonexistent/cc/projects");
+        let adapter = CcAdapter::new(expected.clone(), 2);
         let pass = adapter.list().expect("list ok");
         assert_eq!(pass.records.len(), 0);
-        assert_eq!(pass.completeness, PassCompleteness::Authoritative);
+        match pass.completeness {
+            PassCompleteness::MissingRoot { path } => assert_eq!(path, expected),
+            other => panic!("expected MissingRoot, got {other:?}"),
+        }
     }
 
     #[test]

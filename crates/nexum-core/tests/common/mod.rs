@@ -114,6 +114,17 @@ pub fn fixture_codex_state_db() -> PathBuf {
         .join("state_5.sqlite")
 }
 
+/// Count all rows in the `records` table of `db`. Opens read-only; panics on
+/// any SQL or open failure (test helper only).
+#[allow(dead_code)]
+pub fn record_count(db: &Path) -> usize {
+    let n: i64 = rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("SELECT count(*) FROM records", [], |r| r.get::<_, i64>(0))
+        .unwrap();
+    usize::try_from(n).unwrap_or(0)
+}
+
 /// `Config::seed()` configured to ingest the checked-in CC + Codex fixture
 /// corpora plus the local adapter. The codex memories dir is supplied by
 /// the caller via `codex_memories_dir` — typically a per-test `TempDir`

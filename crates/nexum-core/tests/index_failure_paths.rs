@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::NexumTestHome;
+use common::{NexumTestHome, record_count};
 use nexum_core::{
     adapter::{Adapter, PassCompleteness, codex::CodexAdapter},
     indexer::{db::open_or_create, run::run as indexer_run, state::STALE_THRESHOLD},
@@ -131,4 +131,60 @@ fn ambiguous_cc_slug_ingests_with_first_candidate_fallback() {
         )
         .unwrap();
     assert_eq!(n, 1, "my-hyphenated-app fixture must produce one record");
+}
+
+#[test]
+fn missing_root_with_prior_records_does_not_prune() {
+    let home = NexumTestHome::new().unwrap();
+    let mut paths = home.paths();
+    // Point notebook_git at a path we can remove later.
+    let nb = home.path().join("notebook.git");
+    paths.notebook_git = nb.clone();
+    std::fs::create_dir_all(&nb).unwrap();
+    common::write_local_yaml(&nb, "decisions", "r1", "body text");
+
+    let cfg = common::test_cfg_local_only();
+    let mut conn = open_or_create(&paths.index_db).unwrap();
+    indexer_run(&mut conn, &cfg, &paths).unwrap();
+    assert_eq!(record_count(&paths.index_db), 1, "initial record inserted");
+
+    // Remove the root entirely. Re-run: must NOT prune the prior record.
+    std::fs::remove_dir_all(&nb).unwrap();
+    let outcome = indexer_run(&mut conn, &cfg, &paths);
+    assert!(
+        outcome.is_ok(),
+        "missing root + prior records must not error"
+    );
+    assert_eq!(
+        record_count(&paths.index_db),
+        1,
+        "prior record retained after missing root"
+    );
+
+    // Three more missing-root passes must still not prune.
+    indexer_run(&mut conn, &cfg, &paths).unwrap();
+    indexer_run(&mut conn, &cfg, &paths).unwrap();
+    indexer_run(&mut conn, &cfg, &paths).unwrap();
+    assert_eq!(
+        record_count(&paths.index_db),
+        1,
+        "prior record retained across repeated missing-root passes"
+    );
+}
+
+#[test]
+fn missing_root_with_empty_index_is_no_op() {
+    let home = NexumTestHome::new().unwrap();
+    let mut paths = home.paths();
+    // Point notebook_git at a path that will never exist.
+    paths.notebook_git = home.path().join("does-not-exist");
+
+    let cfg = common::test_cfg_local_only();
+    let mut conn = open_or_create(&paths.index_db).unwrap();
+    let outcome = indexer_run(&mut conn, &cfg, &paths);
+    assert!(
+        outcome.is_ok(),
+        "missing root on empty index must not error"
+    );
+    assert_eq!(record_count(&paths.index_db), 0, "empty index stays empty");
 }

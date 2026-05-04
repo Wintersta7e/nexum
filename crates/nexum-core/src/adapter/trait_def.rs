@@ -40,12 +40,24 @@ pub enum SkipKind {
 ///
 /// `Failed { reason }` — the adapter could not enumerate at all. No upserts;
 /// no deletes; the indexer treats this pass as a no-op for this source.
+///
+/// `MissingRoot { path }` — the configured root directory does not exist. The
+/// indexer suppresses both upserts and deletes to avoid false-pruning records
+/// from a temporarily absent mount or workspace. If no prior records exist for
+/// this source the pass is a silent no-op; if prior records do exist a warning
+/// is emitted.
+///
+/// `Unreadable { path, reason }` — the root exists but cannot be enumerated
+/// (permissions failure, I/O error). The indexer always treats this as a hard
+/// no-op with a warning regardless of prior record state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PassCompleteness {
     Authoritative,
     Partial { skipped: Vec<SkipReason> },
     Failed { reason: String },
+    MissingRoot { path: PathBuf },
+    Unreadable { path: PathBuf, reason: String },
 }
 
 /// One pass's worth of summaries from a single adapter. The indexer

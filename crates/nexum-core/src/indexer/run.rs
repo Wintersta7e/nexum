@@ -18,7 +18,7 @@
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     adapter::{
@@ -198,6 +198,8 @@ where
         PassCompleteness::Authoritative => "authoritative",
         PassCompleteness::Partial { .. } => "partial",
         PassCompleteness::Failed { .. } => "failed",
+        PassCompleteness::MissingRoot { .. } => "missing_root",
+        PassCompleteness::Unreadable { .. } => "unreadable",
     }
     .to_owned();
     let mut per_source = PerSourceOutcome {
@@ -211,9 +213,46 @@ where
 
     if let PassCompleteness::Failed { reason } = &pass.completeness {
         warn!(
+            target: "nexum::indexer",
             ?source,
             ?reason,
             "adapter pass failed; no upserts, no deletes"
+        );
+        outcome.per_source.push(per_source);
+        return Ok(());
+    }
+
+    if let PassCompleteness::MissingRoot { path } = &pass.completeness {
+        // Suppress upserts AND deletes — a temporarily absent configured root
+        // (mount drop, workspace move) must not prune prior records. Emit at
+        // warn level when prior records exist (something to protect) and at
+        // info level when none do (fresh-setup common case).
+        if any_records_from_source(conn, source)? {
+            warn!(
+                target: "nexum::indexer",
+                ?source,
+                ?path,
+                "configured root is missing; preserving prior records"
+            );
+        } else {
+            info!(
+                target: "nexum::indexer",
+                ?source,
+                ?path,
+                "configured root is missing; no prior records to preserve"
+            );
+        }
+        outcome.per_source.push(per_source);
+        return Ok(());
+    }
+
+    if let PassCompleteness::Unreadable { path, reason } = &pass.completeness {
+        warn!(
+            target: "nexum::indexer",
+            ?source,
+            ?path,
+            ?reason,
+            "configured root is unreadable; no upserts, no deletes"
         );
         outcome.per_source.push(per_source);
         return Ok(());
@@ -232,6 +271,20 @@ where
     tx.commit()?;
     outcome.per_source.push(per_source);
     Ok(())
+}
+
+/// True iff at least one row exists in `records` for `source`. Used by the
+/// `MissingRoot` early-return branch to decide between info-level (fresh
+/// install) and warn-level (something to protect) logging. Takes
+/// `&Connection` rather than `&Transaction` because it is invoked before
+/// `apply_pass` opens its per-source transaction.
+fn any_records_from_source(conn: &Connection, source: Source) -> Result<bool, IndexerError> {
+    let mut stmt = conn.prepare("SELECT 1 FROM records WHERE source = ?1 LIMIT 1")?;
+    let exists = stmt
+        .query_row(params![source.as_db_str()], |_| Ok(()))
+        .optional()?
+        .is_some();
+    Ok(exists)
 }
 
 fn apply_pass_inside_tx<F>(
@@ -426,8 +479,12 @@ fn apply_deletes(
             per_source.deferred_deletes = per_source.deferred_deletes.saturating_add(n);
             outcome.deferred_deletes = outcome.deferred_deletes.saturating_add(n);
         }
-        PassCompleteness::Failed { .. } => {
-            unreachable!("Failed pass returns early before apply_deletes is called");
+        PassCompleteness::Failed { .. }
+        | PassCompleteness::MissingRoot { .. }
+        | PassCompleteness::Unreadable { .. } => {
+            unreachable!(
+                "Failed/MissingRoot/Unreadable passes return early before apply_deletes is called"
+            );
         }
     }
     Ok(())

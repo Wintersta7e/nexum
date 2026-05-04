@@ -209,6 +209,33 @@ impl Adapter for CodexAdapter {
     }
 
     fn list(&self) -> Result<AdapterPass, AdapterError> {
+        // Detect a missing or unreadable memories_dir BEFORE collecting any
+        // sub-files. The primary configured root is `memories_dir`; the
+        // `state_db_path` join is best-effort and remains modeled via
+        // existing Partial-pass entries when only the DB is missing.
+        match fs::metadata(&self.memories_dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AdapterPass {
+                    source: Source::CodexNative,
+                    records: Vec::new(),
+                    completeness: PassCompleteness::MissingRoot {
+                        path: self.memories_dir.clone(),
+                    },
+                });
+            }
+            Err(e) => {
+                return Ok(AdapterPass {
+                    source: Source::CodexNative,
+                    records: Vec::new(),
+                    completeness: PassCompleteness::Unreadable {
+                        path: self.memories_dir.clone(),
+                        reason: e.to_string(),
+                    },
+                });
+            }
+        }
+
         let mut records: Vec<RecordSummary> = Vec::new();
         let mut skipped: Vec<SkipReason> = Vec::new();
 

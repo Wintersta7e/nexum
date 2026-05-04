@@ -65,6 +65,35 @@ impl Adapter for LocalAdapter {
     }
 
     fn list(&self) -> Result<AdapterPass, AdapterError> {
+        // Detect missing root vs other I/O failures BEFORE walking. The
+        // contract is: missing root surfaces as `MissingRoot` (indexer
+        // suppresses both upserts and deletes); other I/O errors surface as
+        // `Unreadable` (also a hard no-op). Any "directory exists but is
+        // empty" case continues into the normal walk below and yields
+        // `Authoritative` + zero records.
+        match fs::metadata(&self.notebook_git) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AdapterPass {
+                    source: Source::Local,
+                    records: Vec::new(),
+                    completeness: PassCompleteness::MissingRoot {
+                        path: self.notebook_git.clone(),
+                    },
+                });
+            }
+            Err(e) => {
+                return Ok(AdapterPass {
+                    source: Source::Local,
+                    records: Vec::new(),
+                    completeness: PassCompleteness::Unreadable {
+                        path: self.notebook_git.clone(),
+                        reason: e.to_string(),
+                    },
+                });
+            }
+        }
+
         let mut records: Vec<RecordSummary> = Vec::new();
         let mut skipped: Vec<SkipReason> = Vec::new();
 
@@ -357,12 +386,16 @@ mod tests {
     }
 
     #[test]
-    fn missing_notebook_dir_returns_authoritative_zero() {
+    fn missing_notebook_dir_returns_missing_root() {
         let dir = TempDir::new().unwrap();
-        let adapter = LocalAdapter::new(dir.path().join("notebook.git"));
+        let expected = dir.path().join("notebook.git");
+        let adapter = LocalAdapter::new(expected.clone());
         let pass = adapter.list().expect("list ok");
         assert_eq!(pass.records.len(), 0);
-        assert_eq!(pass.completeness, PassCompleteness::Authoritative);
+        match pass.completeness {
+            PassCompleteness::MissingRoot { path } => assert_eq!(path, expected),
+            other => panic!("expected MissingRoot, got {other:?}"),
+        }
     }
 
     #[test]
