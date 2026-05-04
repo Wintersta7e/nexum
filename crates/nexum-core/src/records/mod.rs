@@ -8,5 +8,5 @@ pub use hash::{RecordSummary, content_hash};
 pub use types::{
     Agent, Confidence, ContentHash, FileEvidence, FileEvidenceKind, GetOutcome, Outcome, ProjectId,
     Provenance, RecordId, RecordKey, RecordType, SessionRef, SignatureStatus, Source, TrustBasis,
-    TrustPolicy, UnifiedRecord,
+    TrustPolicy, UnifiedRecord, WARNING_VERIFIER_REJECTED,
 };

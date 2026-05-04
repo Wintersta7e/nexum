@@ -483,6 +483,12 @@ impl std::fmt::Display for RecordKey {
     }
 }
 
+/// Warning code set on a record when the local adapter finds a signed commit
+/// whose signature does not verify against `historical_signers`. The string
+/// value is stable across versions; consumers can match it at compile time via
+/// this constant.
+pub const WARNING_VERIFIER_REJECTED: &str = "verifier-rejected";
+
 /// Trust basis (recomputed per query). JSON form is kebab-case.
 ///
 /// The verifier populates `Current` (for verified records) and `Unsigned`

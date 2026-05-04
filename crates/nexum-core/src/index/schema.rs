@@ -120,7 +120,12 @@ fn records_has_column(conn: &Connection, col: &str) -> Result<bool, SchemaError>
 /// Apply additive migrations to an existing DB. Each step is idempotent
 /// (skips when the target column / trigger / index already exists) so
 /// re-running on an already-migrated DB is a no-op.
+///
+/// All `ALTER TABLE ADD COLUMN` statements run inside a single transaction
+/// so a crash mid-migration cannot leave the table with only some of the
+/// new provenance columns.
 fn migrate_existing(conn: &Connection) -> Result<(), SchemaError> {
+    conn.execute_batch("BEGIN;")?;
     // Verifier-provenance columns. All NULL-able TEXT — readers tolerate
     // missing values, so the migration is safe to apply mid-flight even
     // without a re-index pass.
@@ -138,6 +143,7 @@ fn migrate_existing(conn: &Connection) -> Result<(), SchemaError> {
             conn.execute(&stmt, [])?;
         }
     }
+    conn.execute_batch("COMMIT;")?;
     Ok(())
 }
 

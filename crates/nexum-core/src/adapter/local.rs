@@ -25,7 +25,7 @@ use crate::{
     records::{
         Agent, Confidence, FileEvidence, FileEvidenceKind, Outcome, ProjectId, Provenance,
         RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source, TrustBasis,
-        UnifiedRecord, content_hash,
+        UnifiedRecord, WARNING_VERIFIER_REJECTED, content_hash,
     },
 };
 
@@ -399,7 +399,7 @@ fn compute_signature_status(notebook_git: &Path, record_path: &Path) -> Verifica
                 trust_basis: None,
                 record_commit_sha: Some(sha),
                 signer_fingerprint: None,
-                warning_code: Some("verifier-rejected".into()),
+                warning_code: Some(WARNING_VERIFIER_REJECTED.into()),
             }
         }
     }
