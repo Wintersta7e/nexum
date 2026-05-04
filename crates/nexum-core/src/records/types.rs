@@ -550,7 +550,9 @@ pub enum TrustBasis {
 }
 
 impl TrustBasis {
-    /// Short string used in the `records.trust_basis` column.
+    /// Short string for the in-memory / JSON wire form of trust basis.
+    /// The `records.trust_basis` SQL column was dropped; this helper now
+    /// serves the API/wire path only.
     #[must_use]
     pub fn as_db_str(self) -> &'static str {
         match self {

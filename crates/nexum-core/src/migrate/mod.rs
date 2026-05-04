@@ -22,6 +22,8 @@ pub enum MigrationError {
     IncompatibleStore { v_disk: u32, v_code: u32 },
     #[error("migration v{from}->v{to} failed: {cause}")]
     StepFailed { from: u32, to: u32, cause: String },
+    #[error("post-migration schema verification failed: {0}")]
+    Schema(#[from] crate::index::schema::SchemaError),
 }
 
 /// Outcome of a `migrate_to_latest` call.

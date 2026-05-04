@@ -68,6 +68,8 @@ pub fn write_str(conn: &Connection, key: &str, value: &str) -> Result<(), MetaEr
 /// than `topo_pos` (we keep the earliest freeze point -- once the chain is
 /// frozen at topo N, any later freeze at M > N is redundant).
 ///
+/// Note: lower `topo_pos` = earlier commit on the chain.
+///
 /// # Errors
 ///
 /// Returns `MetaError::Sqlite` if the upsert fails.

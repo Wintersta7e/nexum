@@ -43,6 +43,8 @@ pub(crate) fn handle_index_missing(path: &Path) -> ExitCode {
 /// code. Other `ApiError` variants are caller-specific and stay with their
 /// per-verb handlers; centralizing this one keeps the user-facing message
 /// consistent.
+// Wired in by upcoming read-verb routing; kept available now so the
+// translation arm doesn't need re-inventing per task.
 #[allow(dead_code)]
 pub(crate) fn handle_migration_required(err: &ApiError) -> Option<ExitCode> {
     if let ApiError::MigrationRequired { v_disk, v_code } = err {

@@ -30,7 +30,10 @@ const MIGRATIONS: &[(u32, u32, Migration)] = &[(1, 2, v1_to_v2::apply)];
 /// Backs up the live DB to `<dir>/.bak/index.db.bak-v<n>-<timestamp>` via
 /// `SQLite`'s online-backup API before applying any mutation. Each migration
 /// runs inside its own transaction; `PRAGMA user_version` is bumped on
-/// successful commit.
+/// successful commit. After the migration loop, `verify_post_apply` confirms
+/// every expected v2 table / trigger / column is present so a step that
+/// silently forgot to create something fails loud rather than committing
+/// cleanly.
 ///
 /// # Errors
 ///
@@ -42,12 +45,19 @@ const MIGRATIONS: &[(u32, u32, Migration)] = &[(1, 2, v1_to_v2::apply)];
 ///   than the binary's latest (downgrade is unsupported).
 /// - `MigrationError::StepFailed` when a registered migration returns an
 ///   error; the underlying message is preserved in `cause`.
+/// - `MigrationError::Schema` when post-apply verification finds any
+///   expected v2 table / trigger / column missing after the loop.
+// Caller asserts lock ownership at runtime; we have no compile-time check.
+// The lock-guard newtype lands when the lock-holder code lands.
 pub fn migrate_to_latest(
     conn: &mut Connection,
     db_path: &Path,
     lock_held: bool,
 ) -> Result<MigrationOutcome, MigrationError> {
-    let v_disk = read_user_version(conn)?;
+    // Pre-versioning DBs (written before user_version was tracked) get
+    // synthesized to v1 by `schema::apply` before this function is ever
+    // called; we never see a v_disk == 0 case here in practice.
+    let v_disk = crate::index::schema::read_user_version(conn)?;
     if v_disk == INDEX_DB_LATEST_VERSION {
         return Ok(MigrationOutcome::NoOp);
     }
@@ -75,17 +85,12 @@ pub fn migrate_to_latest(
         tx.execute(&format!("PRAGMA user_version = {to}"), [])?;
         tx.commit()?;
     }
+    crate::index::schema::verify_post_apply(conn)?;
     Ok(MigrationOutcome::Migrated {
         from: v_disk,
         to: INDEX_DB_LATEST_VERSION,
         backup_path,
     })
-}
-
-/// Read the on-disk `PRAGMA user_version` sentinel.
-fn read_user_version(conn: &Connection) -> Result<u32, MigrationError> {
-    let v: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    Ok(v)
 }
 
 /// Snapshot the live DB to a sibling `.bak/index.db.bak-v<n>-<timestamp>`

@@ -37,6 +37,18 @@ pub const INDEX_DB_LATEST_VERSION: u32 = 2;
 /// connection opens) — otherwise the `record_embeddings USING vec0(...)` table
 /// creation will fail.
 ///
+/// # Side effects
+///
+/// On the v=0 + records-table-exists branch (a pre-versioning DB written
+/// before this binary's release), this function writes
+/// `PRAGMA user_version = 1` to the connection AND returns
+/// `Err(SchemaError::MigrationRequired { v_disk: 1 })`. The caller is
+/// expected to dispatch to `crate::migrate::index_db::migrate_to_latest` to
+/// actually run the v1 -> v2 step. All other branches (fresh DB, current
+/// version, future version) are side-effect-free except for the
+/// `journal_mode` / `busy_timeout` / `foreign_keys` pragmas applied at the
+/// start, which are idempotent.
+///
 /// # Errors
 ///
 /// Returns `SchemaError::Sqlite` if any pragma or DDL statement fails
@@ -47,7 +59,8 @@ pub const INDEX_DB_LATEST_VERSION: u32 = 2;
 /// `PRAGMA user_version` is older than `INDEX_DB_LATEST_VERSION`; the caller
 /// must invoke the migration framework.
 pub fn apply(conn: &mut Connection) -> Result<(), SchemaError> {
-    // Pragmas first. journal_mode = WAL is per-connection but persists in the file.
+    // Pragmas always run regardless of which post-pragma branch is taken below;
+    // `journal_mode = WAL` and `foreign_keys = ON` are idempotent.
     conn.execute_batch(
         "PRAGMA journal_mode = WAL; \
          PRAGMA busy_timeout = 5000; \
@@ -82,14 +95,17 @@ pub fn apply(conn: &mut Connection) -> Result<(), SchemaError> {
 }
 
 /// Read the on-disk `PRAGMA user_version` sentinel.
-fn read_user_version(conn: &Connection) -> Result<u32, SchemaError> {
-    let v: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    Ok(v)
+///
+/// Returns the raw `rusqlite` result so callers in different error domains
+/// (e.g., `SchemaError`, `MigrationError`) can convert via their own
+/// `From<rusqlite::Error>` impls without an intermediate type bounce.
+pub(crate) fn read_user_version(conn: &Connection) -> rusqlite::Result<u32> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
 /// Verify the v2 schema shape is in place after `apply` returns Ok. Catches
 /// scenarios where the DDL ran partially or a migration left tables missing.
-fn verify_post_apply(conn: &Connection) -> Result<(), SchemaError> {
+pub(crate) fn verify_post_apply(conn: &Connection) -> Result<(), SchemaError> {
     for name in [
         "records",
         "record_embeddings",
