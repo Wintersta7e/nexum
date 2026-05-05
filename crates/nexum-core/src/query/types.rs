@@ -170,3 +170,37 @@ pub struct MetaTrustBasisSummary {
 /// Cursor — opaque base64-encoded `last_rowid`. Currently uses a simple
 /// "after rowid X" strategy; richer cursors land later.
 pub type Cursor = String;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meta_trust_basis_summary_serializes_kebab_case() {
+        let summary = MetaTrustBasisSummary {
+            current: 1,
+            rotated_historical: 2,
+            rotated_historical_compromised: 3,
+            pre_reanchor: 4,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        // Wire-format guard: all four keys must serialize as kebab-case so the
+        // JSON shape matches the value set used elsewhere in the API.
+        assert!(
+            json.contains("\"current\":1"),
+            "expected `current` key, got {json}"
+        );
+        assert!(
+            json.contains("\"rotated-historical\":2"),
+            "expected `rotated-historical` key, got {json}"
+        );
+        assert!(
+            json.contains("\"rotated-historical-compromised\":3"),
+            "expected `rotated-historical-compromised` key, got {json}"
+        );
+        assert!(
+            json.contains("\"pre-reanchor\":4"),
+            "expected `pre-reanchor` key, got {json}"
+        );
+    }
+}

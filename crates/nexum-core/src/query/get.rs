@@ -206,9 +206,9 @@ fn build_record(
             record_commit_sha: raw.record_commit_sha,
             signer_fingerprint: raw.signer_fingerprint,
             crypto_result,
-            // Populated by the read-time verifier projection in a later task.
+            // Both `relevant_trust_events_commit` and `warnings` are populated
+            // by the read-time verifier projection in a later task.
             relevant_trust_events_commit: None,
-            // Populated by the read-time verifier projection in a later task.
             warnings: Vec::new(),
         },
         extras,

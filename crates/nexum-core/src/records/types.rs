@@ -419,9 +419,9 @@ pub enum TrustPolicy {
     WarnButShow,
     /// Drop unsigned records from results entirely.
     Hide,
-    /// Surface unsigned records WITHOUT warnings or ranking penalty.
-    /// Pre-verifier read behavior; not recommended for production but
-    /// retained for compatibility / debugging.
+    /// Surface unsigned records without ranking penalty or warnings. Useful
+    /// for diagnostic comparisons against `WarnButShow` output; not the
+    /// default for production.
     ShowSilent,
 }
 
@@ -585,8 +585,14 @@ impl TrustBasis {
     }
 
     /// Inverse of [`as_db_str`]: parse a value from the corresponding column.
-    /// Falls through to `Current` for unrecognized values; defensive default
-    /// — production writers only emit the four known forms.
+    /// Falls through to `Current` for unrecognized values.
+    ///
+    /// **The `Current` fallback is least-safe and exists only because this
+    /// helper is currently `#[allow(dead_code)]`** — keeping the type total
+    /// avoids `Option` plumbing through callers that do not yet exist.
+    /// Before this helper is wired into a production read path, change the
+    /// fallback to `None` (signature: `&str -> Option<Self>`) so an unknown
+    /// value cannot silently route through the most-trusted basis.
     // Forward-compat: not currently called by production code (the
     // `records.trust_basis` column was dropped; basis is derived on read from
     // `crypto_result`). Retained for future round-trip use and exercised by

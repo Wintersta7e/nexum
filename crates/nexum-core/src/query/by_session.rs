@@ -5,7 +5,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    signature_status_for, trust_basis_for,
+    project_trust,
     types::{Meta, QueryError, ResultSet, SearchResult},
 };
 use crate::records::{CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
@@ -76,16 +76,9 @@ pub fn by_session(
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![pattern], |r| {
         let crypto_result = CryptoResult::from_db_str(&r.get::<_, String>(6)?);
-        let signature_status = signature_status_for(crypto_result);
+        let (signature_status, trust_basis, warnings) = project_trust(crypto_result);
         let record_commit_sha: Option<String> = r.get(8)?;
         let signer_fingerprint: Option<String> = r.get(9)?;
-        // Bootstrap-only basis projection: `Good` -> `Some(Current)`,
-        // everything else -> `None`. The full read-time projection (consulting
-        // trust_events) lands later.
-        let trust_basis = trust_basis_for(crypto_result);
-        // Read-time warnings are populated by the verifier projection in a
-        // later task; for now we surface an empty vec.
-        let warnings: Vec<String> = Vec::new();
         Ok(SearchResult {
             id: r.get(0)?,
             record_type: RecordType::from_db_str(&r.get::<_, String>(1)?),

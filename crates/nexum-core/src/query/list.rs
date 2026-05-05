@@ -4,8 +4,8 @@
 use rusqlite::Connection;
 
 use super::{
+    project_trust,
     search::build_filter_sql,
-    signature_status_for, trust_basis_for,
     types::{Filters, QueryError, ResultSet, SearchResult},
 };
 use crate::records::{CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
@@ -157,14 +157,7 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
 /// the verb stays under the strict-clippy `too-many-lines` threshold.
 fn row_to_search_result(raw: ListRow) -> SearchResult {
     let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-    let signature_status = signature_status_for(crypto_result);
-    // Bootstrap-only basis projection: `Good` -> `Some(Current)`, everything
-    // else -> `None`. The full read-time projection (consulting trust_events)
-    // lands later.
-    let trust_basis = trust_basis_for(crypto_result);
-    // Read-time warnings are populated by the verifier projection in a later
-    // task; for now we surface an empty vec.
-    let warnings: Vec<String> = Vec::new();
+    let (signature_status, trust_basis, warnings) = project_trust(crypto_result);
     SearchResult {
         id: raw.id,
         record_type: RecordType::from_db_str(&raw.record_type),
