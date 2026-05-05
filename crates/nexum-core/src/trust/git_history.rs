@@ -20,7 +20,7 @@ pub(crate) struct TopoCommit {
 /// Build a `git` command rooted in `notebook_git` with environment scrubbed
 /// of inherited user state. Centralizes the env-clean policy so every helper
 /// in this module shells out the same way.
-fn git(notebook_git: &Path) -> Command {
+pub(crate) fn git(notebook_git: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(notebook_git)
         .env("GIT_TERMINAL_PROMPT", "0")

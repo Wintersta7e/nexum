@@ -190,12 +190,15 @@ fn run_inner(
         if paths.notebook_git.join(".git").exists() {
             crate::trust::events_view::ensure_current(conn, &paths.notebook_git)?;
         }
-        // Per-commit cache for the crypto batch. The `read_full` callback
-        // below populates it lazily — one verify shell-out per unique
-        // record commit. Wrapped in `RefCell` so the `Fn` closure required
-        // by `apply_pass` can mutate it.
+        // Per-commit verify cache. The `read_full` callback below
+        // populates it lazily — one verify shell-out per unique record
+        // commit. Wrapped in `RefCell` so the `Fn` closure required by
+        // `apply_pass` can mutate it. Verify failures fall back to a
+        // conservative `BadSignature` outcome (the spec routes
+        // unrecognized verifier results through the invalid bucket so the
+        // warning fires; a silent drop to `NoSignature` would underclaim).
         let crypto_cache: std::cell::RefCell<
-            std::collections::HashMap<String, crate::indexer::crypto_batch::BatchEntry>,
+            std::collections::HashMap<String, crate::indexer::crypto_batch::CryptoOutcome>,
         > = std::cell::RefCell::new(std::collections::HashMap::new());
         apply_pass(
             conn,
@@ -208,30 +211,34 @@ fn run_inner(
                     // adapter's placeholder Provenance and proceed.
                     return Some(record);
                 };
-                let entry_opt = {
+                let outcome = {
                     let mut cache = crypto_cache.borrow_mut();
                     if let Some(hit) = cache.get(&sha) {
-                        Some(hit.clone())
+                        hit.clone()
                     } else {
-                        match crate::indexer::crypto_batch::run_batch(
+                        let resolved = match crate::indexer::crypto_batch::verify_and_resolve(
                             &notebook_for_read,
-                            std::slice::from_ref(&sha),
+                            &sha,
                         ) {
-                            Ok(batch) => {
-                                let e = batch.lookup(&sha);
-                                cache.insert(sha.clone(), e.clone());
-                                Some(e)
+                            Ok(o) => o,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    sha = %sha,
+                                    "verify shell-out failed; persisting record as BadSignature",
+                                );
+                                crate::indexer::crypto_batch::CryptoOutcome::bad_signature_fallback(
+                                )
                             }
-                            Err(_) => None,
-                        }
+                        };
+                        cache.insert(sha.clone(), resolved.clone());
+                        resolved
                     }
                 };
-                if let Some(entry) = entry_opt {
-                    record.provenance.crypto_result = entry.crypto_result;
-                    record.provenance.signer_fingerprint = entry.signer_fingerprint;
-                    record.provenance.relevant_trust_events_commit =
-                        entry.relevant_trust_events_commit;
-                }
+                record.provenance.crypto_result = outcome.crypto_result;
+                record.provenance.signer_fingerprint = outcome.signer_fingerprint;
+                record.provenance.relevant_trust_events_commit =
+                    outcome.relevant_trust_events_commit;
                 Some(record)
             },
             force,

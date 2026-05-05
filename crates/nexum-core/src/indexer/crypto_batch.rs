@@ -1,143 +1,107 @@
-//! Batched `git verify-commit` pass for local records.
+//! Per-commit crypto resolution for the indexer's local-adapter pass.
 //!
-//! The verify shell-out is the expensive bit (~50–200 ms per commit on
-//! a warm filesystem). Records collected from `adapter::local::discover`
-//! reference some number of unique commits; the batcher dedupes by
-//! `commit_sha` and runs verify once per unique sha. Result is stable
-//! per commit (commits are immutable) so the cache is correct across
-//! arbitrary numbers of subsequent reads.
+//! `verify_and_resolve` runs `git verify-commit` (via the env-scrubbed
+//! `--format=%G?%x00%GF` shell-out) and looks up
+//! `relevant_trust_events_commit` in one call. The indexer caches the
+//! result in a `RefCell<HashMap>` keyed by `commit_sha`, so every unique
+//! record commit pays the verify cost exactly once per pass; commits are
+//! immutable in git so the cache stays correct across reads.
 //!
-//! For each commit the batcher also computes the
-//! `relevant_trust_events_commit` — the latest `.trust/events.yml`
-//! commit reachable from the record commit. This drives the read-time
-//! trust-state projection: the verifier asks "what trust state was
-//! active when this record was signed?" and the answer is exactly
-//! `trust_events.effective_commit = relevant_trust_events_commit`,
-//! without depending on global topo position arithmetic.
+//! When `<notebook_git>/.trust/historical_signers` is absent (notebook not
+//! initialized yet) the helper short-circuits to a `NoSignature` outcome —
+//! the local-adapter contract for an uninitialized trust state.
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
 use crate::init::git_ops::{VerifyExit, git_verify_commit_outcome};
 use crate::records::types::CryptoResult;
 use crate::trust::events::TrustError;
+use crate::trust::git_history::git;
 
-/// Per-commit cache entry produced by [`run_batch`]. Empty fields are
-/// the legitimate result for unsigned / non-verifiable commits — they
-/// are not error states.
+/// One commit's resolved crypto state. Cached per `commit_sha` by the
+/// indexer's local-pass closure.
 #[derive(Debug, Clone)]
-pub struct BatchEntry {
-    /// Cached G/B/U/N outcome, mapped from `git log -1 --format=%G?`.
+pub(crate) struct CryptoOutcome {
     pub crypto_result: CryptoResult,
-    /// Signer fingerprint captured by `--format=%GF` when the outcome
-    /// was Good. `None` otherwise.
     pub signer_fingerprint: Option<String>,
     /// SHA of the `.trust/events.yml` commit effective at this record's
-    /// commit time. `None` when no events.yml commit precedes the
-    /// record (e.g., the record was committed before init or the
-    /// notebook has no events.yml history yet).
+    /// commit time. `None` when no events.yml commit precedes the record
+    /// (e.g., the record was committed before init, or the notebook has
+    /// no events.yml history yet).
     pub relevant_trust_events_commit: Option<String>,
 }
 
-/// Output of [`run_batch`]: a deduped map keyed by `commit_sha`.
-pub struct CryptoBatch {
-    by_commit: HashMap<String, BatchEntry>,
-}
-
-impl CryptoBatch {
-    /// Look up the cache entry for `commit_sha`. Returns a synthetic
-    /// `NoSignature` entry when the sha was not part of the batch input
-    /// — callers should not normally hit this path because every
-    /// `record_commit_sha` they pass in should produce a populated
-    /// entry.
-    #[must_use]
-    pub fn lookup(&self, commit_sha: &str) -> BatchEntry {
-        self.by_commit
-            .get(commit_sha)
-            .cloned()
-            .unwrap_or(BatchEntry {
-                crypto_result: CryptoResult::NoSignature,
-                signer_fingerprint: None,
-                relevant_trust_events_commit: None,
-            })
+impl CryptoOutcome {
+    /// Conservative fallback for verify shell-outs that error out (corrupt
+    /// git binary, fork ENOMEM, transient FS hiccup). Surfacing
+    /// `BadSignature` keeps a possibly-signed record from silently
+    /// projecting as `Unsigned` at read time — the spec wants
+    /// unrecognized verifier outcomes to land in the `Invalid` bucket so
+    /// the warning fires.
+    pub(crate) fn bad_signature_fallback() -> Self {
+        Self {
+            crypto_result: CryptoResult::BadSignature,
+            signer_fingerprint: None,
+            relevant_trust_events_commit: None,
+        }
     }
 
-    /// Number of unique commits that produced an entry. Exposed for
-    /// tests.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.by_commit.len()
+    /// Outcome for an uninitialized notebook (no `.trust/historical_signers`
+    /// on disk). Local records still index but with a no-signature crypto
+    /// state.
+    pub(crate) fn no_signature() -> Self {
+        Self {
+            crypto_result: CryptoResult::NoSignature,
+            signer_fingerprint: None,
+            relevant_trust_events_commit: None,
+        }
     }
 }
 
-/// Run the batch over `commit_shas`. Deduplicates internally, so
-/// callers may pass duplicates. When `notebook_git/.trust/historical_signers`
-/// is absent (notebook not initialized yet, or the notebook's trust
-/// directory was removed), every entry is filled with `NoSignature` and
-/// no shell-outs run.
+/// Resolve `commit_sha`'s crypto state and the events.yml commit
+/// effective at it. Single shell-out for verify (signature status +
+/// signer fingerprint) plus one for the events.yml lookup.
 ///
 /// # Errors
 ///
-/// Surfaces `TrustError::GitCommand` for any `git verify` / `git log`
-/// failure that is not a recognized signature-status return code.
-pub fn run_batch(notebook_git: &Path, commit_shas: &[String]) -> Result<CryptoBatch, TrustError> {
-    let mut by_commit: HashMap<String, BatchEntry> = HashMap::new();
+/// Returns `TrustError::GitCommand` for any verify or events.yml
+/// shell-out that exits non-zero, and `TrustError::Io` for spawn
+/// failures.
+pub(crate) fn verify_and_resolve(
+    notebook_git: &Path,
+    commit_sha: &str,
+) -> Result<CryptoOutcome, TrustError> {
     let historical_signers = notebook_git.join(".trust").join("historical_signers");
     if !historical_signers.exists() {
-        // No notebook-trust state on disk; cache every commit as
-        // unsigned. This matches the local-adapter contract: the
-        // record might be in git history, but without a signer set the
-        // verifier has nothing to check against.
-        for sha in commit_shas {
-            by_commit.entry(sha.clone()).or_insert(BatchEntry {
-                crypto_result: CryptoResult::NoSignature,
-                signer_fingerprint: None,
-                relevant_trust_events_commit: None,
-            });
-        }
-        return Ok(CryptoBatch { by_commit });
+        return Ok(CryptoOutcome::no_signature());
     }
-    for sha in commit_shas {
-        if by_commit.contains_key(sha) {
-            continue;
-        }
-        let outcome =
-            git_verify_commit_outcome(notebook_git, sha, &historical_signers).map_err(|e| {
-                TrustError::GitCommand {
-                    stderr: format!("{e}"),
-                }
-            })?;
-        let crypto_result = match outcome.exit {
-            VerifyExit::Good => CryptoResult::Good,
-            VerifyExit::BadSignature => CryptoResult::BadSignature,
-            VerifyExit::UnknownSigner => CryptoResult::UnknownSigner,
-            VerifyExit::NoSignature => CryptoResult::NoSignature,
-        };
-        let relevant = relevant_trust_events_commit_at(notebook_git, sha)?;
-        by_commit.insert(
-            sha.clone(),
-            BatchEntry {
-                crypto_result,
-                signer_fingerprint: outcome.signer_fingerprint,
-                relevant_trust_events_commit: relevant,
-            },
-        );
-    }
-    Ok(CryptoBatch { by_commit })
+    let outcome = git_verify_commit_outcome(notebook_git, commit_sha, &historical_signers)
+        .map_err(|e| TrustError::GitCommand {
+            stderr: format!("{e}"),
+        })?;
+    let (crypto_result, signer_fingerprint) = match outcome.exit {
+        VerifyExit::Good => (CryptoResult::Good, outcome.signer_fingerprint),
+        VerifyExit::BadSignature => (CryptoResult::BadSignature, None),
+        VerifyExit::UnknownSigner => (CryptoResult::UnknownSigner, None),
+        VerifyExit::NoSignature => (CryptoResult::NoSignature, None),
+    };
+    let relevant_trust_events_commit = relevant_trust_events_commit_at(notebook_git, commit_sha)?;
+    Ok(CryptoOutcome {
+        crypto_result,
+        signer_fingerprint,
+        relevant_trust_events_commit,
+    })
 }
 
 /// Return the SHA of the `.trust/events.yml` commit effective at
-/// `record_commit_sha`. Walks `git log -1 --format=%H <record_commit_sha> --
-/// .trust/events.yml`: the latest events.yml commit reachable from the
+/// `record_commit_sha`. Walks `git log -1 --format=%H <record_commit_sha>
+/// -- .trust/events.yml`: the latest events.yml commit reachable from the
 /// record commit. `None` when no events.yml commit precedes the record.
 fn relevant_trust_events_commit_at(
     notebook_git: &Path,
     record_commit_sha: &str,
 ) -> Result<Option<String>, TrustError> {
-    let out = Command::new("git")
-        .current_dir(notebook_git)
-        .env("GIT_TERMINAL_PROMPT", "0")
+    let out = git(notebook_git)
         .args([
             "log",
             "-1",
@@ -166,24 +130,11 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn run_batch_with_no_historical_signers_returns_no_signature_for_all() {
+    fn verify_and_resolve_with_no_historical_signers_returns_no_signature() {
         let dir = tempdir().unwrap();
-        let shas = vec!["abc".to_owned(), "def".to_owned()];
-        let batch = run_batch(dir.path(), &shas).expect("batch ok");
-        assert_eq!(batch.lookup("abc").crypto_result, CryptoResult::NoSignature);
-        assert_eq!(batch.lookup("def").crypto_result, CryptoResult::NoSignature);
-        assert!(batch.lookup("abc").signer_fingerprint.is_none());
-        assert!(batch.lookup("abc").relevant_trust_events_commit.is_none());
-    }
-
-    #[test]
-    fn run_batch_dedupes_repeated_commit_shas() {
-        // Without a real notebook, the no-historical-signers path returns
-        // NoSignature for every sha. The dedup property here is
-        // structural: by_commit map size equals unique input count.
-        let dir = tempdir().unwrap();
-        let shas = vec!["abc".to_owned(), "abc".to_owned(), "def".to_owned()];
-        let batch = run_batch(dir.path(), &shas).expect("batch ok");
-        assert_eq!(batch.len(), 2);
+        let outcome = verify_and_resolve(dir.path(), "abc").expect("ok");
+        assert_eq!(outcome.crypto_result, CryptoResult::NoSignature);
+        assert!(outcome.signer_fingerprint.is_none());
+        assert!(outcome.relevant_trust_events_commit.is_none());
     }
 }
