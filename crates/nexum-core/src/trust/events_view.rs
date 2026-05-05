@@ -1,10 +1,12 @@
 //! Materialized view of `.trust/events.yml` walked through git history.
 //!
-//! This module ships the bootstrap-only branch: walks the history, parses
-//! each revision, validates the first revision contains exactly one
-//! `BootstrapKey` event, and populates `trust_events`. Future iterations
-//! extend the loop with `KeyAdded` / `KeyRotatedOut` / `KeyCompromised`,
-//! tampering detection, and the `BootstrapReanchor` exception.
+//! Walks the history, parses each revision, validates the first revision
+//! contains exactly one `BootstrapKey` event, classifies each subsequent
+//! diff (`Append` / `Reanchor` / `NoOp` / `Forbidden`), authorizes the chain
+//! extension, and populates `trust_events` and `trust_chain_tampering`. The
+//! `BootstrapReanchor` exception is gated by a four-condition authorization
+//! check; unauthorized reanchors freeze the chain via the
+//! `chain_frozen_at_topo` meta sentinel rather than a tampering row.
 //!
 //! The materializer is idempotent: each `rebuild` call clears + repopulates
 //! `trust_events` and `trust_chain_tampering` from scratch. A pair of cheap
@@ -20,20 +22,23 @@ use crate::index::meta::{
     KEY_TRUST_EVENTS_BLOB_SHA, KEY_TRUST_EVENTS_HEAD_SHA, KEY_TRUST_EVENTS_MATERIALIZED_AT,
     read_str, write_str,
 };
-use crate::trust::chain_state::ChainState;
+use crate::trust::chain_state::{ChainState, ReanchorCase};
 use crate::trust::diff::{Diff, TamperingKind, classify as classify_diff};
 use crate::trust::events::{Event, EventKind, EventLog, TrustError};
 use crate::trust::git_history::{
     git_rev_parse, git_show_blob, has_merges_on_events_yml, topo_walk_events_yml,
 };
+use crate::trust::pin::{BootstrapPin, read_pin};
 
 /// Outcome of a materializer run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Materialization {
     /// Number of rows written to `trust_events`.
     pub events_count: u32,
-    /// Number of rows written to `trust_chain_tampering` (always 0 in the
-    /// bootstrap-only branch; populated by later iterations).
+    /// Number of rows written to `trust_chain_tampering`. Unauthorized
+    /// reanchors do NOT contribute here — they're persisted via the
+    /// `chain_frozen_at_topo` meta sentinel and surfaced as the
+    /// `broken-trust-chain` warning at read time.
     pub tampering_count: u32,
 }
 
@@ -124,8 +129,12 @@ pub fn rebuild(conn: &mut Connection, notebook_git: &Path) -> Result<Materializa
     let tx = conn.transaction()?;
     tx.execute_batch("DELETE FROM trust_events; DELETE FROM trust_chain_tampering;")?;
 
-    let mut counters = Counters::default();
-    let mut chain = ChainState::new();
+    let mut ctx = RebuildCtx {
+        tx: &tx,
+        chain: ChainState::new(),
+        counters: Counters::default(),
+        notebook_git,
+    };
     let mut prev_log: Option<EventLog> = None;
 
     for (topo_pos, commit) in commits.iter().enumerate() {
@@ -140,15 +149,7 @@ pub fn rebuild(conn: &mut Connection, notebook_git: &Path) -> Result<Materializa
             });
         }
 
-        apply_revision(
-            &tx,
-            &log,
-            prev_log.as_ref(),
-            commit,
-            topo_pos,
-            &mut chain,
-            &mut counters,
-        )?;
+        apply_revision(&mut ctx, &log, prev_log.as_ref(), commit, topo_pos)?;
         prev_log = Some(log);
     }
 
@@ -157,11 +158,23 @@ pub fn rebuild(conn: &mut Connection, notebook_git: &Path) -> Result<Materializa
     let blob_sha = parsed.get(1).map(String::as_str).unwrap_or_default();
     update_sentinels(&tx, head_sha, blob_sha)?;
 
+    let counters = ctx.counters;
     tx.commit()?;
     Ok(Materialization {
         events_count: counters.events,
         tampering_count: counters.tampering,
     })
+}
+
+/// Mutable per-rebuild context threaded through the materializer loop. Bundles
+/// the transaction handle, in-memory chain state, running counters, and the
+/// notebook.git path the loop reads from. Keeps the per-revision dispatch
+/// surface narrow without sharding state across many separate parameters.
+struct RebuildCtx<'tx> {
+    tx: &'tx Transaction<'tx>,
+    chain: ChainState,
+    counters: Counters,
+    notebook_git: &'tx Path,
 }
 
 /// Running counts threaded through the materializer loop. Captures the
@@ -193,24 +206,22 @@ fn topo_i64(pos: usize) -> i64 {
 /// otherwise classify the diff against `prev` and route the result through
 /// the materializer's tampering/append handling.
 fn apply_revision(
-    tx: &Transaction<'_>,
+    ctx: &mut RebuildCtx<'_>,
     log: &EventLog,
     prev: Option<&EventLog>,
     commit: &crate::trust::git_history::TopoCommit,
     topo_pos: usize,
-    chain: &mut ChainState,
-    counters: &mut Counters,
 ) -> Result<(), TrustError> {
     if topo_pos == 0 {
         insert_bootstrap_row(
-            tx,
+            ctx.tx,
             log,
             &commit.sha,
             topo_pos,
             commit.signer.as_deref(),
-            chain,
+            &mut ctx.chain,
         )?;
-        counters.events += 1;
+        ctx.counters.events += 1;
         return Ok(());
     }
 
@@ -224,54 +235,160 @@ fn apply_revision(
     match classify_diff(prev, log) {
         Diff::Append(new_event) => {
             let signer_fp = commit.signer.as_deref().unwrap_or("");
-            if chain.is_authorized_to_extend_chain(signer_fp, parent_topo) {
-                let chain_validated_by = chain.introducer_of(signer_fp);
+            if ctx
+                .chain
+                .is_authorized_to_extend_chain(signer_fp, parent_topo)
+            {
+                let chain_validated_by = ctx.chain.introducer_of(signer_fp);
                 write_event_row(
-                    tx,
+                    ctx.tx,
                     &new_event,
                     &commit.sha,
                     here_topo,
                     signer_fp,
                     chain_validated_by.as_deref(),
+                    None,
                 )?;
-                apply_event_to_chain(chain, &new_event, here_topo);
-                counters.events += 1;
+                apply_event_to_chain(&mut ctx.chain, &new_event, here_topo);
+                ctx.counters.events += 1;
             } else {
                 write_tampering_row(
-                    tx,
+                    ctx.tx,
                     &commit.sha,
                     here_topo_sql,
                     &new_event.event_id.to_string(),
                     TamperingKind::ReorderedDeleted,
                 )?;
-                chain.freeze(here_topo);
-                counters.tampering += 1;
+                ctx.chain.freeze(here_topo);
+                ctx.counters.tampering += 1;
             }
         }
-        Diff::Reanchor(_event) => {
-            // The reanchor authorization check lives in a follow-up task;
-            // until then the materializer freezes the chain at this commit
-            // and records the position in the meta sentinel. Unauthorized
-            // reanchors are surfaced at read time as the
-            // "broken-trust-chain" warning, not via `trust_chain_tampering`.
-            chain.freeze(here_topo);
-            crate::index::meta::write_meta_min_topo(
-                tx,
-                crate::index::meta::KEY_CHAIN_FROZEN_AT_TOPO,
-                here_topo_sql,
-            )?;
+        Diff::Reanchor(new_event) => {
+            apply_reanchor_diff(ctx, &new_event, commit, here_topo, here_topo_sql)?;
         }
         Diff::NoOp => {
             // Whitespace / comment-only diff. Both revisions deserialize to
             // structurally-identical event lists; nothing to record.
         }
         Diff::Forbidden { kind, event_id } => {
-            write_tampering_row(tx, &commit.sha, here_topo_sql, &event_id, kind)?;
-            chain.freeze(here_topo);
-            counters.tampering += 1;
+            write_tampering_row(ctx.tx, &commit.sha, here_topo_sql, &event_id, kind)?;
+            ctx.chain.freeze(here_topo);
+            ctx.counters.tampering += 1;
         }
     }
     Ok(())
+}
+
+/// Apply a `Diff::Reanchor` revision: run the four-condition authorization
+/// check, then either persist a `BootstrapReanchor` row + advance the chain
+/// state (authorized) or freeze the chain via the `chain_frozen_at_topo`
+/// meta sentinel (unauthorized). Extracted from `apply_revision` so the
+/// dispatch loop stays under the per-function line budget.
+fn apply_reanchor_diff(
+    ctx: &mut RebuildCtx<'_>,
+    new_event: &Event,
+    commit: &crate::trust::git_history::TopoCommit,
+    here_topo: u64,
+    here_topo_sql: i64,
+) -> Result<(), TrustError> {
+    let pin = read_pin(&home_for(ctx.notebook_git)).ok();
+    let signer_fp = commit.signer.as_deref();
+    if !verify_reanchor_authorization(new_event, signer_fp, &ctx.chain, pin.as_ref()) {
+        ctx.chain.freeze(here_topo);
+        crate::index::meta::write_meta_min_topo(
+            ctx.tx,
+            crate::index::meta::KEY_CHAIN_FROZEN_AT_TOPO,
+            here_topo_sql,
+        )?;
+        return Ok(());
+    }
+    let EventKind::BootstrapReanchor {
+        old_fingerprint,
+        new_fingerprint,
+        acknowledge_chain_anchor_lost,
+        ..
+    } = &new_event.payload
+    else {
+        unreachable!("Diff::Reanchor implies BootstrapReanchor payload");
+    };
+    let case = if *acknowledge_chain_anchor_lost {
+        ReanchorCase::B
+    } else {
+        ReanchorCase::A
+    };
+    // The reanchor commit's signing key is the new bootstrap by construction
+    // (verified above). Persist the row and update the chain state so
+    // post-reanchor records validate against the new root, while pre-reanchor
+    // records carry their `case` marker.
+    let signer_for_row = signer_fp.unwrap_or(new_fingerprint.as_str());
+    write_event_row(
+        ctx.tx,
+        new_event,
+        &commit.sha,
+        here_topo,
+        signer_for_row,
+        None,
+        Some(case),
+    )?;
+    ctx.chain.apply_reanchor(
+        old_fingerprint,
+        new_fingerprint,
+        &new_event.event_id.to_string(),
+        here_topo,
+        case,
+    );
+    ctx.counters.events += 1;
+    Ok(())
+}
+
+/// Derive the home directory (`~/.nexum/`) from the path of the notebook git
+/// working tree. Production layout has `notebook.git` as a sibling of
+/// `config.toml` and `.bootstrap-fingerprint` inside `~/.nexum/`, so the
+/// home is just the parent. An empty path returns `PathBuf::new()`, which
+/// the pin reader treats as missing (`read_pin` returns `Err`).
+fn home_for(notebook_git: &Path) -> std::path::PathBuf {
+    notebook_git
+        .parent()
+        .map_or_else(std::path::PathBuf::new, Path::to_path_buf)
+}
+
+/// Authorize a `BootstrapReanchor` event against the four conditions from
+/// the design spec:
+/// 1. The diff classifier surfaced the event as `Diff::Reanchor`, which
+///    structurally guarantees the new revision adds exactly one event and
+///    that event is `BootstrapReanchor`. Enforced before the call.
+/// 2. The bootstrap pin in `config.toml` matches `new_fingerprint`. The pin
+///    is the only piece of trust state outside `notebook.git`, so its match
+///    is what authorizes a chain break. Missing pin → unauthorized.
+/// 3. `old_fingerprint` matches the chain's most recent prior bootstrap.
+///    `ChainState::current_bootstrap_fp` tracks this across reanchors so a
+///    later reanchor's `old_fp` must equal the prior reanchor's `new_fp`.
+/// 4. The commit is signed by `new_fingerprint`.
+///
+/// Case A vs. Case B (whether pre-reanchor records carry the
+/// `chain-anchor-lost` warning) is a separate axis carried on the event
+/// payload itself via `acknowledge_chain_anchor_lost`, not derived here.
+fn verify_reanchor_authorization(
+    new_event: &Event,
+    signer_fp: Option<&str>,
+    chain: &ChainState,
+    pin: Option<&BootstrapPin>,
+) -> bool {
+    let EventKind::BootstrapReanchor {
+        old_fingerprint,
+        new_fingerprint,
+        ..
+    } = &new_event.payload
+    else {
+        return false;
+    };
+    let Some(pin) = pin else {
+        return false;
+    };
+    let pin_match = pin.fingerprint == *new_fingerprint;
+    let old_match = chain.current_bootstrap_fp() == Some(old_fingerprint.as_str());
+    let signed_by_new = signer_fp == Some(new_fingerprint.as_str());
+    pin_match && old_match && signed_by_new
 }
 
 /// Insert a row into `trust_chain_tampering` with the supplied classification.
@@ -325,15 +442,25 @@ fn insert_bootstrap_row(
     let introduced_by_signer = signer.unwrap_or(fingerprint.as_str());
 
     let here_topo = topo_u64(topo_pos);
-    write_event_row(tx, event, commit_sha, here_topo, introduced_by_signer, None)?;
+    write_event_row(
+        tx,
+        event,
+        commit_sha,
+        here_topo,
+        introduced_by_signer,
+        None,
+        None,
+    )?;
     chain.set_bootstrap(fingerprint, &event.event_id.to_string(), here_topo);
     Ok(())
 }
 
-/// Insert any non-bootstrap event row, plus (after the
-/// [`insert_bootstrap_row`] unification) the bootstrap row itself. Uses one
-/// SQL INSERT covering the full 12-column layout; columns the payload kind
-/// doesn't populate stay NULL by binding `Option::None`.
+/// Insert any event row (bootstrap or otherwise). Uses one SQL INSERT
+/// covering the full 13-column layout; columns the payload kind doesn't
+/// populate stay NULL by binding `Option::None`. `reanchor_case` is `Some`
+/// only on `BootstrapReanchor` rows and is persisted to `chain_anchor_lost`
+/// (0 for Case A, 1 for Case B) so read-time projection can hydrate the
+/// case without re-walking events.yml history.
 fn write_event_row(
     tx: &Transaction<'_>,
     ev: &Event,
@@ -341,6 +468,7 @@ fn write_event_row(
     topo_pos: u64,
     signer_fp: &str,
     chain_validated_by: Option<&str>,
+    reanchor_case: Option<ReanchorCase>,
 ) -> Result<(), TrustError> {
     let kind = ev.payload.as_db_str();
     let (fp, old_fp, new_fp, public_key, reason) = match &ev.payload {
@@ -378,6 +506,7 @@ fn write_event_row(
             old_fingerprint,
             new_fingerprint,
             reason,
+            ..
         } => (
             None,
             Some(old_fingerprint.as_str()),
@@ -386,12 +515,17 @@ fn write_event_row(
             Some(reason.as_str()),
         ),
     };
+    let chain_anchor_lost = reanchor_case.map(|c| match c {
+        ReanchorCase::A => 0_i64,
+        ReanchorCase::B => 1_i64,
+    });
     tx.execute(
         "INSERT INTO trust_events (
             event_id, kind, fingerprint, old_fingerprint, new_fingerprint, public_key,
             effective_commit, effective_commit_topo_pos,
-            introduced_by_signer, chain_validated_by, reason, materialized_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            introduced_by_signer, chain_validated_by, reason, chain_anchor_lost,
+            materialized_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             ev.event_id.to_string(),
             kind,
@@ -404,26 +538,23 @@ fn write_event_row(
             signer_fp,
             chain_validated_by,
             reason,
+            chain_anchor_lost,
             Utc::now().to_rfc3339(),
         ],
     )?;
     Ok(())
 }
 
-/// Mutate `chain` according to the event payload. `BootstrapKey` is set in
-/// the `topo_pos` == 0 branch (so the materializer can reject an unauthorized
-/// signer for non-bootstrap events without ever calling here). The
-/// `BootstrapReanchor` branch is intentionally left as a no-op until the
-/// reanchor authorization task lands.
+/// Mutate `chain` according to the event payload. Only invoked for
+/// `Diff::Append` events: `BootstrapKey` seeding lives in
+/// `insert_bootstrap_row`, and `BootstrapReanchor` is dispatched directly in
+/// `apply_revision` (which calls `chain.apply_reanchor` itself, since the
+/// reanchor path also persists chain freezes for the unauthorized branch).
+/// The two unreachable arms exist so this function stays exhaustive against
+/// `EventKind` without forcing callers to filter the input.
 fn apply_event_to_chain(chain: &mut ChainState, ev: &Event, topo_pos: u64) {
     let event_id = ev.event_id.to_string();
     match &ev.payload {
-        // BootstrapKey is seeded by `insert_bootstrap_row`; nothing extra to
-        // apply here. BootstrapReanchor is intentionally a no-op at this
-        // scope: the dispatch arm in `apply_revision` already freezes the
-        // chain via the meta sentinel, and the carry-over `pre_reanchor`
-        // disposition on prior keys is set when the reanchor verifier
-        // exception lands.
         EventKind::BootstrapKey { .. } | EventKind::BootstrapReanchor { .. } => {}
         EventKind::KeyAdded { fingerprint, .. } => {
             chain.apply_key_added(fingerprint, &event_id, topo_pos);

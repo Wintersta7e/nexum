@@ -63,11 +63,11 @@ struct KeyEntry {
     /// event, or the `KeyAdded` event). Used by the materializer to populate
     /// `chain_validated_by`.
     introduced_by_event_id: String,
-    /// `Some` for keys carried over from a pre-reanchor chain. `None` for
-    /// keys introduced after a reanchor or in chains that never reanchored.
-    /// Currently always `None`: the reanchor handler that sets it lands
-    /// alongside the bootstrap-reanchor verifier exception.
-    #[allow(dead_code)]
+    /// `Some(case)` for keys trusted before a `BootstrapReanchor`; `None`
+    /// for keys introduced at or after a reanchor (and for chains that never
+    /// reanchored). Set by `ChainState::apply_reanchor` once the materializer
+    /// authorizes the reanchor; consumed by `state_of` so the read-time
+    /// trust projection can map these to `TrustState::PreReanchor`.
     pre_reanchor: Option<ReanchorCase>,
 }
 
@@ -85,6 +85,13 @@ pub(crate) struct ChainState {
     /// integrity violation (unauthorized append, malformed reanchor, etc.).
     /// `None` while the chain is healthy.
     frozen_at_topo: Option<u64>,
+    /// Current bootstrap fingerprint at the latest applied event. Tracks the
+    /// chain's root identity across reanchors. Set by `set_bootstrap` and
+    /// updated by `apply_reanchor`; consulted by the materializer's reanchor
+    /// authorization check to enforce the "old fingerprint matches the most
+    /// recent prior bootstrap" condition correctly across multi-reanchor
+    /// chains. `None` only before the first bootstrap is applied.
+    current_bootstrap_fp: Option<String>,
 }
 
 impl ChainState {
@@ -96,6 +103,7 @@ impl ChainState {
 
     /// Record the bootstrap signer at the chain root (topological position 0).
     pub(crate) fn set_bootstrap(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
+        self.current_bootstrap_fp = Some(fingerprint.to_owned());
         self.seed_key(fingerprint, event_id, topo_pos);
     }
 
@@ -142,6 +150,50 @@ impl ChainState {
     /// at-or-after this position return `BrokenChain`.
     pub(crate) fn freeze(&mut self, at_topo: u64) {
         self.frozen_at_topo = Some(at_topo);
+    }
+
+    /// Apply an authorized `BootstrapReanchor` event. Marks every key trusted
+    /// strictly *before* `topo_pos` as pre-reanchor under `case`, then seeds
+    /// `new_fp` as the new bootstrap signer at `topo_pos`. Updates
+    /// `current_bootstrap_fp` so subsequent reanchor authorization checks
+    /// compare against the most recent bootstrap (correct across chained
+    /// reanchors). `old_fp` is accepted for symmetry with the event payload
+    /// but is not used here — the caller has already verified it matches the
+    /// prior bootstrap.
+    pub(crate) fn apply_reanchor(
+        &mut self,
+        old_fp: &str,
+        new_fp: &str,
+        new_event_id: &str,
+        topo_pos: u64,
+        case: ReanchorCase,
+    ) {
+        let _ = old_fp;
+        for entry in self.keys.values_mut() {
+            if entry.trusted_at_topo < topo_pos {
+                entry.pre_reanchor = Some(case);
+            }
+        }
+        self.keys.insert(
+            new_fp.to_owned(),
+            KeyEntry {
+                trusted_at_topo: topo_pos,
+                rotated_at_topo: None,
+                compromised_at_topo: None,
+                introduced_by_event_id: new_event_id.to_owned(),
+                pre_reanchor: None,
+            },
+        );
+        self.current_bootstrap_fp = Some(new_fp.to_owned());
+    }
+
+    /// Returns the current bootstrap fingerprint at the latest applied event,
+    /// or `None` if no bootstrap has been applied yet. Used by the
+    /// materializer to verify a reanchor's `old_fingerprint` payload matches
+    /// the chain's current root before granting authorization.
+    #[must_use]
+    pub(crate) fn current_bootstrap_fp(&self) -> Option<&str> {
+        self.current_bootstrap_fp.as_deref()
     }
 
     /// True if `fingerprint` is in the trusted set at `topo_pos` — i.e., was

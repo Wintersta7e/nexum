@@ -28,10 +28,10 @@ pub(crate) enum Diff {
     /// Allowed: a single new event appended at the end of the log.
     Append(Event),
     /// Allowed special case: a single new `BootstrapReanchor` event. The
-    /// inner [`Event`] is consumed by a follow-up task that performs the
-    /// reanchor authorization check; this iteration's materializer freezes
-    /// the chain unconditionally and ignores the payload.
-    #[allow(dead_code)] // Inner Event is consumed by the BootstrapReanchor verifier task.
+    /// inner [`Event`] is consumed by the materializer's reanchor
+    /// authorization check, which either persists the row + updates the
+    /// chain state or freezes the chain via the `chain_frozen_at_topo` meta
+    /// sentinel.
     Reanchor(Event),
     /// Allowed: any difference that round-trips through `serde_yaml` to
     /// structurally-identical [`EventLog`] values. This collapses

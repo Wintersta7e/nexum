@@ -18,19 +18,57 @@ use ssh_key::PrivateKey;
 use ssh_key::rand_core::OsRng;
 use tempfile::TempDir;
 
-/// Owned tempdir holding a fresh notebook.git plus all keys generated for
-/// the test. Keep the value alive for the duration of the test; dropping it
-/// removes the on-disk tree.
+/// Owned tempdir holding a `~/.nexum`-shaped layout for a single test. The
+/// tempdir root is the home directory (`config.toml` and
+/// `.bootstrap-fingerprint` live there); the notebook itself lives at
+/// `<home>/notebook.git`. Keep the value alive for the duration of the
+/// test; dropping it removes the on-disk tree.
 pub struct NotebookFixture {
     pub dir: TempDir,
     pub keys: Vec<KeyPair>,
+    notebook_path: PathBuf,
 }
 
 impl NotebookFixture {
     /// Path of the notebook.git working tree (also the cwd for git
     /// commands).
     pub fn path(&self) -> &Path {
+        &self.notebook_path
+    }
+
+    /// Home directory containing `config.toml` and the bootstrap pin cache.
+    /// Equivalent to `~/.nexum/` in production layout. The materializer
+    /// derives this via `notebook_git.parent()`, so tests that exercise the
+    /// reanchor verifier write the pin here.
+    pub fn home(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// Write `config.toml` (with a `[trust.bootstrap]` block pinning
+    /// `fingerprint`) and the matching `.bootstrap-fingerprint` cache to the
+    /// fixture's home. Tests that exercise the reanchor verifier call this
+    /// after rotating the bootstrap so the pin reflects the post-recovery
+    /// fingerprint.
+    pub fn write_pin(&self, fingerprint: &str, public_openssh: &str) {
+        let toml = format!(
+            "[trust.bootstrap]\nfingerprint = \"{fp}\"\nkey_type = \"ssh-ed25519\"\npublic_key = \"{pk}\"\nestablished_at = \"2026-01-01T00:00:00Z\"\n",
+            fp = fingerprint,
+            pk = public_openssh.trim(),
+        );
+        std::fs::write(self.home().join("config.toml"), toml).expect("write config.toml");
+        std::fs::write(
+            self.home().join(".bootstrap-fingerprint"),
+            format!("{fingerprint}\n"),
+        )
+        .expect("write .bootstrap-fingerprint");
+    }
+
+    /// Remove `config.toml` if present. Tests that exercise the
+    /// pin-missing branch of the reanchor verifier call this between
+    /// committing the reanchor revision and running `rebuild`.
+    pub fn delete_pin(&self) {
+        let _ = std::fs::remove_file(self.home().join("config.toml"));
+        let _ = std::fs::remove_file(self.home().join(".bootstrap-fingerprint"));
     }
 }
 
@@ -74,33 +112,30 @@ pub fn new_keypair(workdir: &Path, name: &str) -> KeyPair {
     }
 }
 
-/// Initialize a fresh notebook.git in a new tempdir. Configures git with the
-/// SSH signing format and writes the `historical_signers`,
-/// `allowed_signers`, and `revoked_signers` files (so callers can later
-/// `git verify-commit` if they want, though the materializer itself only
-/// reads `events.yml`).
-///
-/// Caller-supplied `primary_key` is the bootstrap signing key; its private
-/// path must already exist (typically generated via
-/// `new_keypair(&keys_dir, ...)`).
 pub fn init_notebook(primary_key: &KeyPair) -> NotebookFixture {
     let dir = tempfile::Builder::new()
         .prefix("nexum-trust-fixture-")
         .tempdir()
         .expect("create notebook tempdir");
-    let nb = dir.path();
-    run_git(nb, &["init", "--initial-branch=main", "."]);
-    run_git(nb, &["config", "user.email", "test@example.invalid"]);
-    run_git(nb, &["config", "user.name", "Test"]);
+    // Nest the notebook under `<home>/notebook.git` so the materializer's
+    // `home_for(notebook_git)` derivation (notebook_git.parent()) lands on a
+    // directory where tests can write `config.toml` and the bootstrap pin
+    // cache. Existing callers still receive a notebook-shaped path from
+    // `fixture.path()` and don't need to change.
+    let nb = dir.path().join("notebook.git");
+    std::fs::create_dir_all(&nb).expect("create notebook subdir");
+    run_git(&nb, &["init", "--initial-branch=main", "."]);
+    run_git(&nb, &["config", "user.email", "test@example.invalid"]);
+    run_git(&nb, &["config", "user.name", "Test"]);
     // SSH signing trio: the materializer reads `%GF` (signer fingerprint)
     // off the resulting commit, which only fires when ALL of these are set:
     // `gpg.format = ssh`, `user.signingkey` pointing at the private key,
     // and `gpg.ssh.allowedSignersFile` (configured below) at an absolute
     // path. Missing any one of them leaves `%GF` empty and the materializer
     // can't extract the signer.
-    run_git(nb, &["config", "gpg.format", "ssh"]);
+    run_git(&nb, &["config", "gpg.format", "ssh"]);
     run_git(
-        nb,
+        &nb,
         &[
             "config",
             "user.signingkey",
@@ -110,7 +145,7 @@ pub fn init_notebook(primary_key: &KeyPair) -> NotebookFixture {
                 .expect("private path is valid utf-8"),
         ],
     );
-    run_git(nb, &["config", "commit.gpgsign", "true"]);
+    run_git(&nb, &["config", "commit.gpgsign", "true"]);
 
     std::fs::create_dir_all(nb.join(".trust")).expect("mkdir .trust");
     let allowed_signers_path = nb.join(".trust/allowed_signers");
@@ -129,7 +164,7 @@ pub fn init_notebook(primary_key: &KeyPair) -> NotebookFixture {
     .expect("write allowed_signers");
     std::fs::write(nb.join(".trust/revoked_signers"), "").expect("write revoked_signers");
     run_git(
-        nb,
+        &nb,
         &[
             "config",
             "gpg.ssh.allowedSignersFile",
@@ -141,6 +176,7 @@ pub fn init_notebook(primary_key: &KeyPair) -> NotebookFixture {
     NotebookFixture {
         dir,
         keys: vec![primary_key.clone()],
+        notebook_path: nb,
     }
 }
 

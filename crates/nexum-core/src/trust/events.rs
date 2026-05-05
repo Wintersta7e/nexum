@@ -53,6 +53,17 @@ pub enum EventKind {
         old_fingerprint: String,
         new_fingerprint: String,
         reason: String,
+        /// Distinguishes the two reanchor recovery paths: `false` (default)
+        /// means the bootstrap pin was preserved across recovery, so records
+        /// signed before the reanchor still chain to a verifiable root;
+        /// `true` means the pin was lost and the operator acknowledged the
+        /// chain anchor as gone, so pre-reanchor records carry the
+        /// `chain-anchor-lost` warning at read time. Recovery commands set
+        /// this from their CLI flag (`--acknowledge-chain-anchor-lost`).
+        /// Backward compatible with v1 events.yml that predated the field —
+        /// missing values deserialize as `false`.
+        #[serde(default)]
+        acknowledge_chain_anchor_lost: bool,
     },
 }
 
@@ -256,6 +267,7 @@ mod tests {
                 old_fingerprint: fake_fingerprint(),
                 new_fingerprint: "SHA256:CCC=".into(),
                 reason: "Bootstrap key lost".into(),
+                acknowledge_chain_anchor_lost: false,
             },
         ];
         for (i, kind) in events.into_iter().enumerate() {
