@@ -65,9 +65,20 @@ pub fn topo_walk_events_yml(notebook_git: &Path) -> Result<Vec<String>, TrustErr
 /// Returns `TrustError::Io` if `git` cannot be invoked, or
 /// `TrustError::GitCommand` if the underlying `git log --merges` exits
 /// non-zero.
+/// Adds `--full-history` to defeat git's default history simplification —
+/// otherwise merge commits where the merge result's blob equals one parent's
+/// blob can be silently dropped from `git log -- <path>`, hiding a real
+/// linear-history violation.
 pub fn has_merges_on_events_yml(notebook_git: &Path) -> Result<bool, TrustError> {
     let out = git(notebook_git)
-        .args(["log", "--merges", "--format=%H", "--", ".trust/events.yml"])
+        .args([
+            "log",
+            "--merges",
+            "--full-history",
+            "--format=%H",
+            "--",
+            ".trust/events.yml",
+        ])
         .output()
         .map_err(io_err(notebook_git))?;
     if !out.status.success() {

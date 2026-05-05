@@ -56,6 +56,21 @@ pub enum EventKind {
     },
 }
 
+impl EventKind {
+    /// String form used in the `trust_events.kind` SQL column. Matches
+    /// the schema's `CHECK` constraint and the `#[serde(tag = "kind")]`
+    /// discriminator used in `events.yml`.
+    pub(crate) fn as_db_str(&self) -> &'static str {
+        match self {
+            EventKind::BootstrapKey { .. } => "BootstrapKey",
+            EventKind::KeyAdded { .. } => "KeyAdded",
+            EventKind::KeyRotatedOut { .. } => "KeyRotatedOut",
+            EventKind::KeyCompromised { .. } => "KeyCompromised",
+            EventKind::BootstrapReanchor { .. } => "BootstrapReanchor",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum TrustError {
     /// Filesystem error.

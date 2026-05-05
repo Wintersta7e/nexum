@@ -55,14 +55,14 @@ impl<'a> TrustEventsView<'a> {
     ///
     /// In the bootstrap-only branch the materializer never writes tampering
     /// rows, so this only returns `true` if a future iteration's writer
-    /// has populated `trust_chain_tampering`. The `_commit` argument is
-    /// reserved for the topo-position-aware variant introduced when chain
-    /// freeze logic lands.
+    /// has populated `trust_chain_tampering`. The topo-position-aware
+    /// variant (`has_tampering_at_or_before(commit)`) lands alongside the
+    /// tampering-detection write path.
     ///
     /// # Errors
     ///
     /// Returns `TrustError::Sqlite` if the underlying `count(*)` query fails.
-    pub fn has_tampering_at_or_before(&self, _commit: &str) -> Result<bool, TrustError> {
+    pub fn has_any_tampering(&self) -> Result<bool, TrustError> {
         let count: i64 =
             self.conn
                 .query_row("SELECT count(*) FROM trust_chain_tampering", [], |r| {
@@ -165,6 +165,7 @@ fn insert_bootstrap_row(
     if log.events.len() != 1 {
         return Err(TrustError::MalformedBootstrap);
     }
+    let kind = log.events[0].payload.as_db_str();
     let EventKind::BootstrapKey {
         fingerprint,
         public_key,
@@ -184,9 +185,10 @@ fn insert_bootstrap_row(
             event_id, kind, fingerprint, public_key,
             effective_commit, effective_commit_topo_pos,
             introduced_by_signer, chain_validated_by, reason, materialized_at
-        ) VALUES (?1, 'BootstrapKey', ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
         params![
             log.events[0].event_id.to_string(),
+            kind,
             fingerprint,
             public_key,
             commit_sha,
@@ -388,5 +390,18 @@ events:
         let m = rebuild(&mut conn, dir.path()).unwrap();
         assert_eq!(m.events_count, 0);
         assert_eq!(m.tampering_count, 0);
+
+        // No history → sentinels stay absent so the next ensure_current call
+        // still triggers a real rebuild once events.yml lands.
+        assert!(
+            read_str(&conn, KEY_TRUST_EVENTS_HEAD_SHA)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_str(&conn, KEY_TRUST_EVENTS_BLOB_SHA)
+                .unwrap()
+                .is_none()
+        );
     }
 }
