@@ -21,6 +21,7 @@ pub mod paths;
 pub mod project;
 pub mod query;
 pub mod records;
+pub mod session;
 pub mod ssh_key;
 pub mod trust;
 

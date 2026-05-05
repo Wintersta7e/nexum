@@ -31,8 +31,6 @@ pub(crate) const MIGRATION_REQUIRED: u8 = 6;
 // Reserved slot wired up by future lock-holder work; see module docs.
 #[allow(dead_code)]
 pub(crate) const CONCURRENT: u8 = 7;
-// Reserved slot wired up by future verifier work; see module docs.
-#[allow(dead_code)]
 pub(crate) const REANCHOR_PENDING: u8 = 8;
 // Reserved slot wired up by future trust-schema gate; see module docs.
 #[allow(dead_code)]

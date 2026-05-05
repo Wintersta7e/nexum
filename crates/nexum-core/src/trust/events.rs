@@ -76,6 +76,15 @@ pub enum TrustError {
     /// YAML serialization error.
     #[error("trust YAML serialize error: {0}")]
     Serialize(serde_yaml::Error),
+    /// `config.toml` parse error encountered when reading `[trust.bootstrap]`.
+    #[error("config.toml parse error in {path}: {cause}")]
+    ConfigParse { path: String, cause: String },
+    /// `[trust.bootstrap]` section missing from `config.toml`.
+    #[error("bootstrap pin missing from config.toml")]
+    BootstrapPinMissing,
+    /// `~/.nexum/.reanchor_pending` sentinel detected; commands must refuse.
+    #[error("reanchor pending: {message}")]
+    ReanchorPending { message: String },
 }
 
 /// Write the seed `events.yml` for `nexum init`.

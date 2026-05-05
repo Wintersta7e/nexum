@@ -10,17 +10,32 @@ use nexum_core::{
 
 use super::exit_codes;
 
-/// Resolve `Paths` and load the config. Returns the runtime context shared
-/// by every read-side CLI verb (`index`, `search`, `get`, `list`, `recent`,
-/// `by_session`, `project`).
+/// Resolve `Paths`, run the global session pre-check, and load the config.
+/// Returns the runtime context shared by every read-side CLI verb (`index`,
+/// `search`, `get`, `list`, `recent`, `by_session`, `project`).
 ///
 /// On `Paths::resolve` failure prints an init-suggestion hint and returns
-/// `ExitCode::from(exit_codes::NOT_INITIALIZED)`. On `load_config` failure
-/// prints the underlying error and returns the same code.
+/// `ExitCode::from(exit_codes::NOT_INITIALIZED)`. If `session::startup::pre_check`
+/// detects a `.reanchor_pending` sentinel, returns
+/// `ExitCode::from(exit_codes::REANCHOR_PENDING)` (8); other startup errors
+/// map to `STORE_INTEGRITY`. On `load_config` failure prints the underlying
+/// error and returns `NOT_INITIALIZED`.
 pub(crate) fn resolve_runtime() -> Result<(Paths, Config), ExitCode> {
     let paths = Paths::resolve().map_err(|e| {
         eprintln!("error: {e}\nDid you run `nexum init`?");
         ExitCode::from(exit_codes::NOT_INITIALIZED)
+    })?;
+    nexum_core::session::startup::pre_check(&paths.home).map_err(|e| match e {
+        nexum_core::session::startup::StartupError::Trust(
+            nexum_core::trust::events::TrustError::ReanchorPending { message },
+        ) => {
+            eprintln!("error: {message}");
+            ExitCode::from(exit_codes::REANCHOR_PENDING)
+        }
+        nexum_core::session::startup::StartupError::Trust(other) => {
+            eprintln!("error: {other}");
+            ExitCode::from(exit_codes::STORE_INTEGRITY)
+        }
     })?;
     let cfg = load_config(&paths.config).map_err(|e| {
         eprintln!("error: {e}");
