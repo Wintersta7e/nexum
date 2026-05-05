@@ -5,6 +5,7 @@
 //! OpenSSH-format signer files (`historical_signers`, `allowed_signers`,
 //! `revoked_signers`).
 
+pub mod chain_state;
 pub mod events;
 pub mod events_view;
 pub mod git_history;
