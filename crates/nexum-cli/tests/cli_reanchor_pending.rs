@@ -44,4 +44,8 @@ fn search_against_tree_with_reanchor_pending_exits_8() {
         stderr.contains("nexum doctor --resolve-pending-reanchor"),
         "stderr missing recovery flow hint: {stderr}"
     );
+    assert!(
+        stderr.contains("phase init"),
+        "stderr missing phase rendering: {stderr}"
+    );
 }

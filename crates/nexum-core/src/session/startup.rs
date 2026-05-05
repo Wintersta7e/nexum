@@ -23,6 +23,12 @@ pub enum StartupError {
 /// Callers map `StartupError::Trust(TrustError::ReanchorPending { .. })` to
 /// exit code 8 and the rest to a generic store-integrity exit.
 ///
+/// **Call placement:** the CLI's `resolve_runtime` invokes `pre_check`
+/// between `Paths::resolve()` and `load_config()`. The order is deliberate
+/// — `pre_check` requires `paths.home` (so `Paths::resolve` must precede
+/// it) but must run before any state-loading work (config parse, DB open)
+/// so a refusal short-circuits every potential side effect downstream.
+///
 /// # Errors
 ///
 /// Propagates any error from the underlying trust-layer pre-checks (today,

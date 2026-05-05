@@ -12,14 +12,61 @@ use serde::Deserialize;
 
 use crate::trust::events::TrustError;
 
+/// Reanchor case: the previous bootstrap state when the sentinel was written.
+///
+/// Wire form is the bare letter (`"A"` / `"B"`); deserialization rejects
+/// every other value, routing through the malformed-sentinel branch.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub enum Case {
+    /// Existing pin known; reanchor is rotating from a known-good fingerprint.
+    A,
+    /// Pin lost or unverifiable; reanchor proceeds without an old fingerprint.
+    B,
+}
+
+impl Case {
+    fn as_str(self) -> &'static str {
+        match self {
+            Case::A => "A",
+            Case::B => "B",
+        }
+    }
+}
+
+/// Reanchor phase reached at the moment the sentinel was last written.
+///
+/// Wire form is `snake_case` (`"init"` / `"events_committed"` / `"pin_updated"`);
+/// deserialization rejects every other value.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Sentinel created; no events committed yet.
+    Init,
+    /// Trust events for the new pin have been committed; pin file not yet rotated.
+    EventsCommitted,
+    /// New pin file in place; sentinel awaiting cleanup.
+    PinUpdated,
+}
+
+impl Phase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Phase::Init => "init",
+            Phase::EventsCommitted => "events_committed",
+            Phase::PinUpdated => "pin_updated",
+        }
+    }
+}
+
 /// Parsed contents of the `.reanchor_pending` sentinel file.
 ///
-/// `case` is `"A"` (existing pin known) or `"B"` (pin lost / Case B). When
-/// `case == "B"` the previous pin is unknown and `old_pin_fp` is `None`.
+/// `case == Case::B` indicates the previous pin was lost; `old_pin_fp` is
+/// `None` in that case. Unknown values for `case` or `phase_completed` fail
+/// deserialization, which routes through the malformed-sentinel branch in
+/// [`check`].
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ReanchorPending {
-    /// `"A"` (pin known) or `"B"` (pin lost).
-    pub case: String,
+    pub case: Case,
     /// Previous bootstrap fingerprint, `None` for case B.
     pub old_pin_fp: Option<String>,
     /// New bootstrap fingerprint being installed.
@@ -32,8 +79,7 @@ pub struct ReanchorPending {
     /// Optional PID of the process that wrote the sentinel.
     #[serde(default)]
     pub pid: Option<u64>,
-    /// `"init"` | `"events_committed"` | `"pin_updated"`.
-    pub phase_completed: String,
+    pub phase_completed: Phase,
 }
 
 /// Returns `Ok(())` when no `.reanchor_pending` sentinel is present.
@@ -68,7 +114,8 @@ pub fn check(home: &Path) -> Result<(), TrustError> {
              Resolution requires the recovery flow \
              (`nexum doctor --resolve-pending-reanchor`). \
              Either upgrade the binary, or delete .reanchor_pending if the reanchor was abandoned.",
-            parsed.case, parsed.phase_completed,
+            parsed.case.as_str(),
+            parsed.phase_completed.as_str(),
         ),
     })
 }
@@ -147,6 +194,66 @@ mod tests {
         match err {
             TrustError::ReanchorPending { message } => {
                 assert!(message.contains("case B"));
+                assert!(message.contains("phase events_committed"));
+            }
+            other => panic!("expected ReanchorPending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_returns_reanchor_pending_when_sentinel_empty() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), ".reanchor_pending", "");
+        let err = check(dir.path()).unwrap_err();
+        match err {
+            TrustError::ReanchorPending { message } => {
+                assert!(message.contains("malformed"));
+            }
+            other => panic!("expected ReanchorPending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_returns_reanchor_pending_for_unknown_case() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            ".reanchor_pending",
+            r#"{
+                "case": "C",
+                "old_pin_fp": "SHA256:abc",
+                "new_pin_fp": "SHA256:def",
+                "started_at": "2026-05-04T12:00:00Z",
+                "phase_completed": "init"
+            }"#,
+        );
+        let err = check(dir.path()).unwrap_err();
+        match err {
+            TrustError::ReanchorPending { message } => {
+                assert!(message.contains("malformed"));
+            }
+            other => panic!("expected ReanchorPending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_returns_reanchor_pending_for_unknown_phase() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            ".reanchor_pending",
+            r#"{
+                "case": "A",
+                "old_pin_fp": "SHA256:abc",
+                "new_pin_fp": "SHA256:def",
+                "started_at": "2026-05-04T12:00:00Z",
+                "phase_completed": "rolled_back"
+            }"#,
+        );
+        let err = check(dir.path()).unwrap_err();
+        match err {
+            TrustError::ReanchorPending { message } => {
+                assert!(message.contains("malformed"));
             }
             other => panic!("expected ReanchorPending, got {other:?}"),
         }
