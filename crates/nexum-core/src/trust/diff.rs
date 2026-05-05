@@ -24,7 +24,7 @@ use crate::trust::events::{Event, EventKind, EventLog};
 /// deserialize identically, and `Forbidden` covers any mutation that breaks
 /// the append-only invariant.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Diff {
+pub(crate) enum Diff {
     /// Allowed: a single new event appended at the end of the log.
     Append(Event),
     /// Allowed special case: a single new `BootstrapReanchor` event. The
@@ -33,14 +33,23 @@ pub enum Diff {
     /// the chain unconditionally and ignores the payload.
     #[allow(dead_code)] // Inner Event is consumed by the BootstrapReanchor verifier task.
     Reanchor(Event),
-    /// Allowed: whitespace / comment-only difference. Both revisions
-    /// deserialized into structurally-identical [`EventLog`] values.
+    /// Allowed: any difference that round-trips through `serde_yaml` to
+    /// structurally-identical [`EventLog`] values. This collapses
+    /// whitespace and comment changes (the load-bearing case) and also any
+    /// other YAML-level reordering or formatting that deserializes to the
+    /// same struct — strictly broader than text-level whitespace
+    /// normalization, but a strict subset of mutations the spec considers
+    /// observable, since the rest of the verifier consumes the parsed
+    /// `EventLog`, not the raw bytes.
     NoOp,
     /// Forbidden mutation. The materializer writes one row to
     /// `trust_chain_tampering` and freezes the chain from this commit
     /// forward.
     Forbidden {
         kind: TamperingKind,
+        /// `String` (not `Uuid`) so the shrunk-branch fallback can carry
+        /// the literal `"unknown"` sentinel when the missing event cannot
+        /// be located. Production callers see real `UUIDv7` strings.
         event_id: String,
     },
 }
@@ -48,7 +57,7 @@ pub enum Diff {
 /// Forbidden mutation kinds recorded into `trust_chain_tampering.kind`.
 /// String form matches the schema `CHECK` constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TamperingKind {
+pub(crate) enum TamperingKind {
     /// Existing event reordered or deleted between two revisions.
     ReorderedDeleted,
     /// Existing `event_id`'s payload mutated between two revisions.
@@ -83,7 +92,7 @@ impl TamperingKind {
 /// revision must add exactly one event whose `event_id` does not appear
 /// earlier; if the new payload is `BootstrapReanchor` it is reported as
 /// [`Diff::Reanchor`], otherwise as [`Diff::Append`].
-pub fn classify(prev: &EventLog, current: &EventLog) -> Diff {
+pub(crate) fn classify(prev: &EventLog, current: &EventLog) -> Diff {
     let prev_len = prev.events.len();
     let curr_len = current.events.len();
 
@@ -110,7 +119,10 @@ pub fn classify(prev: &EventLog, current: &EventLog) -> Diff {
 
     // Shrunk → an existing event was removed. Surface the first missing
     // event_id (by topo order) so the tampering row points at a meaningful
-    // identifier.
+    // identifier. The O(n²) `find` + `any` is fine in practice: the trust
+    // event log is bounded per spec to a single-digit count of events on
+    // personal-scale notebooks; the asymptotic cost only matters at chain
+    // sizes the rest of the verifier never reaches.
     if curr_len < prev_len {
         let missing = prev
             .events
