@@ -81,9 +81,7 @@ pub(crate) fn verify_and_resolve(
             // collapsing the wrapper's Display string.
             crate::init::InitError::Io { path, source } => TrustError::Io { path, source },
             // Preserve the actual stderr text from the `git` invocation.
-            crate::init::InitError::Git { stderr, .. } => {
-                TrustError::GitCommand { stderr }
-            }
+            crate::init::InitError::Git { stderr, .. } => TrustError::GitCommand { stderr },
             // Other `InitError` variants don't surface from
             // `git_verify_commit_outcome` (it only returns `Io` or
             // `Git`), but stringify defensively if they ever do.
