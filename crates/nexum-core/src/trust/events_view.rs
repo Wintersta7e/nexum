@@ -211,7 +211,7 @@ fn apply_revision(
                     &commit.sha,
                     here_topo_sql,
                     &new_event.event_id.to_string(),
-                    "ReorderedDeleted",
+                    TamperingKind::ReorderedDeleted,
                 )?;
                 chain.freeze(here_topo);
                 counters.tampering += 1;
@@ -244,7 +244,7 @@ fn write_tampering_row(
     commit_sha: &str,
     topo_pos: i64,
     event_id: &str,
-    kind: &str,
+    kind: TamperingKind,
 ) -> Result<(), TrustError> {
     tx.execute(
         "INSERT INTO trust_chain_tampering \
@@ -254,7 +254,7 @@ fn write_tampering_row(
             commit_sha,
             topo_pos,
             event_id,
-            kind,
+            kind.as_db_str(),
             Utc::now().to_rfc3339()
         ],
     )?;
@@ -317,6 +317,26 @@ fn insert_bootstrap_row(
     Ok(())
 }
 
+/// Forbidden mutation kinds recorded into `trust_chain_tampering.kind`.
+/// String form matches the schema `CHECK` constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TamperingKind {
+    ReorderedDeleted,
+    MutatedPayload,
+    #[allow(dead_code)]
+    DuplicateId,
+}
+
+impl TamperingKind {
+    fn as_db_str(self) -> &'static str {
+        match self {
+            TamperingKind::ReorderedDeleted => "ReorderedDeleted",
+            TamperingKind::MutatedPayload => "MutatedPayload",
+            TamperingKind::DuplicateId => "DuplicateId",
+        }
+    }
+}
+
 /// Classification of the diff between two consecutive events.yml revisions.
 /// `Append` is the legitimate append-only path; `Reanchor` carries a
 /// `BootstrapReanchor` event whose authorization is left to a later
@@ -329,7 +349,7 @@ enum Diff {
     /// freezes the chain at the reanchor commit.
     Reanchor,
     Forbidden {
-        kind: &'static str,
+        kind: TamperingKind,
         event_id: String,
     },
 }
@@ -341,14 +361,14 @@ enum Diff {
 fn classify_diff(prev: &EventLog, current: &EventLog) -> Diff {
     if current.events.len() != prev.events.len() + 1 {
         return Diff::Forbidden {
-            kind: "ReorderedDeleted",
+            kind: TamperingKind::ReorderedDeleted,
             event_id: "unknown".to_owned(),
         };
     }
     for (i, p) in prev.events.iter().enumerate() {
         if &current.events[i] != p {
             return Diff::Forbidden {
-                kind: "MutatedPayload",
+                kind: TamperingKind::MutatedPayload,
                 event_id: p.event_id.to_string(),
             };
         }
@@ -452,6 +472,12 @@ fn write_event_row(
 fn apply_event_to_chain(chain: &mut ChainState, ev: &Event, topo_pos: u64) {
     let event_id = ev.event_id.to_string();
     match &ev.payload {
+        // BootstrapKey is seeded by `insert_bootstrap_row`; nothing extra to
+        // apply here. BootstrapReanchor is intentionally a no-op at this
+        // scope: the dispatch arm in `apply_revision` already freezes the
+        // chain via the meta sentinel, and the carry-over `pre_reanchor`
+        // disposition on prior keys is set when the reanchor verifier
+        // exception lands.
         EventKind::BootstrapKey { .. } | EventKind::BootstrapReanchor { .. } => {}
         EventKind::KeyAdded { fingerprint, .. } => {
             chain.apply_key_added(fingerprint, &event_id, topo_pos);

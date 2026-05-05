@@ -92,6 +92,12 @@ pub fn init_notebook(primary_key: &KeyPair) -> NotebookFixture {
     run_git(nb, &["init", "--initial-branch=main", "."]);
     run_git(nb, &["config", "user.email", "test@example.invalid"]);
     run_git(nb, &["config", "user.name", "Test"]);
+    // SSH signing trio: the materializer reads `%GF` (signer fingerprint)
+    // off the resulting commit, which only fires when ALL of these are set:
+    // `gpg.format = ssh`, `user.signingkey` pointing at the private key,
+    // and `gpg.ssh.allowedSignersFile` (configured below) at an absolute
+    // path. Missing any one of them leaves `%GF` empty and the materializer
+    // can't extract the signer.
     run_git(nb, &["config", "gpg.format", "ssh"]);
     run_git(
         nb,
@@ -108,6 +114,9 @@ pub fn init_notebook(primary_key: &KeyPair) -> NotebookFixture {
 
     std::fs::create_dir_all(nb.join(".trust")).expect("mkdir .trust");
     let allowed_signers_path = nb.join(".trust/allowed_signers");
+    // The leading `*` is a principal wildcard: it accepts any commit author
+    // identity, sidestepping the per-email principal that production init
+    // would assign. Tests don't carry a stable email for each signer.
     std::fs::write(
         nb.join(".trust/historical_signers"),
         format!("* {}\n", primary_key.public_openssh),

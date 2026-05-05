@@ -6,6 +6,11 @@
 use std::collections::HashMap;
 
 /// Outcome of a trust-state lookup at a given topological position.
+///
+/// Forward-looking surface: variants are populated by `state_of`, which the
+/// read-time trust projection consumes when its wiring lands. Until then the
+/// only callers are the chain-state unit tests.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustState {
     /// Signer is trusted at the current head of events.yml.
@@ -30,6 +35,7 @@ pub enum TrustState {
 /// Pre-reanchor disposition for keys carried over from a chain that was
 /// later reanchored. `A` = pin intact (records still verify under default
 /// policy); `B` = pin lost (records carry a chain-anchor-lost warning).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReanchorCase {
     /// Pin intact: the post-reanchor chain root matches the recorded pin.
@@ -41,38 +47,44 @@ pub enum ReanchorCase {
 
 /// One trusted-signer entry: when the signer was introduced, optional
 /// rotation/compromise positions, and the introducing event id used to
-/// populate `chain_validated_by` on subsequent rows.
+/// populate `chain_validated_by` on subsequent rows. Module-private — the
+/// `ChainState` accessors expose only the views callers need.
 #[derive(Debug, Clone)]
-pub struct KeyEntry {
+struct KeyEntry {
     /// Topological position at which this signer became trusted.
-    pub trusted_at_topo: u64,
+    trusted_at_topo: u64,
     /// Topological position at which the signer was routinely rotated out
     /// (`KeyRotatedOut`), or `None` if never rotated.
-    pub rotated_at_topo: Option<u64>,
+    rotated_at_topo: Option<u64>,
     /// Topological position at which the signer was marked compromised
     /// (`KeyCompromised`), or `None` if never marked.
-    pub compromised_at_topo: Option<u64>,
+    compromised_at_topo: Option<u64>,
     /// `event_id` of the event that introduced this signer (the bootstrap
     /// event, or the `KeyAdded` event). Used by the materializer to populate
     /// `chain_validated_by`.
-    pub introduced_by_event_id: String,
+    introduced_by_event_id: String,
     /// `Some` for keys carried over from a pre-reanchor chain. `None` for
     /// keys introduced after a reanchor or in chains that never reanchored.
-    pub pre_reanchor: Option<ReanchorCase>,
+    /// Currently always `None`: the reanchor handler that sets it lands
+    /// alongside the bootstrap-reanchor verifier exception.
+    #[allow(dead_code)]
+    pre_reanchor: Option<ReanchorCase>,
 }
 
 /// Trusted-signer state machine. Mutated by the materializer; queried both
 /// internally (to authorize new appends) and externally (by read-time trust
 /// projection helpers).
 #[derive(Debug, Default)]
-pub struct ChainState {
+pub(crate) struct ChainState {
     /// All signers ever introduced into the chain, keyed by SSH fingerprint
-    /// (`SHA256:...` form).
-    pub keys: HashMap<String, KeyEntry>,
+    /// (`SHA256:...` form). Private — read access is via the typed methods
+    /// (`is_trusted_at`, `state_of`, `introducer_of`) so the storage shape
+    /// stays an implementation detail.
+    keys: HashMap<String, KeyEntry>,
     /// Topological position at which the chain was frozen due to a chain
     /// integrity violation (unauthorized append, malformed reanchor, etc.).
     /// `None` while the chain is healthy.
-    pub frozen_at_topo: Option<u64>,
+    frozen_at_topo: Option<u64>,
 }
 
 impl ChainState {
@@ -84,20 +96,18 @@ impl ChainState {
 
     /// Record the bootstrap signer at the chain root (topological position 0).
     pub fn set_bootstrap(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
-        self.keys.insert(
-            fingerprint.to_owned(),
-            KeyEntry {
-                trusted_at_topo: topo_pos,
-                rotated_at_topo: None,
-                compromised_at_topo: None,
-                introduced_by_event_id: event_id.to_owned(),
-                pre_reanchor: None,
-            },
-        );
+        self.seed_key(fingerprint, event_id, topo_pos);
     }
 
     /// Apply a `KeyAdded` event for `fingerprint` at `topo_pos`.
     pub fn apply_key_added(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
+        self.seed_key(fingerprint, event_id, topo_pos);
+    }
+
+    /// Insert (or replace) a `KeyEntry` for a freshly introduced signer.
+    /// Used by both `set_bootstrap` and `apply_key_added`; the named facades
+    /// stay so call sites read intent at a glance.
+    fn seed_key(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
         self.keys.insert(
             fingerprint.to_owned(),
             KeyEntry {
@@ -183,6 +193,10 @@ impl ChainState {
 
     /// Returns the trust state of `fingerprint` at `topo_pos` (the commit's
     /// topological position) given the current chain head's view.
+    ///
+    /// Currently only consumed by the chain-state unit tests; the read-time
+    /// trust projection wires it once the verifier is end-to-end.
+    #[allow(dead_code)]
     #[must_use]
     pub fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
         if let Some(frozen) = self.frozen_at_topo
@@ -271,5 +285,24 @@ mod tests {
         c.freeze(3);
         assert_eq!(c.state_of("SHA256:abc", 5), TrustState::BrokenChain);
         assert_eq!(c.state_of("SHA256:abc", 1), TrustState::TrustedNow);
+    }
+
+    #[test]
+    fn state_after_rotation_topo_returns_not_yet_trusted() {
+        // Once a key is rotated out at topo N, queries at topo >= N must NOT
+        // report it as trusted: post-rotation positions fall back to the
+        // not-yet-trusted state, mirroring the same handling the verifier
+        // gives commits that predate the introducing event.
+        let mut c = ChainState::new();
+        c.set_bootstrap("SHA256:abc", "ev1", 0);
+        c.apply_key_rotated_out("SHA256:abc", 3);
+        assert_eq!(
+            c.state_of("SHA256:abc", 3),
+            TrustState::NotYetTrustedAtCommit
+        );
+        assert_eq!(
+            c.state_of("SHA256:abc", 5),
+            TrustState::NotYetTrustedAtCommit
+        );
     }
 }
