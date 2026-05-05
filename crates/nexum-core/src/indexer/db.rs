@@ -22,6 +22,8 @@ pub enum IndexerError {
     Adapter(#[from] crate::adapter::AdapterError),
     #[error("config error: {0}")]
     Config(String),
+    #[error("trust error: {0}")]
+    Trust(#[from] crate::trust::events::TrustError),
 }
 
 /// Open an existing `index.db` for read-only access. Returns

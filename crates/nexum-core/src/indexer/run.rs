@@ -182,11 +182,58 @@ fn run_inner(
     }
     if let Some(pass) = local_pass {
         let notebook_for_read = paths.notebook_git.clone();
+        // Materialize the trust-events view before the upsert pass so the
+        // crypto batch's per-commit `relevant_trust_events_commit` lookups
+        // see a fresh view. Skipped when `notebook_git` isn't a real git
+        // repo — test fixtures use fake paths and there's no trust state
+        // to materialize anyway.
+        if paths.notebook_git.join(".git").exists() {
+            crate::trust::events_view::ensure_current(conn, &paths.notebook_git)?;
+        }
+        // Per-commit cache for the crypto batch. The `read_full` callback
+        // below populates it lazily — one verify shell-out per unique
+        // record commit. Wrapped in `RefCell` so the `Fn` closure required
+        // by `apply_pass` can mutate it.
+        let crypto_cache: std::cell::RefCell<
+            std::collections::HashMap<String, crate::indexer::crypto_batch::BatchEntry>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
         apply_pass(
             conn,
             Source::Local,
             &pass,
-            |id| LocalAdapter::new(notebook_for_read.clone()).read(id).ok(),
+            |id| {
+                let mut record = LocalAdapter::new(notebook_for_read.clone()).read(id).ok()?;
+                let Some(sha) = record.provenance.record_commit_sha.clone() else {
+                    // Record's path is not in git history — leave the
+                    // adapter's placeholder Provenance and proceed.
+                    return Some(record);
+                };
+                let entry_opt = {
+                    let mut cache = crypto_cache.borrow_mut();
+                    if let Some(hit) = cache.get(&sha) {
+                        Some(hit.clone())
+                    } else {
+                        match crate::indexer::crypto_batch::run_batch(
+                            &notebook_for_read,
+                            std::slice::from_ref(&sha),
+                        ) {
+                            Ok(batch) => {
+                                let e = batch.lookup(&sha);
+                                cache.insert(sha.clone(), e.clone());
+                                Some(e)
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                };
+                if let Some(entry) = entry_opt {
+                    record.provenance.crypto_result = entry.crypto_result;
+                    record.provenance.signer_fingerprint = entry.signer_fingerprint;
+                    record.provenance.relevant_trust_events_commit =
+                        entry.relevant_trust_events_commit;
+                }
+                Some(record)
+            },
             force,
             &mut outcome,
         )?;

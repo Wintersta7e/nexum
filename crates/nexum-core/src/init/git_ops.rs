@@ -158,61 +158,116 @@ pub fn git_verify_commit_with_signers(
     }
 }
 
-/// Extra provenance captured alongside a successful verify-commit. Today
-/// just the SSH signer fingerprint via `git log -1 --format=%GF`; future
-/// fields (e.g., commit-time pin, key-rotation marker) can be added
-/// without disrupting callers.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct VerifyDetails {
-    /// Signer fingerprint as reported by `git log --format=%GF`. `None`
-    /// when git could not extract a fingerprint (e.g., legacy or
-    /// unusually-formatted signature) — verification still succeeded if
-    /// this struct is returned.
+/// One-character signature status semantics derived from
+/// `git log -1 --format=%G?`. The `%G?` field is the spec-stable mapping
+/// from git's signature-verification machinery to a single character;
+/// stderr text from `verify-commit` differs across git versions and
+/// signing backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyExit {
+    /// `G`: valid signature, signer accepted by `historical_signers`.
+    Good,
+    /// `B`/`X`/`Y`/`R`: signature itself was rejected (bad, expired,
+    /// expired-key, revoked-key).
+    BadSignature,
+    /// `U`/`E`: signature shape is fine but the signer is not in the
+    /// allowed file (or the signature could not be checked at all).
+    UnknownSigner,
+    /// `N`: no signature at all.
+    NoSignature,
+}
+
+/// Captured outcome of a single `git verify` run, carried by
+/// [`git_verify_commit_outcome`]. `signer_fingerprint` is populated only
+/// when `exit == Good`.
+#[derive(Debug, Clone)]
+pub struct VerifyOutcome {
+    pub exit: VerifyExit,
     pub signer_fingerprint: Option<String>,
 }
 
-/// Verify `commit` against `historical_signers` and capture the signer
-/// fingerprint on success. Companion to [`git_verify_commit_with_signers`]
-/// for callers that need the verifier provenance — leaves the simpler
-/// boolean form intact for callers that only check the exit code.
+/// Verify `commit` against `historical_signers` and return the captured
+/// G/B/U/N outcome plus the signer fingerprint when known.
 ///
-/// On a successful verify, runs `git log -1 --format=%GF <commit>` to
-/// surface the fingerprint git's SSH backend matched. The fingerprint is
-/// optional in [`VerifyDetails`] because some signature shapes do not
-/// produce one, and the verifier's "signature is valid" answer must not
-/// hinge on whether git can also surface the fingerprint.
+/// Uses `git log -1 --format=%G?` (with the `gpg.ssh.allowedSignersFile`
+/// redirection in place) instead of parsing `verify-commit` stderr; the
+/// `%G?` character is stable across git versions while stderr text is
+/// not. On a `Good` outcome, runs a follow-up `--format=%GF` to capture
+/// the matched signer fingerprint.
 ///
 /// # Errors
 ///
-/// Returns `InitError::BootstrapVerifyFailed` if verification fails.
 /// Returns `InitError::Io` if the git binary cannot be spawned.
-pub fn git_verify_commit_with_signers_and_details(
+/// Returns `InitError::Git` if the `git log` invocation itself exits
+/// non-zero (distinct from a non-`G` signature status, which is
+/// expressed via the returned [`VerifyExit`]).
+pub fn git_verify_commit_outcome(
     repo_path: &Path,
     commit: &str,
     historical_signers: &Path,
-) -> Result<VerifyDetails, InitError> {
-    git_verify_commit_with_signers(repo_path, commit, historical_signers)?;
-
-    let log_out = Command::new("git")
+) -> Result<VerifyOutcome, InitError> {
+    let signers_path = historical_signers.display().to_string();
+    let out = Command::new("git")
         .current_dir(repo_path)
-        .args(["log", "-1", "--format=%GF", commit])
+        .args([
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &format!("gpg.ssh.allowedSignersFile={signers_path}"),
+            "log",
+            "-1",
+            "--format=%G?",
+            commit,
+        ])
         .output()
         .map_err(|e| InitError::Io {
             path: repo_path.display().to_string(),
             source: e,
         })?;
+    if !out.status.success() {
+        return Err(InitError::Git {
+            cmd: format!("git log -1 --format=%G? {commit}"),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        });
+    }
+    let status_char = String::from_utf8_lossy(&out.stdout).trim().chars().next();
+    let exit = match status_char {
+        Some('G') => VerifyExit::Good,
+        Some('B' | 'X' | 'Y' | 'R') => VerifyExit::BadSignature,
+        Some('N') | None => VerifyExit::NoSignature,
+        // `U` (unknown signer) and `E` (signature cannot be checked,
+        // e.g. missing key) both map to UnknownSigner; any future `%G?`
+        // value we don't recognize lands here too — conservative because
+        // it keeps the record out of the verified-good bucket without
+        // claiming the signature itself is invalid.
+        _ => VerifyExit::UnknownSigner,
+    };
 
-    let signer_fingerprint = if log_out.status.success() {
-        let raw = String::from_utf8_lossy(&log_out.stdout).trim().to_owned();
-        if raw.is_empty() { None } else { Some(raw) }
+    let signer_fingerprint = if exit == VerifyExit::Good {
+        let log_out = Command::new("git")
+            .current_dir(repo_path)
+            .args(["log", "-1", "--format=%GF", commit])
+            .output()
+            .map_err(|e| InitError::Io {
+                path: repo_path.display().to_string(),
+                source: e,
+            })?;
+        if log_out.status.success() {
+            let raw = String::from_utf8_lossy(&log_out.stdout).trim().to_owned();
+            if raw.is_empty() { None } else { Some(raw) }
+        } else {
+            // %G? already said Good; a missing fingerprint here is a
+            // soft signal — return None rather than failing the call.
+            None
+        }
     } else {
-        // verify-commit already passed, so a missing fingerprint here is
-        // a soft signal — log nothing and return None rather than
-        // promoting it to a failure.
         None
     };
 
-    Ok(VerifyDetails { signer_fingerprint })
+    Ok(VerifyOutcome {
+        exit,
+        signer_fingerprint,
+    })
 }
 
 /// Read `user.name` and `user.email` from the global git config.
