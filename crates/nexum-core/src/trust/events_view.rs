@@ -173,6 +173,22 @@ struct Counters {
     tampering: u32,
 }
 
+/// Saturating-cast helper for the topological-position trio used across
+/// the materializer's INSERT params and chain-state APIs. The `usize` →
+/// `u64` direction can only saturate on platforms where `usize` is wider
+/// than 64 bits (none currently supported), so the `unwrap_or` is purely
+/// defensive.
+fn topo_u64(pos: usize) -> u64 {
+    u64::try_from(pos).unwrap_or(u64::MAX)
+}
+
+/// Saturating-cast helper for SQL `INTEGER` columns that hold the
+/// topological position. `i64::try_from` saturates only beyond
+/// `2^63 - 1` topological positions, which the spec doesn't approach.
+fn topo_i64(pos: usize) -> i64 {
+    i64::try_from(pos).unwrap_or(i64::MAX)
+}
+
 /// Apply a single events.yml revision: bootstrap on the first iteration,
 /// otherwise classify the diff against `prev` and route the result through
 /// the materializer's tampering/append handling.
@@ -199,9 +215,11 @@ fn apply_revision(
     }
 
     let prev = prev.expect("non-zero topo_pos implies prev_log set");
-    let parent_topo = u64::try_from(topo_pos - 1).unwrap_or(u64::MAX);
-    let here_topo = u64::try_from(topo_pos).unwrap_or(u64::MAX);
-    let here_topo_sql = i64::try_from(topo_pos).unwrap_or(i64::MAX);
+    // `topo_pos > 0` is guaranteed by the early-return guard above, so the
+    // `topo_pos - 1` can't underflow.
+    let parent_topo = topo_u64(topo_pos - 1);
+    let here_topo = topo_u64(topo_pos);
+    let here_topo_sql = topo_i64(topo_pos);
 
     match classify_diff(prev, log) {
         Diff::Append(new_event) => {
@@ -281,7 +299,10 @@ fn write_tampering_row(
 
 /// Insert the `BootstrapKey` row for the first revision and seed the
 /// in-memory `ChainState` with the bootstrap signer. Validates that the
-/// revision contains exactly one event of the expected kind.
+/// revision contains exactly one event of the expected kind. Routes the
+/// SQL INSERT through [`write_event_row`] so the column projection stays
+/// in one place; bootstrap-specific logic (length check, signer fallback,
+/// `ChainState::set_bootstrap` seeding) stays here.
 fn insert_bootstrap_row(
     tx: &Transaction<'_>,
     log: &EventLog,
@@ -293,13 +314,8 @@ fn insert_bootstrap_row(
     if log.events.len() != 1 {
         return Err(TrustError::MalformedBootstrap);
     }
-    let kind = log.events[0].payload.as_db_str();
-    let EventKind::BootstrapKey {
-        fingerprint,
-        public_key,
-        reason,
-    } = &log.events[0].payload
-    else {
+    let event = &log.events[0];
+    let EventKind::BootstrapKey { fingerprint, .. } = &event.payload else {
         return Err(TrustError::MalformedBootstrap);
     };
 
@@ -308,36 +324,16 @@ fn insert_bootstrap_row(
     // the production init path always signs).
     let introduced_by_signer = signer.unwrap_or(fingerprint.as_str());
 
-    let event_id = log.events[0].event_id.to_string();
-    tx.execute(
-        "INSERT INTO trust_events (
-            event_id, kind, fingerprint, public_key,
-            effective_commit, effective_commit_topo_pos,
-            introduced_by_signer, chain_validated_by, reason, materialized_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
-        params![
-            event_id,
-            kind,
-            fingerprint,
-            public_key,
-            commit_sha,
-            i64::try_from(topo_pos).unwrap_or(i64::MAX),
-            introduced_by_signer,
-            reason,
-            Utc::now().to_rfc3339(),
-        ],
-    )?;
-    chain.set_bootstrap(
-        fingerprint,
-        &event_id,
-        u64::try_from(topo_pos).unwrap_or(u64::MAX),
-    );
+    let here_topo = topo_u64(topo_pos);
+    write_event_row(tx, event, commit_sha, here_topo, introduced_by_signer, None)?;
+    chain.set_bootstrap(fingerprint, &event.event_id.to_string(), here_topo);
     Ok(())
 }
 
-/// Insert a non-bootstrap event row. Uses the same column layout as
-/// `insert_bootstrap_row` plus `old_fingerprint` / `new_fingerprint` for
-/// `BootstrapReanchor` payloads (those columns stay NULL on append rows).
+/// Insert any non-bootstrap event row, plus (after the
+/// [`insert_bootstrap_row`] unification) the bootstrap row itself. Uses one
+/// SQL INSERT covering the full 12-column layout; columns the payload kind
+/// doesn't populate stay NULL by binding `Option::None`.
 fn write_event_row(
     tx: &Transaction<'_>,
     ev: &Event,

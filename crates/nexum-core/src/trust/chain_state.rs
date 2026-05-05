@@ -90,17 +90,17 @@ pub(crate) struct ChainState {
 impl ChainState {
     /// Construct an empty state.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Record the bootstrap signer at the chain root (topological position 0).
-    pub fn set_bootstrap(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
+    pub(crate) fn set_bootstrap(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
         self.seed_key(fingerprint, event_id, topo_pos);
     }
 
     /// Apply a `KeyAdded` event for `fingerprint` at `topo_pos`.
-    pub fn apply_key_added(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
+    pub(crate) fn apply_key_added(&mut self, fingerprint: &str, event_id: &str, topo_pos: u64) {
         self.seed_key(fingerprint, event_id, topo_pos);
     }
 
@@ -124,7 +124,7 @@ impl ChainState {
     /// No-op if the fingerprint is unknown (defensive: such cases should
     /// never reach here because the materializer rejects unauthorized
     /// payloads up-front).
-    pub fn apply_key_rotated_out(&mut self, fingerprint: &str, topo_pos: u64) {
+    pub(crate) fn apply_key_rotated_out(&mut self, fingerprint: &str, topo_pos: u64) {
         if let Some(e) = self.keys.get_mut(fingerprint) {
             e.rotated_at_topo = Some(topo_pos);
         }
@@ -132,7 +132,7 @@ impl ChainState {
 
     /// Apply a `KeyCompromised` event for `fingerprint` at `topo_pos`.
     /// No-op if the fingerprint is unknown (see `apply_key_rotated_out`).
-    pub fn apply_key_compromised(&mut self, fingerprint: &str, topo_pos: u64) {
+    pub(crate) fn apply_key_compromised(&mut self, fingerprint: &str, topo_pos: u64) {
         if let Some(e) = self.keys.get_mut(fingerprint) {
             e.compromised_at_topo = Some(topo_pos);
         }
@@ -140,7 +140,7 @@ impl ChainState {
 
     /// Mark the chain as frozen at `at_topo`. Subsequent `state_of` queries
     /// at-or-after this position return `BrokenChain`.
-    pub fn freeze(&mut self, at_topo: u64) {
+    pub(crate) fn freeze(&mut self, at_topo: u64) {
         self.frozen_at_topo = Some(at_topo);
     }
 
@@ -155,7 +155,7 @@ impl ChainState {
     /// [`Self::is_authorized_to_extend_chain`] for the stricter predicate
     /// that gates new appends to events.yml.
     #[must_use]
-    pub fn is_trusted_at(&self, fingerprint: &str, topo_pos: u64) -> bool {
+    pub(crate) fn is_trusted_at(&self, fingerprint: &str, topo_pos: u64) -> bool {
         let Some(e) = self.keys.get(fingerprint) else {
             return false;
         };
@@ -178,7 +178,7 @@ impl ChainState {
     /// as a chain-extension would let the attacker extend trust to
     /// themselves.
     #[must_use]
-    pub fn is_authorized_to_extend_chain(&self, fingerprint: &str, topo_pos: u64) -> bool {
+    pub(crate) fn is_authorized_to_extend_chain(&self, fingerprint: &str, topo_pos: u64) -> bool {
         if !self.is_trusted_at(fingerprint, topo_pos) {
             return false;
         }
@@ -198,7 +198,7 @@ impl ChainState {
     /// trust projection wires it once the verifier is end-to-end.
     #[allow(dead_code)]
     #[must_use]
-    pub fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
+    pub(crate) fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
         if let Some(frozen) = self.frozen_at_topo
             && topo_pos >= frozen
         {
@@ -232,7 +232,7 @@ impl ChainState {
     /// `fingerprint` (the bootstrap event, or the `KeyAdded` event). Used to
     /// populate `chain_validated_by` on each new event row.
     #[must_use]
-    pub fn introducer_of(&self, fingerprint: &str) -> Option<String> {
+    pub(crate) fn introducer_of(&self, fingerprint: &str) -> Option<String> {
         self.keys
             .get(fingerprint)
             .map(|e| e.introduced_by_event_id.clone())
