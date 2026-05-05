@@ -6,6 +6,8 @@
 //! `revoked_signers`).
 
 pub mod events;
+pub mod events_view;
+pub mod git_history;
 pub mod pin;
 pub mod reanchor_pending;
 pub mod regenerate;

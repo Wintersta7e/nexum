@@ -56,7 +56,6 @@ pub enum EventKind {
     },
 }
 
-/// Errors from trust event I/O and validation.
 #[derive(Debug, thiserror::Error)]
 pub enum TrustError {
     /// Filesystem error.
@@ -85,6 +84,22 @@ pub enum TrustError {
     /// `~/.nexum/.reanchor_pending` sentinel detected; commands must refuse.
     #[error("reanchor pending: {message}")]
     ReanchorPending { message: String },
+    /// Underlying `git` command exited non-zero during the events.yml history walk.
+    #[error("git command failed: {stderr}")]
+    GitCommand { stderr: String },
+    /// `.trust/events.yml` history contains merge commits; the materializer
+    /// only supports a linear chain.
+    #[error(".trust/events.yml has merge commits in its history (linear history is required)")]
+    TrustHistoryNotLinear,
+    /// `events.yml` declares a `schema_version` this binary does not support.
+    #[error("trust schema v{found} unsupported by this binary")]
+    TrustSchemaUnsupported { found: u32 },
+    /// First `events.yml` revision is not exactly one `BootstrapKey` event.
+    #[error("first events.yml revision must contain exactly one BootstrapKey event")]
+    MalformedBootstrap,
+    /// Sqlite error during materialization.
+    #[error("sqlite error during trust materialization: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 /// Write the seed `events.yml` for `nexum init`.
