@@ -17,7 +17,7 @@ use crate::trust::events::TrustError;
 /// Wire form is the bare letter (`"A"` / `"B"`); deserialization rejects
 /// every other value, routing through the malformed-sentinel branch.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-pub enum Case {
+pub(crate) enum Case {
     /// Existing pin known; reanchor is rotating from a known-good fingerprint.
     A,
     /// Pin lost or unverifiable; reanchor proceeds without an old fingerprint.
@@ -39,7 +39,7 @@ impl Case {
 /// deserialization rejects every other value.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Phase {
+pub(crate) enum Phase {
     /// Sentinel created; no events committed yet.
     Init,
     /// Trust events for the new pin have been committed; pin file not yet rotated.
@@ -65,7 +65,7 @@ impl Phase {
 /// deserialization, which routes through the malformed-sentinel branch in
 /// [`check`].
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct ReanchorPending {
+pub(crate) struct ReanchorPending {
     pub case: Case,
     /// Previous bootstrap fingerprint, `None` for case B.
     pub old_pin_fp: Option<String>,
@@ -89,15 +89,18 @@ pub struct ReanchorPending {
 /// - `TrustError::Io` when the sentinel exists but cannot be read.
 /// - `TrustError::ReanchorPending` when the sentinel exists, including the
 ///   case where it is malformed (callers must refuse to proceed either way).
-pub fn check(home: &Path) -> Result<(), TrustError> {
+pub(crate) fn check(home: &Path) -> Result<(), TrustError> {
     let path = home.join(".reanchor_pending");
-    if !path.exists() {
-        return Ok(());
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|e| TrustError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(TrustError::Io {
+                path: path.display().to_string(),
+                source: e,
+            });
+        }
+    };
     let parsed: ReanchorPending =
         serde_json::from_str(&raw).map_err(|e| TrustError::ReanchorPending {
             message: format!(

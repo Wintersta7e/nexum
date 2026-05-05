@@ -69,10 +69,11 @@ pub fn read_pin(home: &Path) -> Result<BootstrapPin, TrustError> {
         path: config_path.display().to_string(),
         source: e,
     })?;
-    let config: ConfigToml = toml::from_str(&config_str).map_err(|e| TrustError::ConfigParse {
-        path: config_path.display().to_string(),
-        cause: e.to_string(),
-    })?;
+    let config: ConfigToml =
+        toml::from_str(&config_str).map_err(|source| TrustError::ConfigParse {
+            path: config_path.display().to_string(),
+            source,
+        })?;
     let bootstrap = config
         .trust
         .and_then(|t| t.bootstrap)

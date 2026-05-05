@@ -18,12 +18,11 @@ use rusqlite::{Connection, Transaction, params};
 
 use crate::index::meta::{
     KEY_TRUST_EVENTS_BLOB_SHA, KEY_TRUST_EVENTS_HEAD_SHA, KEY_TRUST_EVENTS_MATERIALIZED_AT,
-    MetaError, read_str, write_str,
+    read_str, write_str,
 };
 use crate::trust::events::{EventKind, EventLog, TrustError};
 use crate::trust::git_history::{
-    git_rev_parse, git_show_blob, git_signer_fingerprint, has_merges_on_events_yml,
-    topo_walk_events_yml,
+    git_rev_parse, git_show_blob, has_merges_on_events_yml, topo_walk_events_yml,
 };
 
 /// Outcome of a materializer run.
@@ -40,8 +39,9 @@ pub struct Materialization {
 /// query verb invocation (read-side wiring lands in the api facade).
 pub struct TrustEventsView<'a> {
     /// Borrowed connection used for read-only queries against the
-    /// materialized rows.
-    pub conn: &'a Connection,
+    /// materialized rows. Private so the view's read API is the single
+    /// surface callers depend on.
+    conn: &'a Connection,
 }
 
 impl<'a> TrustEventsView<'a> {
@@ -70,13 +70,6 @@ impl<'a> TrustEventsView<'a> {
                 })?;
         Ok(count > 0)
     }
-}
-
-/// Translate a `MetaError` (single-variant `Sqlite`) into a `TrustError`,
-/// reusing the same underlying `rusqlite::Error`. Centralized so the
-/// destructure pattern lives in one place.
-fn meta_to_trust(MetaError::Sqlite(e): MetaError) -> TrustError {
-    TrustError::Sqlite(e)
 }
 
 /// Rebuild `trust_events` and `trust_chain_tampering` from `notebook.git`.
@@ -118,10 +111,10 @@ pub fn rebuild(conn: &mut Connection, notebook_git: &Path) -> Result<Materializa
     tx.execute_batch("DELETE FROM trust_events; DELETE FROM trust_chain_tampering;")?;
 
     let mut events_count = 0_u32;
-    for (topo_pos, commit_sha) in commits.iter().enumerate() {
-        let blob = git_show_blob(notebook_git, commit_sha)?;
+    for (topo_pos, commit) in commits.iter().enumerate() {
+        let blob = git_show_blob(notebook_git, &commit.sha)?;
         let log: EventLog = serde_yaml::from_str(&blob).map_err(|e| TrustError::Parse {
-            path: format!("{commit_sha}:.trust/events.yml"),
+            path: format!("{}:.trust/events.yml", commit.sha),
             source: e,
         })?;
         if log.schema_version != 1 {
@@ -129,10 +122,9 @@ pub fn rebuild(conn: &mut Connection, notebook_git: &Path) -> Result<Materializa
                 found: log.schema_version,
             });
         }
-        let signer = git_signer_fingerprint(notebook_git, commit_sha)?;
 
         if topo_pos == 0 {
-            insert_bootstrap_row(&tx, &log, commit_sha, topo_pos, signer.as_deref())?;
+            insert_bootstrap_row(&tx, &log, &commit.sha, topo_pos, commit.signer.as_deref())?;
             events_count += 1;
         }
         // Subsequent revisions are handled by later iterations of the
@@ -142,9 +134,10 @@ pub fn rebuild(conn: &mut Connection, notebook_git: &Path) -> Result<Materializa
         // walker; production code paths only see single-commit histories.
     }
 
-    let head_sha = git_rev_parse(notebook_git, "HEAD")?;
-    let blob_sha = git_rev_parse(notebook_git, "HEAD:.trust/events.yml")?;
-    update_sentinels(&tx, &head_sha, &blob_sha)?;
+    let parsed = git_rev_parse(notebook_git, &["HEAD", "HEAD:.trust/events.yml"])?;
+    let head_sha = parsed.first().map(String::as_str).unwrap_or_default();
+    let blob_sha = parsed.get(1).map(String::as_str).unwrap_or_default();
+    update_sentinels(&tx, head_sha, blob_sha)?;
 
     tx.commit()?;
     Ok(Materialization {
@@ -208,14 +201,13 @@ fn update_sentinels(
     head_sha: &str,
     blob_sha: &str,
 ) -> Result<(), TrustError> {
-    write_str(tx, KEY_TRUST_EVENTS_HEAD_SHA, head_sha).map_err(meta_to_trust)?;
-    write_str(tx, KEY_TRUST_EVENTS_BLOB_SHA, blob_sha).map_err(meta_to_trust)?;
+    write_str(tx, KEY_TRUST_EVENTS_HEAD_SHA, head_sha)?;
+    write_str(tx, KEY_TRUST_EVENTS_BLOB_SHA, blob_sha)?;
     write_str(
         tx,
         KEY_TRUST_EVENTS_MATERIALIZED_AT,
         &Utc::now().to_rfc3339(),
-    )
-    .map_err(meta_to_trust)?;
+    )?;
     Ok(())
 }
 
@@ -229,15 +221,18 @@ fn update_sentinels(
 /// Returns `TrustError::Sqlite` if the meta lookups fail, or
 /// `TrustError::GitCommand` / `TrustError::Io` if `git rev-parse` errors.
 pub fn is_current(conn: &Connection, notebook_git: &Path) -> Result<bool, TrustError> {
-    let stored_head = read_str(conn, KEY_TRUST_EVENTS_HEAD_SHA).map_err(meta_to_trust)?;
-    let stored_blob = read_str(conn, KEY_TRUST_EVENTS_BLOB_SHA).map_err(meta_to_trust)?;
+    let stored_head = read_str(conn, KEY_TRUST_EVENTS_HEAD_SHA)?;
+    let stored_blob = read_str(conn, KEY_TRUST_EVENTS_BLOB_SHA)?;
     if stored_head.is_none() || stored_blob.is_none() {
         return Ok(false);
     }
-    let current_head = git_rev_parse(notebook_git, "HEAD")?;
-    let current_blob = git_rev_parse(notebook_git, "HEAD:.trust/events.yml")?;
-    Ok(stored_head.as_deref() == Some(&current_head)
-        && stored_blob.as_deref() == Some(&current_blob))
+    let parsed = git_rev_parse(notebook_git, &["HEAD", "HEAD:.trust/events.yml"])?;
+    let current_head = parsed.first().map(String::as_str).unwrap_or_default();
+    let current_blob = parsed.get(1).map(String::as_str).unwrap_or_default();
+    Ok(
+        stored_head.as_deref() == Some(current_head)
+            && stored_blob.as_deref() == Some(current_blob),
+    )
 }
 
 /// Lazy-rebuild wrapper: callable once per query verb invocation. Cheap when

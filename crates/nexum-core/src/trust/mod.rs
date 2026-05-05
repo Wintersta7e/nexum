@@ -14,5 +14,4 @@ pub mod regenerate;
 
 pub use events::{Event, EventKind, EventLog, TrustError, load_events_yml, write_seed_yaml};
 pub use pin::{BootstrapPin, read_pin};
-pub use reanchor_pending::{Case, Phase, ReanchorPending, check as check_reanchor_pending};
 pub use regenerate::{RegenerateOutcome, regenerate_files};

@@ -91,8 +91,12 @@ pub enum TrustError {
     #[error("trust YAML serialize error: {0}")]
     Serialize(serde_yaml::Error),
     /// `config.toml` parse error encountered when reading `[trust.bootstrap]`.
-    #[error("config.toml parse error in {path}: {cause}")]
-    ConfigParse { path: String, cause: String },
+    #[error("config.toml parse error in {path}: {source}")]
+    ConfigParse {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
     /// `[trust.bootstrap]` section missing from `config.toml`.
     #[error("bootstrap pin missing from config.toml")]
     BootstrapPinMissing,
@@ -115,6 +119,14 @@ pub enum TrustError {
     /// Sqlite error during materialization.
     #[error("sqlite error during trust materialization: {0}")]
     Sqlite(#[from] rusqlite::Error),
+}
+
+impl From<crate::index::meta::MetaError> for TrustError {
+    fn from(e: crate::index::meta::MetaError) -> Self {
+        match e {
+            crate::index::meta::MetaError::Sqlite(s) => TrustError::Sqlite(s),
+        }
+    }
 }
 
 /// Write the seed `events.yml` for `nexum init`.
