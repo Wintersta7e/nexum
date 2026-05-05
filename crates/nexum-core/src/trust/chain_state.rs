@@ -357,4 +357,74 @@ mod tests {
             TrustState::NotYetTrustedAtCommit
         );
     }
+
+    #[test]
+    fn apply_reanchor_marks_prior_keys_as_pre_reanchor_and_seeds_new_bootstrap() {
+        let mut c = ChainState::new();
+        c.set_bootstrap("SHA256:A", "boot1", 0);
+        c.apply_key_added("SHA256:B", "ka", 1);
+        // Reanchor at topo 5: A → D, Case A (pin preserved).
+        c.apply_reanchor("SHA256:A", "SHA256:D", "reanchor1", 5, ReanchorCase::A);
+
+        // Pre-reanchor signers: A and B both project as PreReanchor { A }.
+        assert_eq!(
+            c.state_of("SHA256:A", 0),
+            TrustState::PreReanchor {
+                case: ReanchorCase::A
+            }
+        );
+        assert_eq!(
+            c.state_of("SHA256:B", 1),
+            TrustState::PreReanchor {
+                case: ReanchorCase::A
+            }
+        );
+        // The new bootstrap projects as Trusted from the reanchor topo onward.
+        assert_eq!(c.state_of("SHA256:D", 5), TrustState::TrustedNow);
+        assert_eq!(c.state_of("SHA256:D", 9), TrustState::TrustedNow);
+        // current_bootstrap_fp tracks the most recent bootstrap so a
+        // subsequent reanchor's old_fp can be checked against it.
+        assert_eq!(c.current_bootstrap_fp(), Some("SHA256:D"));
+    }
+
+    #[test]
+    fn apply_reanchor_case_b_marks_prior_keys_with_case_b() {
+        let mut c = ChainState::new();
+        c.set_bootstrap("SHA256:A", "boot1", 0);
+        c.apply_reanchor("SHA256:A", "SHA256:D", "reanchor1", 3, ReanchorCase::B);
+        assert_eq!(
+            c.state_of("SHA256:A", 0),
+            TrustState::PreReanchor {
+                case: ReanchorCase::B
+            }
+        );
+    }
+
+    #[test]
+    fn chained_reanchor_old_fp_must_match_most_recent_prior_bootstrap() {
+        let mut c = ChainState::new();
+        c.set_bootstrap("SHA256:A", "boot", 0);
+        // R1: A → D.
+        c.apply_reanchor("SHA256:A", "SHA256:D", "r1", 3, ReanchorCase::A);
+        assert_eq!(c.current_bootstrap_fp(), Some("SHA256:D"));
+        // R2: D → E. After this, current_bootstrap_fp must be E and the
+        // would-be R3 must compare its old_fp against E (not the original A).
+        c.apply_reanchor("SHA256:D", "SHA256:E", "r2", 7, ReanchorCase::A);
+        assert_eq!(c.current_bootstrap_fp(), Some("SHA256:E"));
+        // Both old bootstraps now project as PreReanchor.
+        assert_eq!(
+            c.state_of("SHA256:A", 0),
+            TrustState::PreReanchor {
+                case: ReanchorCase::A
+            }
+        );
+        assert_eq!(
+            c.state_of("SHA256:D", 3),
+            TrustState::PreReanchor {
+                case: ReanchorCase::A
+            }
+        );
+        // Latest bootstrap is current.
+        assert_eq!(c.state_of("SHA256:E", 8), TrustState::TrustedNow);
+    }
 }

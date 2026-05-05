@@ -385,6 +385,14 @@ fn verify_reanchor_authorization(
     let Some(pin) = pin else {
         return false;
     };
+    // Pin-match is a hard gate AND requires both pinned files to agree:
+    // `config.toml [trust.bootstrap].fingerprint` is the authoritative
+    // source, but `.bootstrap-fingerprint` cache must equal it too. A
+    // `cache_inconsistent` flag means the two have diverged, so we cannot
+    // authorize a chain break until the doctor flow has reconciled them.
+    if pin.cache_inconsistent {
+        return false;
+    }
     let pin_match = pin.fingerprint == *new_fingerprint;
     let old_match = chain.current_bootstrap_fp() == Some(old_fingerprint.as_str());
     let signed_by_new = signer_fp == Some(new_fingerprint.as_str());

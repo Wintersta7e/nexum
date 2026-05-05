@@ -251,3 +251,71 @@ fn reanchor_with_old_fingerprint_mismatch_freezes_chain() {
     let frozen = read_topo(&conn, KEY_CHAIN_FROZEN_AT_TOPO).expect("read meta");
     assert_eq!(frozen, Some(2));
 }
+
+#[test]
+fn reanchor_with_pin_fingerprint_not_matching_new_fp_freezes_chain() {
+    let (fixture, primary, bootstrap_event, _keys) = fresh_notebook_with_bootstrap();
+    let secondary = new_keypair(fixture.path(), "secondary");
+    let (_added_event, after_added) =
+        append_secondary_key(&fixture, &primary, bootstrap_event, &secondary);
+
+    // Pin a third, unrelated fingerprint — neither the primary (old) nor the
+    // secondary (the reanchor's new_fingerprint). Condition 2 fails: the pin
+    // must equal new_fp at verification time, even though the rest of the
+    // reanchor (signer, old_fp, single-event commit) is correctly shaped.
+    let tertiary = new_keypair(fixture.path(), "tertiary");
+    fixture.write_pin(&tertiary.fingerprint, &tertiary.public_openssh);
+
+    let reanchor_event = Uuid::now_v7();
+    let with_reanchor = format!(
+        "{after_added}  - event_id: {ev}\n    kind: BootstrapReanchor\n    old_fingerprint: \"{old}\"\n    new_fingerprint: \"{new}\"\n    reason: \"Bootstrap key lost\"\n",
+        ev = reanchor_event,
+        old = primary.fingerprint,
+        new = secondary.fingerprint,
+    );
+    commit_events_yml(fixture.path(), &with_reanchor, &secondary.private_path);
+
+    let (_db_dir, mut conn) = fresh_index_db();
+    let m = rebuild(&mut conn, fixture.path()).expect("rebuild succeeds");
+    assert_eq!(m.events_count, 2);
+    assert_eq!(m.tampering_count, 0);
+
+    let frozen = read_topo(&conn, KEY_CHAIN_FROZEN_AT_TOPO).expect("read meta");
+    assert_eq!(frozen, Some(2));
+}
+
+#[test]
+fn reanchor_with_inconsistent_cache_freezes_chain() {
+    let (fixture, primary, bootstrap_event, _keys) = fresh_notebook_with_bootstrap();
+    let secondary = new_keypair(fixture.path(), "secondary");
+    let (_added_event, after_added) =
+        append_secondary_key(&fixture, &primary, bootstrap_event, &secondary);
+
+    // `config.toml` correctly pins the new bootstrap, but the
+    // `.bootstrap-fingerprint` cache file is stale. Condition 2 requires
+    // BOTH pinned files to agree; the verifier must refuse to authorize a
+    // chain break while the doctor flow has not reconciled them.
+    fixture.write_pin(&secondary.fingerprint, &secondary.public_openssh);
+    std::fs::write(
+        fixture.home().join(".bootstrap-fingerprint"),
+        "SHA256:stale-cache\n",
+    )
+    .expect("overwrite cache");
+
+    let reanchor_event = Uuid::now_v7();
+    let with_reanchor = format!(
+        "{after_added}  - event_id: {ev}\n    kind: BootstrapReanchor\n    old_fingerprint: \"{old}\"\n    new_fingerprint: \"{new}\"\n    reason: \"Bootstrap key lost\"\n",
+        ev = reanchor_event,
+        old = primary.fingerprint,
+        new = secondary.fingerprint,
+    );
+    commit_events_yml(fixture.path(), &with_reanchor, &secondary.private_path);
+
+    let (_db_dir, mut conn) = fresh_index_db();
+    let m = rebuild(&mut conn, fixture.path()).expect("rebuild succeeds");
+    assert_eq!(m.events_count, 2);
+    assert_eq!(m.tampering_count, 0);
+
+    let frozen = read_topo(&conn, KEY_CHAIN_FROZEN_AT_TOPO).expect("read meta");
+    assert_eq!(frozen, Some(2));
+}
