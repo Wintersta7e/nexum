@@ -4,7 +4,7 @@
 //! The `record_embeddings` (vec0) virtual table is created by the index DDL but
 //! is NOT populated yet — semantic embeddings land in a later phase.
 
-pub mod crypto_batch;
+pub(crate) mod crypto_batch;
 pub mod db;
 pub mod run;
 pub mod state;

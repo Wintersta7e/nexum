@@ -76,8 +76,20 @@ pub(crate) fn verify_and_resolve(
         return Ok(CryptoOutcome::no_signature());
     }
     let outcome = git_verify_commit_outcome(notebook_git, commit_sha, &historical_signers)
-        .map_err(|e| TrustError::GitCommand {
-            stderr: format!("{e}"),
+        .map_err(|e| match e {
+            // Preserve the io::Error `#[source]` chain instead of
+            // collapsing the wrapper's Display string.
+            crate::init::InitError::Io { path, source } => TrustError::Io { path, source },
+            // Preserve the actual stderr text from the `git` invocation.
+            crate::init::InitError::Git { stderr, .. } => {
+                TrustError::GitCommand { stderr }
+            }
+            // Other `InitError` variants don't surface from
+            // `git_verify_commit_outcome` (it only returns `Io` or
+            // `Git`), but stringify defensively if they ever do.
+            other => TrustError::GitCommand {
+                stderr: other.to_string(),
+            },
         })?;
     let (crypto_result, signer_fingerprint) = match outcome.exit {
         VerifyExit::Good => (CryptoResult::Good, outcome.signer_fingerprint),

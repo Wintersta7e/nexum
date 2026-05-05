@@ -200,12 +200,17 @@ fn run_inner(
         let crypto_cache: std::cell::RefCell<
             std::collections::HashMap<String, crate::indexer::crypto_batch::CryptoOutcome>,
         > = std::cell::RefCell::new(std::collections::HashMap::new());
+        // Hoist the adapter out of the closure: each `read` already
+        // re-walks the local subdirs internally, so constructing a
+        // fresh adapter per id added an O(N) churn that the cache
+        // could not amortize.
+        let local_adapter = LocalAdapter::new(notebook_for_read.clone());
         apply_pass(
             conn,
             Source::Local,
             &pass,
             |id| {
-                let mut record = LocalAdapter::new(notebook_for_read.clone()).read(id).ok()?;
+                let mut record = local_adapter.read(id).ok()?;
                 let Some(sha) = record.provenance.record_commit_sha.clone() else {
                     // Record's path is not in git history — leave the
                     // adapter's placeholder Provenance and proceed.

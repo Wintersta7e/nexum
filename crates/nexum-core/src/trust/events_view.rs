@@ -302,8 +302,10 @@ fn apply_reanchor_diff(
         )?;
         return Ok(());
     }
+    // The reanchor authorization check (`verify_reanchor_authorization`) has
+    // already consumed `old_fingerprint`; here we only need the new
+    // bootstrap fp and the case-A/B selector.
     let EventKind::BootstrapReanchor {
-        old_fingerprint,
         new_fingerprint,
         acknowledge_chain_anchor_lost,
         ..
@@ -331,7 +333,6 @@ fn apply_reanchor_diff(
         Some(case),
     )?;
     ctx.chain.apply_reanchor(
-        old_fingerprint,
         new_fingerprint,
         &new_event.event_id.to_string(),
         here_topo,

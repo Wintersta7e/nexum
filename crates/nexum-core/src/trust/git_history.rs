@@ -140,33 +140,6 @@ pub(crate) fn git_show_blob(notebook_git: &Path, commit_sha: &str) -> Result<Str
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Returns the SSH fingerprint that signed `commit_sha`, or `None` if the
-/// commit is unsigned. Uses `git log -1 --format=%GF`. Retained for one-off
-/// lookups; the bulk path goes through [`topo_walk_events_yml`] which folds
-/// `%GF` into the same shell-out as the SHA list.
-///
-/// # Errors
-///
-/// Returns `TrustError::Io` if `git` cannot be invoked, or
-/// `TrustError::GitCommand` if `git log` exits non-zero.
-#[allow(dead_code)]
-pub(crate) fn git_signer_fingerprint(
-    notebook_git: &Path,
-    commit_sha: &str,
-) -> Result<Option<String>, TrustError> {
-    let out = git(notebook_git)
-        .args(["log", "-1", "--format=%GF", commit_sha])
-        .output()
-        .map_err(io_err(notebook_git))?;
-    if !out.status.success() {
-        return Err(TrustError::GitCommand {
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-    let fp = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    Ok(if fp.is_empty() { None } else { Some(fp) })
-}
-
 /// Resolve one or more revspecs in a single `git rev-parse` invocation.
 /// `git rev-parse` accepts multiple arguments and emits one SHA per line in
 /// the same order — folding `HEAD` and `HEAD:.trust/events.yml` into one

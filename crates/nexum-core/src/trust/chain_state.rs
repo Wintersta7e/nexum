@@ -157,18 +157,16 @@ impl ChainState {
     /// `new_fp` as the new bootstrap signer at `topo_pos`. Updates
     /// `current_bootstrap_fp` so subsequent reanchor authorization checks
     /// compare against the most recent bootstrap (correct across chained
-    /// reanchors). `old_fp` is accepted for symmetry with the event payload
-    /// but is not used here — the caller has already verified it matches the
-    /// prior bootstrap.
+    /// reanchors). The event payload's `old_fingerprint` is consumed by
+    /// the caller's authorization check before this method runs and is
+    /// not threaded through here.
     pub(crate) fn apply_reanchor(
         &mut self,
-        old_fp: &str,
         new_fp: &str,
         new_event_id: &str,
         topo_pos: u64,
         case: ReanchorCase,
     ) {
-        let _ = old_fp;
         for entry in self.keys.values_mut() {
             if entry.trusted_at_topo < topo_pos {
                 entry.pre_reanchor = Some(case);
@@ -364,7 +362,7 @@ mod tests {
         c.set_bootstrap("SHA256:A", "boot1", 0);
         c.apply_key_added("SHA256:B", "ka", 1);
         // Reanchor at topo 5: A → D, Case A (pin preserved).
-        c.apply_reanchor("SHA256:A", "SHA256:D", "reanchor1", 5, ReanchorCase::A);
+        c.apply_reanchor("SHA256:D", "reanchor1", 5, ReanchorCase::A);
 
         // Pre-reanchor signers: A and B both project as PreReanchor { A }.
         assert_eq!(
@@ -391,7 +389,7 @@ mod tests {
     fn apply_reanchor_case_b_marks_prior_keys_with_case_b() {
         let mut c = ChainState::new();
         c.set_bootstrap("SHA256:A", "boot1", 0);
-        c.apply_reanchor("SHA256:A", "SHA256:D", "reanchor1", 3, ReanchorCase::B);
+        c.apply_reanchor("SHA256:D", "reanchor1", 3, ReanchorCase::B);
         assert_eq!(
             c.state_of("SHA256:A", 0),
             TrustState::PreReanchor {
@@ -405,11 +403,11 @@ mod tests {
         let mut c = ChainState::new();
         c.set_bootstrap("SHA256:A", "boot", 0);
         // R1: A → D.
-        c.apply_reanchor("SHA256:A", "SHA256:D", "r1", 3, ReanchorCase::A);
+        c.apply_reanchor("SHA256:D", "r1", 3, ReanchorCase::A);
         assert_eq!(c.current_bootstrap_fp(), Some("SHA256:D"));
         // R2: D → E. After this, current_bootstrap_fp must be E and the
         // would-be R3 must compare its old_fp against E (not the original A).
-        c.apply_reanchor("SHA256:D", "SHA256:E", "r2", 7, ReanchorCase::A);
+        c.apply_reanchor("SHA256:E", "r2", 7, ReanchorCase::A);
         assert_eq!(c.current_bootstrap_fp(), Some("SHA256:E"));
         // Both old bootstraps now project as PreReanchor.
         assert_eq!(

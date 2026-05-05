@@ -16,7 +16,6 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use crate::{
@@ -338,10 +337,14 @@ fn decode_files(raw: Vec<serde_yaml::Value>) -> Vec<FileEvidence> {
 /// once-per-commit `git verify` shell-out.
 fn compute_record_commit_sha(notebook_git: &Path, record_path: &Path) -> Option<String> {
     let relative = record_path.strip_prefix(notebook_git).ok()?;
-    let out = Command::new("git")
+    // Route through the shared env-scrubbed `git()` helper so every
+    // SHA-resolving path in the workspace sees the same git config view —
+    // a user-global `gitconfig` rewriting `core.commitGraph` (or any other
+    // history-affecting setting) cannot make this lookup disagree with
+    // the verify pass that consumes the resulting SHA.
+    let out = crate::trust::git_history::git(notebook_git)
         .args(["log", "-1", "--format=%H", "--"])
         .arg(relative)
-        .current_dir(notebook_git)
         .output()
         .ok()?;
     if !out.status.success() {
