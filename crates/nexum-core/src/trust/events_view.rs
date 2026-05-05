@@ -21,6 +21,7 @@ use crate::index::meta::{
     read_str, write_str,
 };
 use crate::trust::chain_state::ChainState;
+use crate::trust::diff::{Diff, TamperingKind, classify as classify_diff};
 use crate::trust::events::{Event, EventKind, EventLog, TrustError};
 use crate::trust::git_history::{
     git_rev_parse, git_show_blob, has_merges_on_events_yml, topo_walk_events_yml,
@@ -52,23 +53,35 @@ impl<'a> TrustEventsView<'a> {
         Self { conn }
     }
 
-    /// True if any tampering row exists.
+    /// True if any tampering row was recorded at or before `commit`'s
+    /// topo position.
     ///
-    /// In the bootstrap-only branch the materializer never writes tampering
-    /// rows, so this only returns `true` if a future iteration's writer
-    /// has populated `trust_chain_tampering`. The topo-position-aware
-    /// variant (`has_tampering_at_or_before(commit)`) lands alongside the
-    /// tampering-detection write path.
+    /// `commit` is the SHA of an events.yml-touching revision in
+    /// `trust_events`. Commits not present in `trust_events` (cc-native /
+    /// codex-native records, or revisions after the chain was frozen and
+    /// stopped accumulating new rows) return `Ok(false)` because the
+    /// tampering precondition does not apply to them.
     ///
     /// # Errors
     ///
     /// Returns `TrustError::Sqlite` if the underlying `count(*)` query fails.
-    pub fn has_any_tampering(&self) -> Result<bool, TrustError> {
-        let count: i64 =
-            self.conn
-                .query_row("SELECT count(*) FROM trust_chain_tampering", [], |r| {
-                    r.get(0)
-                })?;
+    pub fn has_tampering_at_or_before(&self, commit: &str) -> Result<bool, TrustError> {
+        let topo: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT effective_commit_topo_pos FROM trust_events WHERE effective_commit = ?1",
+                [commit],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(topo) = topo else {
+            return Ok(false);
+        };
+        let count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM trust_chain_tampering WHERE at_topo_pos <= ?1",
+            [topo],
+            |r| r.get(0),
+        )?;
         Ok(count > 0)
     }
 }
@@ -217,17 +230,22 @@ fn apply_revision(
                 counters.tampering += 1;
             }
         }
-        Diff::Reanchor => {
-            // Future task implements proper authorization. This iteration
-            // freezes the chain and records the position in the meta
-            // sentinel; unauthorized reanchors are not routed through
-            // `trust_chain_tampering`.
+        Diff::Reanchor(_event) => {
+            // The reanchor authorization check lives in a follow-up task;
+            // until then the materializer freezes the chain at this commit
+            // and records the position in the meta sentinel. Unauthorized
+            // reanchors are surfaced at read time as the
+            // "broken-trust-chain" warning, not via `trust_chain_tampering`.
             chain.freeze(here_topo);
             crate::index::meta::write_meta_min_topo(
                 tx,
                 crate::index::meta::KEY_CHAIN_FROZEN_AT_TOPO,
                 here_topo_sql,
             )?;
+        }
+        Diff::NoOp => {
+            // Whitespace / comment-only diff. Both revisions deserialize to
+            // structurally-identical event lists; nothing to record.
         }
         Diff::Forbidden { kind, event_id } => {
             write_tampering_row(tx, &commit.sha, here_topo_sql, &event_id, kind)?;
@@ -315,74 +333,6 @@ fn insert_bootstrap_row(
         u64::try_from(topo_pos).unwrap_or(u64::MAX),
     );
     Ok(())
-}
-
-/// Forbidden mutation kinds recorded into `trust_chain_tampering.kind`.
-/// String form matches the schema `CHECK` constraint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TamperingKind {
-    ReorderedDeleted,
-    MutatedPayload,
-    #[allow(dead_code)]
-    DuplicateId,
-}
-
-impl TamperingKind {
-    fn as_db_str(self) -> &'static str {
-        match self {
-            TamperingKind::ReorderedDeleted => "ReorderedDeleted",
-            TamperingKind::MutatedPayload => "MutatedPayload",
-            TamperingKind::DuplicateId => "DuplicateId",
-        }
-    }
-}
-
-/// Classification of the diff between two consecutive events.yml revisions.
-/// `Append` is the legitimate append-only path; `Reanchor` carries a
-/// `BootstrapReanchor` event whose authorization is left to a later
-/// iteration; `Forbidden` covers any mutation that breaks the append-only
-/// invariant (reorder, delete, payload mutation, duplicate `event_id`).
-enum Diff {
-    Append(Event),
-    /// `BootstrapReanchor` payload reached: a later iteration consumes the
-    /// event details to verify authorization. The current iteration only
-    /// freezes the chain at the reanchor commit.
-    Reanchor,
-    Forbidden {
-        kind: TamperingKind,
-        event_id: String,
-    },
-}
-
-/// Diff classifier. The current iteration handles only the append-only
-/// invariant for length and prefix-equality; finer classification (payload
-/// mutation, duplicate `event_id`) lands alongside the dedicated tampering
-/// task.
-fn classify_diff(prev: &EventLog, current: &EventLog) -> Diff {
-    if current.events.len() != prev.events.len() + 1 {
-        return Diff::Forbidden {
-            kind: TamperingKind::ReorderedDeleted,
-            event_id: "unknown".to_owned(),
-        };
-    }
-    for (i, p) in prev.events.iter().enumerate() {
-        if &current.events[i] != p {
-            return Diff::Forbidden {
-                kind: TamperingKind::MutatedPayload,
-                event_id: p.event_id.to_string(),
-            };
-        }
-    }
-    let new = current
-        .events
-        .last()
-        .expect("len == prev + 1 implies non-empty")
-        .clone();
-    if matches!(new.payload, EventKind::BootstrapReanchor { .. }) {
-        Diff::Reanchor
-    } else {
-        Diff::Append(new)
-    }
 }
 
 /// Insert a non-bootstrap event row. Uses the same column layout as
