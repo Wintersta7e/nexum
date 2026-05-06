@@ -1,10 +1,12 @@
 //! Shared `Meta` envelope construction for query verbs.
 //!
-//! Every query verb returns a `_meta` envelope with `source_counts` (across the
-//! whole index), `trust_summary` / `trust_basis_summary` (counted over the
-//! returned rows), and an optional `policy_warnings` entry. Centralizing it
-//! here keeps the per-verb files focused on filter shape and pagination, and
-//! collapses three `count(*)` round-trips into a single grouped query.
+//! Every query verb returns a `_meta` envelope with `source_counts` (across
+//! the whole index) and `trust_summary` / `trust_basis_summary` (counted over
+//! the returned rows). The hide-bucket counters (`hidden_unsigned`,
+//! `hidden_invalid`, `hidden_compromised`) and the `policy_warnings` envelope
+//! codes are populated by the verb from the [`crate::query::policy::apply`]
+//! outcome, since the policy filter is the only place that knows how many
+//! rows it dropped and why.
 
 use rusqlite::Connection;
 
@@ -17,8 +19,9 @@ use crate::records::{SignatureStatus, TrustBasis, TrustPolicy};
 ///
 /// `source_counts` aggregates across the WHOLE index (one `GROUP BY` query).
 /// `trust_summary` and `trust_basis_summary` count over the RETURNED results.
-/// Under `trust_policy = "warn-but-show"` with non-verified rows present,
-/// emits a `policy_warnings` entry naming the issue.
+/// Hide-bucket counters and `policy_warnings` are left at their defaults; the
+/// caller overwrites them from the [`crate::query::policy::PolicyOutcome`]
+/// surfaced by the policy filter.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on DB failure.
@@ -31,7 +34,8 @@ pub(crate) fn build_meta(
 ) -> Result<Meta, QueryError> {
     // source_counts: one grouped query instead of three separate count(*)
     // round-trips. The schema CHECK constraint already restricts source to
-    // {local, cc-native, codex-native}, so unknown values are dropped silently.
+    // {local, cc-native, codex-native}, so unknown values are dropped
+    // silently.
     let mut source_counts = MetaSourceCounts::default();
     let mut stmt = conn.prepare("SELECT source, count(*) FROM records GROUP BY source")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
@@ -48,7 +52,6 @@ pub(crate) fn build_meta(
 
     let mut ts = MetaTrustSummary::default();
     let mut tbs = MetaTrustBasisSummary::default();
-    let mut policy_warnings: Vec<String> = Vec::new();
     for r in results {
         match r.signature_status {
             SignatureStatus::Verified => ts.verified += 1,
@@ -57,10 +60,10 @@ pub(crate) fn build_meta(
             SignatureStatus::Unknown => ts.unknown += 1,
         }
         // Trust-basis bucketing tallies the four spec-aligned values; rows
-        // without a basis (i.e. unsigned, invalid, or unknown-signer) carry
-        // `None` and do not contribute to the basis summary. The
-        // `signature_status_summary` already exposes the unsigned / invalid /
-        // unknown counts separately.
+        // without a basis (unsigned, invalid, unknown-signer) carry `None`
+        // and do not contribute to the basis summary. The
+        // `signature_status_summary` already exposes the unsigned / invalid
+        // / unknown counts separately.
         match r.trust_basis {
             Some(TrustBasis::Current) => tbs.current += 1,
             Some(TrustBasis::RotatedHistorical) => tbs.rotated_historical += 1,
@@ -71,50 +74,17 @@ pub(crate) fn build_meta(
             None => {}
         }
     }
-    if trust_policy == TrustPolicy::WarnButShow && (ts.unsigned + ts.invalid + ts.unknown) > 0 {
-        policy_warnings.push("response includes unsigned content".into());
-    }
-
-    // When the policy hides unsigned/invalid records, count how many are in
-    // the whole DB so callers can surface an informational count. This is a
-    // whole-table count rather than a filter-respecting count; filter-aware
-    // hidden counts are deferred to a later cadence.
-    //
-    // Transitional: we group by `crypto_result` and bucket the four
-    // git-verify-commit exit-code states into the existing `hidden_unsigned`
-    // / `hidden_invalid` counters. `no-signature` -> hidden_unsigned;
-    // `bad-signature` and `unknown-signer` -> hidden_invalid; `good` is
-    // visible (Verified) and not counted here. A later cadence wires the
-    // counters off the per-record projected trust outcome instead of off SQL.
-    let mut hidden_unsigned: u32 = 0;
-    let mut hidden_invalid: u32 = 0;
-    if trust_policy == TrustPolicy::Hide {
-        let mut stmt =
-            conn.prepare("SELECT crypto_result, count(*) FROM records GROUP BY crypto_result")?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        for (status, count) in rows {
-            let saturated = u32::try_from(count).unwrap_or(u32::MAX);
-            match status.as_str() {
-                "no-signature" => hidden_unsigned = saturated,
-                "bad-signature" | "unknown-signer" => {
-                    hidden_invalid = hidden_invalid.saturating_add(saturated);
-                }
-                _ => {}
-            }
-        }
-    }
 
     Ok(Meta {
         source_counts,
         trust_policy,
         trust_summary: ts,
         trust_basis_summary: tbs,
-        policy_warnings,
+        policy_warnings: Vec::new(),
         embed_pool_saturated,
         saturation_wait_ms,
-        hidden_unsigned,
-        hidden_invalid,
+        hidden_unsigned: 0,
+        hidden_invalid: 0,
+        hidden_compromised: 0,
     })
 }

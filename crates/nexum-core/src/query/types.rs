@@ -131,18 +131,25 @@ pub struct Meta {
     pub embed_pool_saturated: bool,
     #[serde(default)]
     pub saturation_wait_ms: u32,
-    /// Count of `unsigned` records anywhere in the index that the current
-    /// `trust_policy` would withhold under `Hide`. Whole-table count, not
-    /// filter-respecting; a future revision may narrow this to the
-    /// requested filter scope if cost shows up.
+    /// Count of rows withheld from the response because their projected
+    /// `signature_status` is `Unsigned` and the active policy or
+    /// `require_signed` override filters them out. Counted from the
+    /// response rows after projection, not the whole index.
     #[serde(default)]
     pub hidden_unsigned: u32,
-    /// Count of `invalid` records anywhere in the index that the current
-    /// `trust_policy` would withhold under `Hide`. Whole-table count, not
-    /// filter-respecting; a future revision may narrow this to the
-    /// requested filter scope if cost shows up.
+    /// Count of rows withheld from the response because their projected
+    /// `signature_status` is `Invalid` (other than strict-revocation
+    /// hits, which are tallied separately in `hidden_compromised`).
+    /// Counted from the response rows after projection, not the whole
+    /// index.
     #[serde(default)]
     pub hidden_invalid: u32,
+    /// Count of rows withheld from the response because they were signed
+    /// by a key the trust chain marks compromised and the
+    /// `strict-revocation-active` overlay fired. Independent of policy
+    /// and `require_signed`; revocation hits are always filtered.
+    #[serde(default)]
+    pub hidden_compromised: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

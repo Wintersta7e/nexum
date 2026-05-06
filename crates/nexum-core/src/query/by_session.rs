@@ -5,10 +5,11 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
+    policy::{PolicyOpts, apply as apply_policy},
     types::{Meta, QueryError, ResultSet, SearchResult},
-    verify::{CachedCrypto, project_trust},
+    verify::{CachedCrypto, ProjectedTrust, project_trust},
 };
-use crate::records::{CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
+use crate::records::{CryptoResult, RecordType, Source, TrustPolicy};
 use crate::trust::chain_state::ChainState;
 use crate::trust::events_view::TrustEventsView;
 
@@ -119,17 +120,35 @@ pub fn by_session(
     let view = TrustEventsView::new(conn);
     let chain = ChainState::from_view(&view)?;
 
-    let mut results: Vec<SearchResult> = Vec::with_capacity(raw_rows.len());
-    for raw in raw_rows {
-        let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-        let cached = CachedCrypto {
-            crypto_result,
-            signer_fingerprint: raw.signer_fingerprint.as_deref(),
-            commit_sha: raw.record_commit_sha.as_deref(),
-            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
-        };
-        let projected = project_trust(cached, &view, &chain, strict_revocation)?;
-        results.push(SearchResult {
+    // Project every row up-front so the policy filter and the SearchResult
+    // shape both consume the same per-row trust state.
+    let projected_rows: Vec<(SessionRow, ProjectedTrust)> = raw_rows
+        .into_iter()
+        .map(|raw| {
+            let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
+            let cached = CachedCrypto {
+                crypto_result,
+                signer_fingerprint: raw.signer_fingerprint.as_deref(),
+                commit_sha: raw.record_commit_sha.as_deref(),
+                relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+            };
+            let projected = project_trust(cached, &view, &chain, strict_revocation)?;
+            Ok::<_, QueryError>((raw, projected))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Centralized warn/hide/strict policy filter.
+    let policy_opts = PolicyOpts {
+        policy: trust_policy,
+        require_signed: false,
+        strict_revocation,
+    };
+    let outcome = apply_policy(projected_rows, &policy_opts, |row| &row.1);
+
+    let results: Vec<SearchResult> = outcome
+        .visible
+        .into_iter()
+        .map(|(raw, projected)| SearchResult {
             id: raw.id,
             record_type: RecordType::from_db_str(&raw.record_type),
             title: raw.title,
@@ -144,22 +163,15 @@ pub fn by_session(
             warnings: projected.warnings,
             body: None,
             updated: raw.updated,
-        });
-    }
-
-    // Apply trust-policy filter: under Hide, strip unsigned and invalid rows
-    // from the visible set before building the meta envelope.
-    let results: Vec<SearchResult> = if trust_policy == TrustPolicy::Hide {
-        results
-            .into_iter()
-            .filter(|r| r.signature_status == SignatureStatus::Verified)
-            .collect()
-    } else {
-        results
-    };
+        })
+        .collect();
 
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
-    let meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
+    let mut meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
+    meta.hidden_unsigned = outcome.hidden_unsigned;
+    meta.hidden_invalid = outcome.hidden_invalid;
+    meta.hidden_compromised = outcome.hidden_compromised;
+    meta.policy_warnings = outcome.policy_warnings;
 
     Ok(ResultSet {
         results,

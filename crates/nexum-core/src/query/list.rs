@@ -4,11 +4,12 @@
 use rusqlite::Connection;
 
 use super::{
+    policy::{PolicyOpts, apply as apply_policy},
     search::build_filter_sql,
     types::{Filters, QueryError, ResultSet, SearchResult},
-    verify::{CachedCrypto, project_trust},
+    verify::{CachedCrypto, ProjectedTrust, project_trust},
 };
-use crate::records::{CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
+use crate::records::{CryptoResult, RecordType, Source, TrustPolicy};
 use crate::trust::chain_state::ChainState;
 use crate::trust::events_view::TrustEventsView;
 
@@ -89,45 +90,60 @@ pub fn list(
     let view = TrustEventsView::new(conn);
     let chain = ChainState::from_view(&view)?;
 
-    let mut accumulated: Vec<(i64, SearchResult)> = rows
+    // Project every row up-front so the projected trust shape is
+    // available both for the policy filter and for materializing
+    // `SearchResult` items.
+    let mut projected_rows: Vec<(ListRow, ProjectedTrust)> = rows
         .into_iter()
         .map(|raw| {
-            let rowid = raw.rowid;
-            let result = row_to_search_result(raw, &view, &chain, strict_revocation)?;
-            Ok::<_, QueryError>((rowid, result))
+            let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
+            let cached = CachedCrypto {
+                crypto_result,
+                signer_fingerprint: raw.signer_fingerprint.as_deref(),
+                commit_sha: raw.record_commit_sha.as_deref(),
+                relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+            };
+            let projected = project_trust(cached, &view, &chain, strict_revocation)?;
+            Ok::<_, QueryError>((raw, projected))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Drop the over-limit sentinel row so it does not leak into the
-    // results, then encode the cursor from the LAST RETURNED row's
-    // sort key. The next page asks for rows STRICTLY beyond that key
-    // (`(updated, rowid) < (cursor)`), which is the canonical keyset
-    // pagination invariant.
-    let over_limit = accumulated.len() > usize::try_from(limit).unwrap_or(0);
+    // Drop the over-limit sentinel row before policy filtering so the
+    // cursor is encoded from the last RETURNED row's sort key, regardless
+    // of whether that row would have been hidden by policy. The next page
+    // walks through the same projection + policy steps.
+    let over_limit = projected_rows.len() > usize::try_from(limit).unwrap_or(0);
     if over_limit {
-        accumulated.pop();
+        projected_rows.pop();
     }
     let next_cursor: Option<String> = if over_limit {
-        accumulated
+        projected_rows
             .last()
-            .map(|(rowid, r)| encode_cursor(&r.updated, *rowid))
+            .map(|(raw, _)| encode_cursor(&raw.updated, raw.rowid))
     } else {
         None
     };
-    let raw: Vec<SearchResult> = accumulated.into_iter().map(|(_, r)| r).collect();
-    // When the policy is Hide, strip unsigned and invalid records from the
-    // visible result set before building the meta envelope. The meta builder
-    // tallies hidden counts from the DB independently.
-    let results: Vec<SearchResult> = if trust_policy == TrustPolicy::Hide {
-        raw.into_iter()
-            .filter(|r| r.signature_status == SignatureStatus::Verified)
-            .collect()
-    } else {
-        raw
+
+    // Centralized warn/hide/strict policy filter.
+    let policy_opts = PolicyOpts {
+        policy: trust_policy,
+        require_signed: filters.require_signed,
+        strict_revocation,
     };
+    let outcome = apply_policy(projected_rows, &policy_opts, |row| &row.1);
+
+    let results: Vec<SearchResult> = outcome
+        .visible
+        .into_iter()
+        .map(|(raw, projected)| row_to_search_result(raw, projected))
+        .collect();
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
-    let meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
+    let mut meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
+    meta.hidden_unsigned = outcome.hidden_unsigned;
+    meta.hidden_invalid = outcome.hidden_invalid;
+    meta.hidden_compromised = outcome.hidden_compromised;
+    meta.policy_warnings = outcome.policy_warnings;
     Ok(ResultSet {
         results,
         total_matched: total,
@@ -174,23 +190,11 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
     })
 }
 
-/// Materialize one DB row into a `SearchResult`. Splits out of `list` so
-/// the verb stays under the strict-clippy `too-many-lines` threshold.
-fn row_to_search_result(
-    raw: ListRow,
-    view: &TrustEventsView<'_>,
-    chain: &ChainState,
-    strict_revocation: bool,
-) -> Result<SearchResult, QueryError> {
-    let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-    let cached = CachedCrypto {
-        crypto_result,
-        signer_fingerprint: raw.signer_fingerprint.as_deref(),
-        commit_sha: raw.record_commit_sha.as_deref(),
-        relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
-    };
-    let projected = project_trust(cached, view, chain, strict_revocation)?;
-    Ok(SearchResult {
+/// Materialize one (raw row, projected trust) pair into a `SearchResult`.
+/// Splits out of `list` so the verb stays under the strict-clippy
+/// `too-many-lines` threshold.
+fn row_to_search_result(raw: ListRow, projected: ProjectedTrust) -> SearchResult {
+    SearchResult {
         id: raw.id,
         record_type: RecordType::from_db_str(&raw.record_type),
         title: raw.title,
@@ -205,7 +209,7 @@ fn row_to_search_result(
         warnings: projected.warnings,
         body: None,
         updated: raw.updated,
-    })
+    }
 }
 
 /// Encode the keyset pivot as an opaque cursor string.

@@ -12,11 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{
     Agent, Confidence, CryptoResult, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey,
-    RecordType, SessionRef, SignatureStatus, Source, TrustPolicy, UnifiedRecord,
+    RecordType, SessionRef, Source, TrustPolicy, UnifiedRecord,
 };
 use crate::trust::chain_state::ChainState;
 use crate::trust::events_view::TrustEventsView;
 
+use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::QueryError;
 use super::verify::{CachedCrypto, ProjectedTrust, project_trust};
 
@@ -79,7 +80,7 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
             .collect();
         return Err(QueryError::Ambiguous { matches });
     }
-    // Exactly one candidate — project trust then apply hide-policy.
+    // Exactly one candidate — project trust then apply policy.
     let raw = candidates.swap_remove(0);
     let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
     let view = TrustEventsView::new(conn);
@@ -91,15 +92,31 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
         relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
     };
     let projected = project_trust(cached, &view, &chain, opts.strict_revocation)?;
-    if opts.trust_policy == TrustPolicy::Hide
-        && !opts.include_unsigned
-        && projected.signature_status != SignatureStatus::Verified
-    {
-        return Ok(GetOutcome::HiddenByPolicy {
-            signature_status: projected.signature_status,
-        });
+
+    // `include_unsigned` is the per-call escape hatch for agents that
+    // need to inspect a record regardless of trust state. When set, we
+    // bypass the centralized policy filter and surface the full
+    // projection.
+    if opts.include_unsigned {
+        return build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)));
     }
-    build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))
+
+    // Route the single row through the same warn/hide/strict policy
+    // helper that the listing verbs use, then translate the policy
+    // outcome into the `Found` / `HiddenByPolicy` variants.
+    let policy_opts = PolicyOpts {
+        policy: opts.trust_policy,
+        require_signed: false,
+        strict_revocation: opts.strict_revocation,
+    };
+    let signature_status = projected.signature_status;
+    let outcome = apply_policy(vec![(raw, projected)], &policy_opts, |row| &row.1);
+    match outcome.visible.into_iter().next() {
+        Some((raw, projected)) => {
+            build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))
+        }
+        None => Ok(GetOutcome::HiddenByPolicy { signature_status }),
+    }
 }
 
 /// Run the appropriate `SELECT` for the key shape and collect the rows.
@@ -273,6 +290,7 @@ struct RawRow {
 mod tests {
     use super::*;
     use crate::indexer::db::open_or_create;
+    use crate::records::SignatureStatus;
     use tempfile::TempDir;
 
     fn open() -> (TempDir, rusqlite::Connection) {

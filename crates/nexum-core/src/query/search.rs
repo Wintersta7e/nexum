@@ -7,6 +7,7 @@ use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Sour
 use crate::trust::chain_state::ChainState;
 use crate::trust::events_view::TrustEventsView;
 
+use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
 use super::verify::{CachedCrypto, ProjectedTrust, project_trust};
 
@@ -54,6 +55,83 @@ impl SearchOpts {
 /// `QueryError::InvalidFilter` if a filter is malformed;
 /// `QueryError::Trust` if the chain-state hydration fails.
 pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryError> {
+    let projected_rows = fetch_and_project(conn, opts)?;
+
+    // Reciprocal-rank-fusion-style score over a single branch:
+    //   score(r) = 1 / (k + rank)
+    // With one branch the ranking degenerates to "by FTS rank ascending".
+    // Apply the unsigned penalty after RRF; the policy filter runs after
+    // sorting so the top-K cut is taken from the visible set.
+    let k_const: f64 = 60.0;
+    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (r, p))| {
+            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
+            let rank = f64::from(rank) + 1.0;
+            let mut score = 1.0 / (k_const + rank);
+            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
+            // ordinal above is the actual ranking signal; the underlying
+            // bm25 value is intentionally not surfaced here.
+
+            let is_unsigned = p.signature_status != SignatureStatus::Verified;
+            if is_unsigned && !opts.filters.no_unsigned_penalty {
+                score *= opts.unsigned_ranking_penalty;
+            }
+            (r, p, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Centralized warn/hide/strict policy filter. The closure plucks the
+    // projected trust shape out of the (row, projected, score) tuple so
+    // `apply` can route every row through the same decision tree as the
+    // other read verbs.
+    let policy_opts = PolicyOpts {
+        policy: opts.trust_policy,
+        require_signed: opts.filters.require_signed,
+        strict_revocation: opts.filters.strict_revocation,
+    };
+    let outcome = apply_policy(scored, &policy_opts, |row| &row.1);
+
+    let total = u32::try_from(outcome.visible.len()).unwrap_or(u32::MAX);
+    let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);
+    let top_n = outcome.visible.into_iter().take(top_k).collect::<Vec<_>>();
+
+    // Body inclusion: top-3 for search; full record fetched in `get`.
+    let results: Vec<SearchResult> = top_n
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (r, p, score))| project_row(r, p, score, idx < 3))
+        .collect();
+
+    let mut meta = super::meta::build_meta(
+        conn,
+        &results,
+        opts.trust_policy,
+        opts.embed_pool_saturated,
+        opts.saturation_wait_ms,
+    )?;
+    meta.hidden_unsigned = outcome.hidden_unsigned;
+    meta.hidden_invalid = outcome.hidden_invalid;
+    meta.hidden_compromised = outcome.hidden_compromised;
+    meta.policy_warnings = outcome.policy_warnings;
+
+    Ok(ResultSet {
+        results,
+        total_matched: total,
+        next_cursor: None,
+        meta,
+    })
+}
+
+/// Fetch the FTS-matched rows and project per-row trust. Splits out of
+/// `search` so the verb stays under the strict-clippy `too-many-lines`
+/// threshold.
+fn fetch_and_project(
+    conn: &Connection,
+    opts: &SearchOpts,
+) -> Result<Vec<(FtsRow, ProjectedTrust)>, QueryError> {
     let (filter_sql, filter_params) = build_filter_sql(&opts.filters);
 
     // Cap on FTS candidates fed into RRF. 100 is enough for top-K=5 even
@@ -62,7 +140,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let fts_limit: u32 = 100;
 
     // FTS query with filter pushdown. ?1 = MATCH query; ?2 = limit;
-    // ?3..= filter params. The SELECT now also pulls the per-record
+    // ?3..= filter params. The SELECT also pulls the per-record
     // `relevant_trust_events_commit` so the read-time projection can look
     // up trust state at the events.yml commit effective when the record
     // was signed.
@@ -112,10 +190,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let view = TrustEventsView::new(conn);
     let chain = ChainState::from_view(&view)?;
 
-    // Project every row up-front so the (signature_status, trust_basis,
-    // warnings) triple is available for both ranking / retention filters
-    // and the final `SearchResult` shape.
-    let projected_rows: Vec<(FtsRow, ProjectedTrust)> = fts_rows
+    fts_rows
         .into_iter()
         .map(|row| {
             let cached = CachedCrypto {
@@ -127,67 +202,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             let projected = project_trust(cached, &view, &chain, opts.filters.strict_revocation)?;
             Ok::<_, QueryError>((row, projected))
         })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    // Reciprocal-rank-fusion-style score over a single branch:
-    //   score(r) = 1 / (k + rank)
-    // With one branch the ranking degenerates to "by FTS rank ascending".
-    // Apply the unsigned penalty after RRF, THEN the top-K cut.
-    let k_const: f64 = 60.0;
-    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (r, p))| {
-            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
-            let rank = f64::from(rank) + 1.0;
-            let mut score = 1.0 / (k_const + rank);
-            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
-            // ordinal above is the actual ranking signal; the underlying
-            // bm25 value is intentionally not surfaced here.
-
-            let is_unsigned = p.signature_status != SignatureStatus::Verified;
-            if is_unsigned && !opts.filters.no_unsigned_penalty {
-                score *= opts.unsigned_ranking_penalty;
-            }
-            (r, p, score)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-
-    // require_signed override.
-    if opts.filters.require_signed {
-        scored.retain(|(_, p, _)| p.signature_status == SignatureStatus::Verified);
-    }
-    // hide policy: drop unverified.
-    if opts.trust_policy == TrustPolicy::Hide {
-        scored.retain(|(_, p, _)| p.signature_status == SignatureStatus::Verified);
-    }
-
-    let total = u32::try_from(scored.len()).unwrap_or(u32::MAX);
-    let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);
-    let top_n = scored.into_iter().take(top_k).collect::<Vec<_>>();
-
-    // Body inclusion: top-3 for search; full record fetched in `get`.
-    let results: Vec<SearchResult> = top_n
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (r, p, score))| project_row(r, p, score, idx < 3))
-        .collect();
-
-    let meta = super::meta::build_meta(
-        conn,
-        &results,
-        opts.trust_policy,
-        opts.embed_pool_saturated,
-        opts.saturation_wait_ms,
-    )?;
-
-    Ok(ResultSet {
-        results,
-        total_matched: total,
-        next_cursor: None,
-        meta,
-    })
+        .collect()
 }
 
 /// Project a single FTS row + projected trust + score into the public
