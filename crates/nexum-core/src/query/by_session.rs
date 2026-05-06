@@ -141,9 +141,8 @@ pub fn by_session(
     let policy_opts = PolicyOpts {
         policy: trust_policy,
         require_signed: false,
-        strict_revocation,
     };
-    let outcome = apply_policy(projected_rows, &policy_opts, |row| &row.1);
+    let outcome = apply_policy(projected_rows, policy_opts, |row| &row.1);
 
     let results: Vec<SearchResult> = outcome
         .visible

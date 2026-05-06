@@ -5,7 +5,7 @@ pub mod by_session;
 pub mod get;
 pub mod list;
 pub(crate) mod meta;
-pub mod policy;
+pub(crate) mod policy;
 pub mod recent;
 pub mod search;
 #[cfg(test)]

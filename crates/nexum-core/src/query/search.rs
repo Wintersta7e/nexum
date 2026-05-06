@@ -90,9 +90,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let policy_opts = PolicyOpts {
         policy: opts.trust_policy,
         require_signed: opts.filters.require_signed,
-        strict_revocation: opts.filters.strict_revocation,
     };
-    let outcome = apply_policy(scored, &policy_opts, |row| &row.1);
+    let outcome = apply_policy(scored, policy_opts, |row| &row.1);
 
     let total = u32::try_from(outcome.visible.len()).unwrap_or(u32::MAX);
     let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);

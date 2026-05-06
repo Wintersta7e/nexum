@@ -107,10 +107,9 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     let policy_opts = PolicyOpts {
         policy: opts.trust_policy,
         require_signed: false,
-        strict_revocation: opts.strict_revocation,
     };
     let signature_status = projected.signature_status;
-    let outcome = apply_policy(vec![(raw, projected)], &policy_opts, |row| &row.1);
+    let outcome = apply_policy(vec![(raw, projected)], policy_opts, |row| &row.1);
     match outcome.visible.into_iter().next() {
         Some((raw, projected)) => {
             build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))

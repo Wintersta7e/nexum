@@ -24,20 +24,21 @@ use crate::query::verify::ProjectedTrust;
 use crate::records::{SignatureStatus, TrustPolicy};
 
 /// Policy inputs collected at the verb call site. `policy` and
-/// `require_signed` come from the caller's options or runtime config;
-/// `strict_revocation` is the same flag forwarded to
-/// [`crate::query::verify::project_trust`] for the projection step.
+/// `require_signed` come from the caller's options or runtime config.
+/// The strict-revocation overlay is encoded upstream by
+/// [`crate::query::verify::project_trust`] as the
+/// `strict-revocation-active` warning, which [`apply`] detects to route
+/// rows into the dedicated `hidden_compromised` bucket.
 #[derive(Debug, Clone, Copy)]
-pub struct PolicyOpts {
+pub(crate) struct PolicyOpts {
     pub policy: TrustPolicy,
     pub require_signed: bool,
-    pub strict_revocation: bool,
 }
 
 /// Outcome of a single [`apply`] call: the surviving rows plus the
 /// per-bucket hidden counters and the envelope warning codes.
 #[derive(Debug, Clone)]
-pub struct PolicyOutcome<T> {
+pub(crate) struct PolicyOutcome<T> {
     pub visible: Vec<T>,
     pub hidden_unsigned: u32,
     pub hidden_invalid: u32,
@@ -45,7 +46,8 @@ pub struct PolicyOutcome<T> {
     pub policy_warnings: Vec<String>,
 }
 
-// Hand-rolled to avoid the spurious `T: Default` bound a derive would add.
+// Hand-rolled to avoid the spurious `T: Default` bound a `derive(Default)`
+// would add. `Vec<T>: Default` for any `T`, so this impl is unconditional.
 impl<T> Default for PolicyOutcome<T> {
     fn default() -> Self {
         Self {
@@ -62,7 +64,7 @@ impl<T> Default for PolicyOutcome<T> {
 /// rows. The `classify` closure plucks the [`ProjectedTrust`] reference
 /// out of each row so callers can carry per-verb side data (scores, raw
 /// columns) alongside the projection without copying.
-pub fn apply<T, F>(rows: Vec<T>, opts: &PolicyOpts, classify: F) -> PolicyOutcome<T>
+pub(crate) fn apply<T, F>(rows: Vec<T>, opts: PolicyOpts, classify: F) -> PolicyOutcome<T>
 where
     F: Fn(&T) -> &ProjectedTrust,
 {
@@ -150,11 +152,10 @@ mod tests {
         }
     }
 
-    fn opts(policy: TrustPolicy, require_signed: bool, strict_revocation: bool) -> PolicyOpts {
+    fn opts(policy: TrustPolicy, require_signed: bool) -> PolicyOpts {
         PolicyOpts {
             policy,
             require_signed,
-            strict_revocation,
         }
     }
 
@@ -182,7 +183,7 @@ mod tests {
 
     #[test]
     fn warn_but_show_keeps_non_strict_non_verified_and_filters_compromised() {
-        let out = apply(rows(), &opts(TrustPolicy::WarnButShow, false, false), pluck);
+        let out = apply(rows(), opts(TrustPolicy::WarnButShow, false), pluck);
         assert_eq!(out.visible.len(), 3, "verified + unsigned + bad visible");
         assert_eq!(out.hidden_unsigned, 0);
         assert_eq!(out.hidden_invalid, 0);
@@ -195,7 +196,7 @@ mod tests {
 
     #[test]
     fn hide_filters_all_non_verified() {
-        let out = apply(rows(), &opts(TrustPolicy::Hide, false, false), pluck);
+        let out = apply(rows(), opts(TrustPolicy::Hide, false), pluck);
         assert_eq!(out.visible.len(), 1);
         assert_eq!(out.hidden_unsigned, 1);
         assert_eq!(out.hidden_invalid, 1);
@@ -205,7 +206,7 @@ mod tests {
 
     #[test]
     fn show_silent_keeps_non_strict_filters_compromised_and_emits_no_warnings() {
-        let out = apply(rows(), &opts(TrustPolicy::ShowSilent, false, false), pluck);
+        let out = apply(rows(), opts(TrustPolicy::ShowSilent, false), pluck);
         // ShowSilent never adds an envelope warning, but the
         // strict-revocation drop is independent of policy.
         assert_eq!(out.visible.len(), 3);
@@ -215,7 +216,7 @@ mod tests {
 
     #[test]
     fn require_signed_overrides_warn_but_show() {
-        let out = apply(rows(), &opts(TrustPolicy::WarnButShow, true, false), pluck);
+        let out = apply(rows(), opts(TrustPolicy::WarnButShow, true), pluck);
         assert_eq!(out.visible.len(), 1);
         assert_eq!(out.hidden_unsigned, 1);
         assert_eq!(out.hidden_invalid, 1);
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn require_signed_overrides_show_silent() {
-        let out = apply(rows(), &opts(TrustPolicy::ShowSilent, true, false), pluck);
+        let out = apply(rows(), opts(TrustPolicy::ShowSilent, true), pluck);
         assert_eq!(out.visible.len(), 1);
         assert_eq!(out.hidden_unsigned, 1);
         assert_eq!(out.hidden_invalid, 1);
