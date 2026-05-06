@@ -107,7 +107,6 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
 
     let mut meta = super::meta::build_meta_search(
         conn,
-        &results,
         opts.trust_policy,
         opts.embed_pool_saturated,
         opts.saturation_wait_ms,

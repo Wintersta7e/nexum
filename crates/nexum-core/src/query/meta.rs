@@ -11,9 +11,8 @@
 use rusqlite::Connection;
 
 use super::policy::PolicyOutcome;
-use super::types::SearchResult;
-use super::types::{Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError};
-use crate::records::{SignatureStatus, TrustBasis, TrustPolicy};
+use super::types::{Meta, MetaSourceCounts, QueryError};
+use crate::records::TrustPolicy;
 
 /// Build the `_meta` envelope for a listing-shaped query (`list` / `recent`
 /// / `by_session`). The embedding-pool saturation fields don't apply to
@@ -29,10 +28,9 @@ use crate::records::{SignatureStatus, TrustBasis, TrustPolicy};
 /// Returns `QueryError::Rusqlite` on DB failure.
 pub(crate) fn build_meta_listing(
     conn: &Connection,
-    results: &[SearchResult],
     trust_policy: TrustPolicy,
 ) -> Result<Meta, QueryError> {
-    build_meta_inner(conn, results, trust_policy, false, 0)
+    build_meta_inner(conn, trust_policy, false, 0)
 }
 
 /// Build the `_meta` envelope for `search`. Carries the embedding-pool
@@ -42,18 +40,11 @@ pub(crate) fn build_meta_listing(
 /// Returns `QueryError::Rusqlite` on DB failure.
 pub(crate) fn build_meta_search(
     conn: &Connection,
-    results: &[SearchResult],
     trust_policy: TrustPolicy,
     embed_pool_saturated: bool,
     saturation_wait_ms: u32,
 ) -> Result<Meta, QueryError> {
-    build_meta_inner(
-        conn,
-        results,
-        trust_policy,
-        embed_pool_saturated,
-        saturation_wait_ms,
-    )
+    build_meta_inner(conn, trust_policy, embed_pool_saturated, saturation_wait_ms)
 }
 
 /// Shared body for the two facade variants. The embedding-pool channel is
@@ -61,7 +52,6 @@ pub(crate) fn build_meta_search(
 /// channel stays falsy in JSON.
 fn build_meta_inner(
     conn: &Connection,
-    results: &[SearchResult],
     trust_policy: TrustPolicy,
     embed_pool_saturated: bool,
     saturation_wait_ms: u32,
@@ -84,36 +74,12 @@ fn build_meta_inner(
         }
     }
 
-    let mut ts = MetaTrustSummary::default();
-    let mut tbs = MetaTrustBasisSummary::default();
-    for r in results {
-        match r.signature_status {
-            SignatureStatus::Verified => ts.verified += 1,
-            SignatureStatus::Unsigned => ts.unsigned += 1,
-            SignatureStatus::Invalid => ts.invalid += 1,
-            SignatureStatus::Unknown => ts.unknown += 1,
-        }
-        // Trust-basis bucketing tallies the four spec-aligned values; rows
-        // without a basis (unsigned, invalid, unknown-signer) carry `None`
-        // and do not contribute to the basis summary. The
-        // `signature_status_summary` already exposes the unsigned / invalid
-        // / unknown counts separately.
-        match r.trust_basis {
-            Some(TrustBasis::Current) => tbs.current += 1,
-            Some(TrustBasis::RotatedHistorical) => tbs.rotated_historical += 1,
-            Some(TrustBasis::RotatedHistoricalCompromised) => {
-                tbs.rotated_historical_compromised += 1;
-            }
-            Some(TrustBasis::PreReanchor) => tbs.pre_reanchor += 1,
-            None => {}
-        }
-    }
-
+    // trust_summary + trust_basis_summary are filled by the caller via
+    // [`Meta::apply_policy_outcome`] from the pre-policy tally that
+    // [`crate::query::policy::apply`] produces.
     Ok(Meta {
         source_counts,
         trust_policy,
-        trust_summary: ts,
-        trust_basis_summary: tbs,
         embed_pool_saturated,
         saturation_wait_ms,
         ..Meta::default()
@@ -129,5 +95,10 @@ impl Meta {
         self.hidden_invalid = outcome.hidden_invalid;
         self.hidden_compromised = outcome.hidden_compromised;
         self.policy_warnings.clone_from(&outcome.policy_warnings);
+        // Transparency channel: trust_summary / trust_basis_summary
+        // count over the pre-policy projected rows so the response reflects
+        // every row the projection produced, not only the visible subset.
+        self.trust_summary = outcome.trust_summary;
+        self.trust_basis_summary = outcome.trust_basis_summary;
     }
 }

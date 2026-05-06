@@ -129,7 +129,7 @@ pub fn list(
         .collect();
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
-    let mut meta = super::meta::build_meta_listing(conn, &results, trust_policy)?;
+    let mut meta = super::meta::build_meta_listing(conn, trust_policy)?;
     meta.apply_policy_outcome(&outcome);
     Ok(ResultSet {
         results,

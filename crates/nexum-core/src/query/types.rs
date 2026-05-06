@@ -161,7 +161,7 @@ pub struct MetaSourceCounts {
     pub codex_native: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MetaTrustSummary {
     pub verified: u32,
     pub unsigned: u32,
@@ -173,7 +173,7 @@ pub struct MetaTrustSummary {
 /// invalid, unknown-signer) carry `None` and are NOT counted here; the
 /// `trust_summary` field exposes the per-`SignatureStatus` counts. Wire
 /// shape uses kebab-case keys so the JSON form mirrors the spec value set.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct MetaTrustBasisSummary {
     pub current: u32,

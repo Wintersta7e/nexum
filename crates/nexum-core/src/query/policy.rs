@@ -20,8 +20,9 @@
 //!      `non-verified-results-included` envelope warning.
 //!    - `ShowSilent` passes everything through without an envelope warning.
 
+use crate::query::types::{MetaTrustBasisSummary, MetaTrustSummary};
 use crate::query::verify::ProjectedTrust;
-use crate::records::{SignatureStatus, TrustPolicy};
+use crate::records::{SignatureStatus, TrustBasis, TrustPolicy};
 
 /// Policy inputs collected at the verb call site. `policy` and
 /// `require_signed` come from the caller's options or runtime config.
@@ -35,8 +36,15 @@ pub(crate) struct PolicyOpts {
     pub require_signed: bool,
 }
 
-/// Outcome of a single [`apply`] call: the surviving rows plus the
-/// per-bucket hidden counters and the envelope warning codes.
+/// Outcome of a single [`apply`] call: the surviving rows, the per-bucket
+/// hidden counters, the envelope warning codes, plus the pre-policy
+/// `trust_summary` and `trust_basis_summary` tallies.
+///
+/// `trust_summary` and `trust_basis_summary` are populated from EVERY input
+/// row regardless of whether the policy filter excluded it. They are the
+/// transparency channel: callers surface them on `_meta.trust_summary` /
+/// `_meta.trust_basis_summary` so the response describes what the
+/// projection produced, not just what the policy filter let through.
 #[derive(Debug, Clone)]
 pub(crate) struct PolicyOutcome<T> {
     pub visible: Vec<T>,
@@ -44,6 +52,8 @@ pub(crate) struct PolicyOutcome<T> {
     pub hidden_invalid: u32,
     pub hidden_compromised: u32,
     pub policy_warnings: Vec<String>,
+    pub trust_summary: MetaTrustSummary,
+    pub trust_basis_summary: MetaTrustBasisSummary,
 }
 
 // Hand-rolled to avoid the spurious `T: Default` bound a `derive(Default)`
@@ -56,6 +66,8 @@ impl<T> Default for PolicyOutcome<T> {
             hidden_invalid: 0,
             hidden_compromised: 0,
             policy_warnings: Vec::new(),
+            trust_summary: MetaTrustSummary::default(),
+            trust_basis_summary: MetaTrustBasisSummary::default(),
         }
     }
 }
@@ -78,6 +90,26 @@ where
             .warnings
             .iter()
             .any(|w| w == "strict-revocation-active");
+
+        // Pre-policy tally — every row contributes to the transparency
+        // summaries regardless of whether the filter excludes it below.
+        match status {
+            SignatureStatus::Verified => out.trust_summary.verified += 1,
+            SignatureStatus::Unsigned => out.trust_summary.unsigned += 1,
+            SignatureStatus::Invalid => out.trust_summary.invalid += 1,
+            SignatureStatus::Unknown => out.trust_summary.unknown += 1,
+        }
+        match projected.trust_basis {
+            Some(TrustBasis::Current) => out.trust_basis_summary.current += 1,
+            Some(TrustBasis::RotatedHistorical) => {
+                out.trust_basis_summary.rotated_historical += 1;
+            }
+            Some(TrustBasis::RotatedHistoricalCompromised) => {
+                out.trust_basis_summary.rotated_historical_compromised += 1;
+            }
+            Some(TrustBasis::PreReanchor) => out.trust_basis_summary.pre_reanchor += 1,
+            None => {}
+        }
 
         // 1. Strict-revocation hits are always filtered out and counted
         //    into `hidden_compromised`, regardless of policy or
@@ -245,6 +277,26 @@ mod tests {
         assert_eq!(out.hidden_invalid, 0);
         assert_eq!(out.hidden_compromised, 0);
         assert!(out.policy_warnings.is_empty());
+    }
+
+    /// Transparency channel: `trust_summary` counts every projected row,
+    /// even ones the policy filter excluded from `visible`. Under `Hide`
+    /// the response carries only the verified row, but the summary still
+    /// reflects the full pre-policy distribution so callers can see what
+    /// the index produced before the filter ran.
+    #[test]
+    fn trust_summary_tallies_hidden_rows_as_well_as_visible() {
+        let out = apply(rows(), opts(TrustPolicy::Hide, false), pluck);
+        assert_eq!(out.visible.len(), 1);
+        assert_eq!(out.hidden_unsigned, 1);
+        assert_eq!(out.hidden_invalid, 1);
+        assert_eq!(out.hidden_compromised, 1);
+        // Visible-only would report verified=1, unsigned=0, invalid=0.
+        // Pre-policy reports all four input rows.
+        assert_eq!(out.trust_summary.verified, 1);
+        assert_eq!(out.trust_summary.unsigned, 1);
+        assert_eq!(out.trust_summary.invalid, 2, "bad-signature + compromised");
+        assert_eq!(out.trust_basis_summary.current, 1);
     }
 }
 
