@@ -197,16 +197,6 @@ impl ChainState {
         self.current_bootstrap_fp.as_deref()
     }
 
-    /// True when no events have been applied yet (no bootstrap, no keys).
-    /// Read-time projection treats an empty chain as the pre-bootstrap state
-    /// and trusts cached crypto on its face: `Good` crypto projects to
-    /// `Verified` + `TrustBasis::Current`, mirroring the bootstrap-only
-    /// behavior the index has when `notebook.git` has no events.yml history.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
-    }
-
     /// True if `fingerprint` is in the trusted set at `topo_pos` — i.e., was
     /// introduced at-or-before this position and has not been rotated out
     /// before this position.
@@ -259,7 +249,7 @@ impl ChainState {
     /// Consumed by the read-time trust projection
     /// (`crate::query::verify::project_trust`).
     #[must_use]
-    pub fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
+    pub(crate) fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
         if let Some(frozen) = self.frozen_at_topo
             && topo_pos >= frozen
         {

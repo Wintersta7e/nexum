@@ -147,16 +147,6 @@ pub fn project_trust(
         CryptoResult::Good => {}
     }
 
-    // Empty-chain short-circuit: when the materialized view has no events
-    // applied (pre-bootstrap notebook, or in-memory test fixtures that never
-    // ran the materializer), there is no chain state to consult. Good crypto
-    // projects to Verified + Current with no warnings, matching the
-    // bootstrap-only behavior the index exhibits before any events.yml
-    // history exists.
-    if chain.is_empty() {
-        return Ok(ProjectedTrust::verified(TrustBasis::Current, &[]));
-    }
-
     // Steps 5-6: state-machine projection. Look up the events.yml commit's
     // topological position; that's the trust state effective when the
     // record was signed.
@@ -181,10 +171,9 @@ pub fn project_trust(
             TrustBasis::RotatedHistoricalCompromised,
             &["signed-by-compromised-key"],
         ),
-        TrustState::Compromised => ProjectedTrust::invalid_with_basis(
-            TrustBasis::RotatedHistoricalCompromised,
-            &["signed-by-compromised-key", "strict-revocation-active"],
-        ),
+        TrustState::Compromised => {
+            ProjectedTrust::invalid(&["signed-by-compromised-key", "strict-revocation-active"])
+        }
         TrustState::PreReanchor {
             case: ReanchorCase::A,
         } => ProjectedTrust::verified(TrustBasis::PreReanchor, &["pre-recovery-record"]),

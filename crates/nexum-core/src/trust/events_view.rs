@@ -107,7 +107,7 @@ impl<'a> TrustEventsView<'a> {
     /// (and any sibling helper) that needs to issue read queries against
     /// the same materialized rows.
     #[must_use]
-    pub fn conn(&self) -> &Connection {
+    pub(crate) fn conn(&self) -> &Connection {
         self.conn
     }
 }

@@ -278,19 +278,30 @@ mod tests {
     fn open() -> (TempDir, rusqlite::Connection) {
         let dir = TempDir::new().unwrap();
         let conn = open_or_create(&dir.path().join("index.db")).unwrap();
+        crate::query::test_util::seed_bootstrap_chain(&conn);
         (dir, conn)
     }
 
     fn insert(conn: &rusqlite::Connection, id: &str, signed: bool) {
         let cr = if signed { "good" } else { "no-signature" };
+        let (signer_fp, trust_commit) = if signed {
+            (
+                Some(crate::query::test_util::TEST_BOOTSTRAP_FP),
+                Some(crate::query::test_util::TEST_TRUST_COMMIT),
+            )
+        } else {
+            (None, None)
+        };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, session_refs, files, commits, confidence, outcome, \
-             created, updated, content_hash, index_hash, crypto_result, indexed_at) \
+             created, updated, content_hash, index_hash, crypto_result, \
+             signer_fingerprint, relevant_trust_events_commit, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
                      '[]', '[]', '[]', 'medium', 'working', \
-                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?2, '2026-04-29T00:01:00Z')",
-            rusqlite::params![id, cr],
+                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?2, \
+                     ?3, ?4, '2026-04-29T00:01:00Z')",
+            rusqlite::params![id, cr, signer_fp, trust_commit],
         )
         .unwrap();
     }

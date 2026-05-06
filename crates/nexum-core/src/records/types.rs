@@ -307,7 +307,7 @@ impl SignatureStatus {
     /// invalid / unknown). The `records.signature_status` SQL column was
     /// dropped; this helper drives the API / wire path only — the read-time
     /// projection derives `SignatureStatus` from the cached `crypto_result`
-    /// column via [`crate::query::signature_status_for`].
+    /// column via [`crate::query::verify::project_trust`].
     #[must_use]
     pub fn as_db_str(self) -> &'static str {
         match self {

@@ -252,10 +252,7 @@ fn good_crypto_compromised_strict_projects_invalid_with_two_warnings() {
         true, // strict_revocation
     );
     assert_eq!(projected.signature_status, SignatureStatus::Invalid);
-    assert_eq!(
-        projected.trust_basis,
-        Some(TrustBasis::RotatedHistoricalCompromised)
-    );
+    assert_eq!(projected.trust_basis, None);
     assert_eq!(
         projected.warnings,
         vec![

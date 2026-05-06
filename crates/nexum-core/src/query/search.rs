@@ -329,19 +329,28 @@ mod tests {
         let path = dir.path().join("index.db");
         let conn =
             crate::indexer::db::open_or_create(&path).expect("open_or_create with full schema");
+        crate::query::test_util::seed_bootstrap_chain(&conn);
         (dir, conn)
     }
 
     fn insert_minimal(conn: &Connection, id: &str, title: &str, body: &str, signed: bool) {
         let cr = if signed { "good" } else { "no-signature" };
+        let (signer_fp, trust_commit) = if signed {
+            (
+                Some(crate::query::test_util::TEST_BOOTSTRAP_FP),
+                Some(crate::query::test_util::TEST_TRUST_COMMIT),
+            )
+        } else {
+            (None, None)
+        };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
              tags_fts, agent, confidence, outcome, created, updated, content_hash, index_hash, \
-             crypto_result, indexed_at) \
+             crypto_result, signer_fingerprint, relevant_trust_events_commit, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?2, ?3, '[]', '', \
                      'manual', 'medium', 'working', \
-                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, '2026-04-29T00:00:00Z')",
-            rusqlite::params![id, title, body, cr],
+                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, ?5, ?6, '2026-04-29T00:00:00Z')",
+            rusqlite::params![id, title, body, cr, signer_fp, trust_commit],
         )
         .unwrap();
     }

@@ -57,8 +57,11 @@ pub struct Filters {
     /// excluded regardless of policy.
     #[serde(default)]
     pub require_signed: bool,
-    /// Future-compat pass-through — the trust state machine isn't wired
-    /// up yet, so this currently has no effect.
+    /// When set, records signed by a key the chain now records as
+    /// compromised project to `Invalid` (carrying both the
+    /// `signed-by-compromised-key` and `strict-revocation-active`
+    /// warnings) instead of the default `Verified` with a warning. Other
+    /// branches of the read-time projection are unaffected.
     #[serde(default)]
     pub strict_revocation: bool,
     /// When true, suppress the unsigned-content ranking penalty (×0.7).
