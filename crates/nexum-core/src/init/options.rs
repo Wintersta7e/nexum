@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Options for `nexum init`, populated from CLI flags.
 #[derive(Debug, Clone)]
 pub struct InitOpts {
-    /// Override path to the SSH private key (§8 step 2).
+    /// Override path to the SSH private key.
     pub ssh_key: Option<PathBuf>,
     /// Override the nexum root directory (default: `~/.nexum/`).
     pub root: Option<PathBuf>,

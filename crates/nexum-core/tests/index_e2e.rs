@@ -8,6 +8,7 @@ use nexum_core::{
     api,
     indexer::db::open_or_create,
     indexer::run::run as indexer_run,
+    paths::Paths,
     query::{Filters, GetOpts, SearchOpts, SessionLookup},
     records::{GetOutcome, RecordKey, TrustPolicy},
 };
@@ -45,8 +46,9 @@ fn full_pass_indexes_cc_fixtures_local_yaml_and_runs_search() {
     let opts = GetOpts {
         include_unsigned: false,
         trust_policy: TrustPolicy::WarnButShow,
+        strict_revocation: false,
     };
-    let outcome = api::get(&paths, &RecordKey::bare("alpha"), &opts).unwrap();
+    let outcome = api::get(&paths, &cfg, &RecordKey::bare("alpha"), &opts).unwrap();
     let GetOutcome::Found(r) = outcome else {
         panic!("expected Found")
     };
@@ -93,7 +95,7 @@ fn by_session_finds_cc_fixture_session_referenced_record() {
     let lookup = SessionLookup::CcSession {
         uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
     };
-    let rs = api::by_session(&paths, &cfg, &lookup).unwrap();
+    let rs = api::by_session(&paths, &cfg, &Filters::default(), &lookup).unwrap();
     assert!(
         !rs.results.is_empty(),
         "expected at least one record referencing the fixture session"
@@ -189,4 +191,123 @@ fn tag_change_alone_triggers_reindex() {
         content_hash_v1, content_hash_v2,
         "content_hash must NOT change when only tags change"
     );
+}
+
+#[test]
+fn verified_local_record_persists_signer_fingerprint_and_crypto_result() {
+    // End-to-end smoke for verifier-provenance scaffolding:
+    //   1. `nexum init` brings up `notebook.git` with a signed bootstrap
+    //      commit and `.trust/historical_signers`.
+    //   2. We add a record YAML and commit it under the same SSH key, so
+    //      `git log -1 -- <path>` resolves to a signed commit verifiable
+    //      against `historical_signers`.
+    //   3. The indexer runs and the local adapter populates
+    //      `record_commit_sha`, `signer_fingerprint`, and
+    //      `crypto_result = 'good'` for that row.
+    use common::write_ephemeral_keypair;
+    use nexum_core::init::{InitOpts, git_ops::git_commit_signed, run as init_run};
+
+    let home = NexumTestHome::new().unwrap();
+    let key_dir = tempfile::tempdir().unwrap();
+    let priv_path = write_ephemeral_keypair(key_dir.path());
+    let init_outcome = init_run(InitOpts {
+        ssh_key: Some(priv_path),
+        root: Some(home.path().join(".nexum")),
+        force: false,
+    })
+    .expect("init must succeed");
+    let nb = init_outcome.root.join("notebook.git");
+
+    // Write a local-format YAML record under decisions/ and commit it
+    // signed. Signing config was applied to the repo by `init::run`, so
+    // `git_commit_signed` produces a signed commit verifiable against
+    // historical_signers.
+    let record_id = "verified-record";
+    let yaml_rel = std::path::PathBuf::from("decisions").join(format!("{record_id}.yml"));
+    let abs = nb.join(&yaml_rel);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(
+        &abs,
+        format!(
+            "schema_version: 1\nid: {record_id}\nrecord_type: decision\n\
+             title: signed record title\nbody: |\n  signed body\n\
+             project_id: example\ntags: []\nagent: manual\n\
+             created: 2026-04-29T00:00:00Z\nupdated: 2026-04-29T00:00:00Z\n\
+             confidence: high\noutcome: working\n"
+        ),
+    )
+    .unwrap();
+    git_commit_signed(&nb, &[&yaml_rel], "add: signed record").expect("signed commit");
+
+    let paths = Paths::with_home(init_outcome.root.clone());
+    let cfg = common::test_cfg_local_only();
+    let mut conn = open_or_create(&paths.index_db).unwrap();
+    indexer_run(&mut conn, &cfg, &paths).unwrap();
+
+    let (crypto, fp, sha): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT crypto_result, signer_fingerprint, record_commit_sha \
+             FROM records WHERE id = ?1",
+            [record_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        crypto, "good",
+        "verified row must record crypto_result=good"
+    );
+    assert!(
+        fp.as_deref()
+            .is_some_and(|s| s.starts_with("SHA256:") || !s.is_empty()),
+        "verified row must capture a signer fingerprint, got {fp:?}"
+    );
+    assert!(
+        sha.as_deref().is_some_and(|s| s.len() == 40),
+        "verified row must capture a 40-char commit SHA, got {sha:?}"
+    );
+}
+
+#[test]
+fn cc_records_leave_provenance_columns_null() {
+    // The cc / codex adapters do not track notebook-git provenance, so
+    // every row they ingest should have NULL in the four verifier columns.
+    let home = NexumTestHome::new().unwrap();
+    let paths = home.paths();
+    std::fs::create_dir_all(home.path().join("notebook.git")).unwrap();
+    let memories_temp = tempfile::TempDir::new().unwrap();
+    let cfg = common::test_cfg_with_fixtures(memories_temp.path());
+    let mut conn = open_or_create(&paths.index_db).unwrap();
+    indexer_run(&mut conn, &cfg, &paths).unwrap();
+
+    // Count CC rows where any verifier-provenance column carries non-default
+    // data -- expectation: zero. The remaining persisted verifier columns
+    // after the schema reshape are `record_commit_sha` and
+    // `signer_fingerprint` (both NULL for cc-native rows) plus
+    // `crypto_result` (which CC rows tag with `'no-signature'` since they
+    // have no notebook commit to verify).
+    let mut stmt = conn
+        .prepare(
+            "SELECT count(*) FROM records \
+             WHERE source = 'cc-native' \
+               AND (record_commit_sha IS NOT NULL \
+                 OR signer_fingerprint IS NOT NULL \
+                 OR crypto_result <> 'no-signature')",
+        )
+        .unwrap();
+    let leaks: i64 = stmt.query_row([], |r| r.get(0)).unwrap();
+    assert_eq!(
+        leaks, 0,
+        "cc-native rows must leave verifier-provenance columns at their NULL / no-signature defaults"
+    );
+
+    // Sanity: at least one CC row was actually indexed, so the assertion
+    // above isn't trivially satisfied by an empty table.
+    let cc_rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM records WHERE source = 'cc-native'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(cc_rows > 0, "expected at least one CC fixture row");
 }

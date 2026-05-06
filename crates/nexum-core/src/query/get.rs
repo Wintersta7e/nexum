@@ -11,11 +11,13 @@ use rusqlite::{Connection, Row, ToSql};
 use serde::{Deserialize, Serialize};
 
 use crate::records::{
-    Agent, Confidence, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey, RecordType,
-    SessionRef, SignatureStatus, Source, TrustBasis, TrustPolicy, UnifiedRecord,
+    Agent, Confidence, CryptoResult, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey,
+    RecordType, SessionRef, Source, TrustPolicy, UnifiedRecord,
 };
 
+use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::QueryError;
+use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
 /// `get` options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +29,13 @@ pub struct GetOpts {
     /// AND `include_unsigned == false`, an unverified record is returned
     /// as `GetOutcome::HiddenByPolicy`.
     pub trust_policy: TrustPolicy,
+    /// Mirrors `[trust] strict_revocation` from `config.toml`. When `true`,
+    /// records signed by a key that has since been marked compromised
+    /// project as `Invalid` (with both `signed-by-compromised-key` and
+    /// `strict-revocation-active` warnings). The api facade fills this from
+    /// `cfg.trust.strict_revocation`.
+    #[serde(default)]
+    pub strict_revocation: bool,
 }
 
 impl Default for GetOpts {
@@ -34,6 +43,7 @@ impl Default for GetOpts {
         Self {
             include_unsigned: false,
             trust_policy: TrustPolicy::WarnButShow,
+            strict_revocation: false,
         }
     }
 }
@@ -52,8 +62,9 @@ impl Default for GetOpts {
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure,
-/// `QueryError::Json` on JSON column deserialization failure, or
-/// `QueryError::Ambiguous` when the key under-specifies and matches >1 row.
+/// `QueryError::Json` on JSON column deserialization failure,
+/// `QueryError::Ambiguous` when the key under-specifies and matches >1 row,
+/// or `QueryError::Trust` if the chain-state hydration fails.
 pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome, QueryError> {
     let mut candidates = fetch_candidates(conn, key)?;
 
@@ -67,24 +78,51 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
             .collect();
         return Err(QueryError::Ambiguous { matches });
     }
-    // Exactly one candidate — apply hide-policy then materialize.
+    // Exactly one candidate — project trust then apply policy.
     let raw = candidates.swap_remove(0);
-    let signature_status = SignatureStatus::from_db_str(&raw.signature_status);
-    if opts.trust_policy == TrustPolicy::Hide
-        && !opts.include_unsigned
-        && signature_status != SignatureStatus::Verified
-    {
-        return Ok(GetOutcome::HiddenByPolicy { signature_status });
+    let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
+    let ctx = ProjectionContext::new(conn)?;
+    let mut projected =
+        ctx.project_rows(vec![raw], opts.strict_revocation, |raw| CachedCrypto {
+            crypto_result,
+            signer_fingerprint: raw.signer_fingerprint.as_deref(),
+            commit_sha: raw.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+        })?;
+    let (raw, projected) = projected.swap_remove(0);
+
+    // `include_unsigned` is the per-call escape hatch for agents that
+    // need to inspect a record regardless of trust state. When set, we
+    // bypass the centralized policy filter and surface the full
+    // projection.
+    if opts.include_unsigned {
+        return build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)));
     }
-    build_record(raw, signature_status).map(|r| GetOutcome::Found(Box::new(r)))
+
+    // Route the single row through the same warn/hide/strict policy
+    // helper that the listing verbs use, then translate the policy
+    // outcome into the `Found` / `HiddenByPolicy` variants.
+    let policy_opts = PolicyOpts {
+        policy: opts.trust_policy,
+        require_signed: false,
+    };
+    let signature_status = projected.signature_status;
+    let outcome = apply_policy(vec![(raw, projected)], policy_opts, |row| &row.1);
+    match outcome.visible.into_iter().next() {
+        Some((raw, projected)) => {
+            build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))
+        }
+        None => Ok(GetOutcome::HiddenByPolicy { signature_status }),
+    }
 }
 
 /// Run the appropriate `SELECT` for the key shape and collect the rows.
 fn fetch_candidates(conn: &Connection, key: &RecordKey) -> Result<Vec<RawRow>, QueryError> {
     const COLUMNS: &str = "id, source, project_id, record_type, title, summary, body, \
                            body_origin_path, tags, confidence, outcome, agent, session_refs, \
-                           files, commits, created, updated, content_hash, signature_status, \
-                           extras";
+                           files, commits, created, updated, content_hash, crypto_result, \
+                           extras, record_commit_sha, signer_fingerprint, \
+                           relevant_trust_events_commit";
 
     let (where_clause, params): (&str, Vec<Box<dyn ToSql>>) =
         match (key.source, key.project_id.as_deref()) {
@@ -138,20 +176,19 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
         created: r.get::<_, String>(15)?,
         updated: r.get::<_, String>(16)?,
         content_hash: r.get(17)?,
-        signature_status: r.get::<_, String>(18)?,
+        crypto_result: r.get::<_, String>(18)?,
         extras: r.get::<_, Option<String>>(19)?,
+        record_commit_sha: r.get::<_, Option<String>>(20)?,
+        signer_fingerprint: r.get::<_, Option<String>>(21)?,
+        relevant_trust_events_commit: r.get::<_, Option<String>>(22)?,
     })
 }
 
 fn build_record(
     raw: RawRow,
-    signature_status: SignatureStatus,
+    crypto_result: CryptoResult,
+    projected: ProjectedTrust,
 ) -> Result<UnifiedRecord, QueryError> {
-    let trust_basis = if signature_status == SignatureStatus::Verified {
-        Some(TrustBasis::Current)
-    } else {
-        None
-    };
     let extras: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(raw.extras.as_deref().unwrap_or("{}"))?;
     let tags: Vec<String> = serde_json::from_str(&raw.tags)?;
@@ -201,10 +238,14 @@ fn build_record(
         outcome,
         provenance: Provenance {
             source,
-            signature_status,
-            trust_basis,
+            signature_status: projected.signature_status,
             extractor: None,
             digest_hash: None,
+            record_commit_sha: raw.record_commit_sha,
+            signer_fingerprint: raw.signer_fingerprint,
+            crypto_result,
+            relevant_trust_events_commit: raw.relevant_trust_events_commit,
+            warnings: projected.warnings,
         },
         extras,
         content_hash: raw.content_hash,
@@ -231,32 +272,47 @@ struct RawRow {
     created: String,
     updated: String,
     content_hash: String,
-    signature_status: String,
+    /// `records.crypto_result` SQL column.
+    crypto_result: String,
     extras: Option<String>,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// Forwarded into [`CachedCrypto`] for the read-time projection and onto
+    /// `Provenance::relevant_trust_events_commit` for downstream consumers.
+    relevant_trust_events_commit: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::db::open_or_create;
-    use tempfile::TempDir;
+    use crate::query::test_util::open_test_db_with_seeded_chain;
+    use crate::records::SignatureStatus;
 
-    fn open() -> (TempDir, rusqlite::Connection) {
-        let dir = TempDir::new().unwrap();
-        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
-        (dir, conn)
+    fn open() -> (tempfile::TempDir, rusqlite::Connection) {
+        open_test_db_with_seeded_chain()
     }
 
     fn insert(conn: &rusqlite::Connection, id: &str, signed: bool) {
-        let sig = if signed { "verified" } else { "unsigned" };
+        let cr = if signed { "good" } else { "no-signature" };
+        let (signer_fp, trust_commit) = if signed {
+            (
+                Some(crate::query::test_util::TEST_BOOTSTRAP_FP),
+                Some(crate::query::test_util::TEST_TRUST_COMMIT),
+            )
+        } else {
+            (None, None)
+        };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, \
-             created, updated, content_hash, index_hash, signature_status, indexed_at) \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, \
+             created, updated, content_hash, index_hash, crypto_result, \
+             signer_fingerprint, relevant_trust_events_commit, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
-                     '[]', '[]', '[]', 'medium', \
-                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?2, '2026-04-29T00:01:00Z')",
-            rusqlite::params![id, sig],
+                     '[]', '[]', '[]', 'medium', 'working', \
+                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?2, \
+                     ?3, ?4, '2026-04-29T00:01:00Z')",
+            rusqlite::params![id, cr, signer_fp, trust_commit],
         )
         .unwrap();
     }
@@ -278,6 +334,7 @@ mod tests {
             &GetOpts {
                 include_unsigned: false,
                 trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
             },
         )
         .unwrap();
@@ -295,6 +352,7 @@ mod tests {
         let hide_default = GetOpts {
             include_unsigned: false,
             trust_policy: TrustPolicy::Hide,
+            strict_revocation: false,
         };
         assert!(matches!(
             get(&conn, &RecordKey::bare("u"), &hide_default).unwrap(),
@@ -305,6 +363,7 @@ mod tests {
         let hide_override = GetOpts {
             include_unsigned: true,
             trust_policy: TrustPolicy::Hide,
+            strict_revocation: false,
         };
         assert!(matches!(
             get(&conn, &RecordKey::bare("u"), &hide_override).unwrap(),
@@ -322,6 +381,7 @@ mod tests {
             &GetOpts {
                 include_unsigned: false,
                 trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
             },
         )
         .unwrap();
@@ -334,14 +394,14 @@ mod tests {
         // Two rows with the same id, different sources.
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              ('shared', 'local', 'p', 'decision', 'shared', '', '[]', '', 'manual', \
-              '[]', '[]', '[]', 'medium', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
-              'h', 'ih', 'verified', '2026-04-29T00:01:00Z'), \
+              '[]', '[]', '[]', 'medium', 'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
+              'h', 'ih', 'good', '2026-04-29T00:01:00Z'), \
              ('shared', 'cc-native', 'p', 'decision', 'shared', '', '[]', '', 'manual', \
-              '[]', '[]', '[]', 'medium', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
-              'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              '[]', '[]', '[]', 'medium', 'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
+              'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

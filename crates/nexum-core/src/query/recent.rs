@@ -12,13 +12,19 @@ use crate::records::{Source, TrustPolicy};
 /// Recently-updated records.
 ///
 /// `trust_policy` is forwarded into [`list`] so the response envelope's
-/// `_meta.trust_policy` reflects the runtime configuration.
+/// `_meta.trust_policy` reflects the runtime configuration. The
+/// strict-revocation overlay rides on [`Filters::strict_revocation`] (the
+/// caller may also seed [`Filters::require_signed`] for stricter
+/// shape-equivalence with `list`); the api facade fills both from
+/// `cfg.trust.*`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
-/// `QueryError::InvalidFilter` if `source` is unrecognized.
+/// `QueryError::InvalidFilter` if `source` is unrecognized;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn recent(
     conn: &Connection,
+    filters: &Filters,
     trust_policy: TrustPolicy,
     limit: u32,
     source: Option<&str>,
@@ -34,38 +40,43 @@ pub fn recent(
             })
         })
         .transpose()?;
-    let filters = Filters {
-        source: source_filter,
-        ..Filters::default()
-    };
-    list(conn, &filters, trust_policy, limit, None)
+    let mut effective = filters.clone();
+    effective.source = source_filter;
+    list(conn, &effective, trust_policy, limit, None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::db::open_or_create;
-    use tempfile::TempDir;
-
-    fn open() -> (TempDir, rusqlite::Connection) {
-        let dir = TempDir::new().unwrap();
-        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
-        (dir, conn)
-    }
+    use crate::query::test_util::open_test_db_with_seeded_chain;
 
     #[test]
     fn unknown_source_yields_invalid_filter() {
-        let (_dir, conn) = open();
-        let err = recent(&conn, TrustPolicy::WarnButShow, 10, Some("not-a-source")).unwrap_err();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
+        let err = recent(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            10,
+            Some("not-a-source"),
+        )
+        .unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
     }
 
     #[test]
     fn trust_policy_round_trips_into_meta() {
-        let (_dir, conn) = open();
-        let rs = recent(&conn, TrustPolicy::WarnButShow, 10, None).unwrap();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
+        let rs = recent(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::WarnButShow);
-        let rs = recent(&conn, TrustPolicy::Hide, 10, None).unwrap();
+        let rs = recent(&conn, &Filters::default(), TrustPolicy::Hide, 10, None).unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
     }
 
@@ -73,7 +84,7 @@ mod tests {
     fn recent_with_hide_filters_and_counts_hidden() {
         let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
         // 3 verified, 2 unsigned, 1 invalid in the fixture.
-        let rs = recent(&conn, TrustPolicy::Hide, 100, None).unwrap();
+        let rs = recent(&conn, &Filters::default(), TrustPolicy::Hide, 100, None).unwrap();
         assert_eq!(
             rs.results.len(),
             3,
@@ -86,19 +97,26 @@ mod tests {
 
     #[test]
     fn recent_with_no_source_returns_all() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
-             ('a','local','p','decision','x','','[]','','manual','[]','[]','[]','medium', \
-              '2026-04-01T00:00:00Z','2026-04-01T00:00:00Z','h','ih','unsigned','2026-04-29T00:00:00Z'), \
-             ('b','cc-native','p','decision','y','','[]','','claude-code','[]','[]','[]','medium', \
-              '2026-04-02T00:00:00Z','2026-04-02T00:00:00Z','h','ih','unsigned','2026-04-29T00:00:00Z')",
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
+             ('a','local','p','decision','x','','[]','','manual','[]','[]','[]','medium','working', \
+              '2026-04-01T00:00:00Z','2026-04-01T00:00:00Z','h','ih','no-signature','2026-04-29T00:00:00Z'), \
+             ('b','cc-native','p','decision','y','','[]','','claude-code','[]','[]','[]','medium','working', \
+              '2026-04-02T00:00:00Z','2026-04-02T00:00:00Z','h','ih','no-signature','2026-04-29T00:00:00Z')",
             [],
         )
         .unwrap();
-        let rs = recent(&conn, TrustPolicy::WarnButShow, 10, None).unwrap();
+        let rs = recent(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs.results.len(), 2);
     }
 }

@@ -182,11 +182,70 @@ fn run_inner(
     }
     if let Some(pass) = local_pass {
         let notebook_for_read = paths.notebook_git.clone();
+        // Materialize the trust-events view before the upsert pass so the
+        // crypto batch's per-commit `relevant_trust_events_commit` lookups
+        // see a fresh view. Skipped when `notebook_git` isn't a real git
+        // repo — test fixtures use fake paths and there's no trust state
+        // to materialize anyway.
+        if paths.notebook_git.join(".git").exists() {
+            crate::trust::events_view::ensure_current(conn, &paths.notebook_git)?;
+        }
+        // Per-commit verify cache. The `read_full` callback below
+        // populates it lazily — one verify shell-out per unique record
+        // commit. Wrapped in `RefCell` so the `Fn` closure required by
+        // `apply_pass` can mutate it. Verify failures fall back to a
+        // conservative `BadSignature` outcome (the spec routes
+        // unrecognized verifier results through the invalid bucket so the
+        // warning fires; a silent drop to `NoSignature` would underclaim).
+        let crypto_cache: std::cell::RefCell<
+            std::collections::HashMap<String, crate::indexer::crypto_batch::CryptoOutcome>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+        // Hoist the adapter out of the closure: each `read` already
+        // re-walks the local subdirs internally, so constructing a
+        // fresh adapter per id added an O(N) churn that the cache
+        // could not amortize.
+        let local_adapter = LocalAdapter::new(notebook_for_read.clone());
         apply_pass(
             conn,
             Source::Local,
             &pass,
-            |id| LocalAdapter::new(notebook_for_read.clone()).read(id).ok(),
+            |id| {
+                let mut record = local_adapter.read(id).ok()?;
+                let Some(sha) = record.provenance.record_commit_sha.clone() else {
+                    // Record's path is not in git history — leave the
+                    // adapter's placeholder Provenance and proceed.
+                    return Some(record);
+                };
+                let outcome = {
+                    let mut cache = crypto_cache.borrow_mut();
+                    if let Some(hit) = cache.get(&sha) {
+                        hit.clone()
+                    } else {
+                        let resolved = match crate::indexer::crypto_batch::verify_and_resolve(
+                            &notebook_for_read,
+                            &sha,
+                        ) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    sha = %sha,
+                                    "verify shell-out failed; persisting record as BadSignature",
+                                );
+                                crate::indexer::crypto_batch::CryptoOutcome::bad_signature_fallback(
+                                )
+                            }
+                        };
+                        cache.insert(sha.clone(), resolved.clone());
+                        resolved
+                    }
+                };
+                record.provenance.crypto_result = outcome.crypto_result;
+                record.provenance.signer_fingerprint = outcome.signer_fingerprint;
+                record.provenance.relevant_trust_events_commit =
+                    outcome.relevant_trust_events_commit;
+                Some(record)
+            },
             force,
             &mut outcome,
         )?;
@@ -521,22 +580,54 @@ fn apply_deletes(
     Ok(())
 }
 
+/// Flattened, JSON-serialized form of a `UnifiedRecord` ready for binding
+/// against the records table. Centralizes the per-row prep so `upsert` can
+/// hand the same row off to either the INSERT or the UPDATE path without
+/// duplicating the column ordering.
+struct UpsertRow<'a> {
+    tags_json: String,
+    tags_fts: String,
+    session_refs_json: String,
+    files_json: String,
+    commits_json: String,
+    extras_json: String,
+    body_origin_path: Option<String>,
+    now: String,
+    /// Encoded for the `records.crypto_result` SQL column (one of
+    /// `good` / `bad-signature` / `unknown-signer` / `no-signature`).
+    crypto_result: &'a str,
+    record_commit_sha: Option<&'a str>,
+    signer_fingerprint: Option<&'a str>,
+}
+
+impl<'a> UpsertRow<'a> {
+    fn from_record(r: &'a UnifiedRecord) -> Self {
+        let tags_json = serde_json::to_string(&r.tags).expect("serializable record fields");
+        let tags_fts = normalize_tags_for_fts(&tags_json);
+        Self {
+            tags_json,
+            tags_fts,
+            session_refs_json: serde_json::to_string(&r.session_refs)
+                .expect("serializable record fields"),
+            files_json: serde_json::to_string(&r.files).expect("serializable record fields"),
+            commits_json: serde_json::to_string(&r.commits).expect("serializable record fields"),
+            extras_json: serde_json::to_string(&r.extras).expect("serializable record fields"),
+            body_origin_path: r.body_origin_path.as_ref().map(|p| p.display().to_string()),
+            now: Utc::now().to_rfc3339(),
+            crypto_result: r.provenance.crypto_result.as_db_str(),
+            record_commit_sha: r.provenance.record_commit_sha.as_deref(),
+            signer_fingerprint: r.provenance.signer_fingerprint.as_deref(),
+        }
+    }
+}
+
 fn upsert(
     tx: &Transaction<'_>,
     source: Source,
     r: &UnifiedRecord,
     index_hash: &str,
 ) -> Result<(), IndexerError> {
-    let tags_json = serde_json::to_string(&r.tags).expect("serializable record fields");
-    let tags_fts = normalize_tags_for_fts(&tags_json);
-    let session_refs_json =
-        serde_json::to_string(&r.session_refs).expect("serializable record fields");
-    let files_json = serde_json::to_string(&r.files).expect("serializable record fields");
-    let commits_json = serde_json::to_string(&r.commits).expect("serializable record fields");
-    let extras_json = serde_json::to_string(&r.extras).expect("serializable record fields");
-    let now = Utc::now().to_rfc3339();
-    let signature_status = r.provenance.signature_status.as_db_str();
-    let body_origin_path = r.body_origin_path.as_ref().map(|p| p.display().to_string());
+    let row = UpsertRow::from_record(r);
 
     // Look up rowid by composite (source, project_id, id) — the natural
     // identity. If a row exists we mirror the vec0-before-records ordering
@@ -557,72 +648,99 @@ fn upsert(
             "DELETE FROM record_embeddings WHERE record_rowid = ?1",
             params![rid],
         )?;
-        tx.execute(
-            "UPDATE records SET record_type = ?1, title = ?2, \
-             summary = ?3, body = ?4, body_origin_path = ?5, tags = ?6, tags_fts = ?7, \
-             confidence = ?8, outcome = ?9, agent = ?10, session_refs = ?11, files = ?12, \
-             commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
-             index_hash = ?17, signature_status = ?18, extras = ?19, indexed_at = ?20 \
-             WHERE rowid = ?21",
-            params![
-                r.record_type.as_db_str(),
-                r.title,
-                r.summary,
-                r.body,
-                body_origin_path,
-                tags_json,
-                tags_fts,
-                r.confidence.as_db_str(),
-                r.outcome.as_db_str(),
-                r.agent.as_db_str(),
-                session_refs_json,
-                files_json,
-                commits_json,
-                r.created.to_rfc3339(),
-                r.updated.to_rfc3339(),
-                r.content_hash,
-                index_hash,
-                signature_status,
-                extras_json,
-                now,
-                rid,
-            ],
-        )?;
+        update_record(tx, r, index_hash, &row, rid)?;
     } else {
-        tx.execute(
-            "INSERT INTO records (id, source, project_id, record_type, title, summary, body, \
-             body_origin_path, tags, tags_fts, confidence, outcome, agent, session_refs, \
-             files, commits, created, updated, content_hash, index_hash, signature_status, \
-             extras, indexed_at) VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-              ?19, ?20, ?21, ?22, ?23)",
-            params![
-                r.id,
-                source.as_db_str(),
-                r.project_id,
-                r.record_type.as_db_str(),
-                r.title,
-                r.summary,
-                r.body,
-                body_origin_path,
-                tags_json,
-                tags_fts,
-                r.confidence.as_db_str(),
-                r.outcome.as_db_str(),
-                r.agent.as_db_str(),
-                session_refs_json,
-                files_json,
-                commits_json,
-                r.created.to_rfc3339(),
-                r.updated.to_rfc3339(),
-                r.content_hash,
-                index_hash,
-                signature_status,
-                extras_json,
-                now,
-            ],
-        )?;
+        insert_record(tx, source, r, index_hash, &row)?;
     }
+    Ok(())
+}
+
+fn update_record(
+    tx: &Transaction<'_>,
+    r: &UnifiedRecord,
+    index_hash: &str,
+    row: &UpsertRow<'_>,
+    rid: i64,
+) -> Result<(), IndexerError> {
+    tx.execute(
+        "UPDATE records SET record_type = ?1, title = ?2, \
+         summary = ?3, body = ?4, body_origin_path = ?5, tags = ?6, tags_fts = ?7, \
+         confidence = ?8, outcome = ?9, agent = ?10, session_refs = ?11, files = ?12, \
+         commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
+         index_hash = ?17, crypto_result = ?18, extras = ?19, indexed_at = ?20, \
+         record_commit_sha = ?22, signer_fingerprint = ?23 \
+         WHERE rowid = ?21",
+        params![
+            r.record_type.as_db_str(),
+            r.title,
+            r.summary,
+            r.body,
+            row.body_origin_path,
+            row.tags_json,
+            row.tags_fts,
+            r.confidence.as_db_str(),
+            r.outcome.as_db_str(),
+            r.agent.as_db_str(),
+            row.session_refs_json,
+            row.files_json,
+            row.commits_json,
+            r.created.to_rfc3339(),
+            r.updated.to_rfc3339(),
+            r.content_hash,
+            index_hash,
+            row.crypto_result,
+            row.extras_json,
+            row.now,
+            rid,
+            row.record_commit_sha,
+            row.signer_fingerprint,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_record(
+    tx: &Transaction<'_>,
+    source: Source,
+    r: &UnifiedRecord,
+    index_hash: &str,
+    row: &UpsertRow<'_>,
+) -> Result<(), IndexerError> {
+    tx.execute(
+        "INSERT INTO records (id, source, project_id, record_type, title, summary, body, \
+         body_origin_path, tags, tags_fts, confidence, outcome, agent, session_refs, \
+         files, commits, created, updated, content_hash, index_hash, crypto_result, \
+         extras, indexed_at, record_commit_sha, signer_fingerprint) VALUES \
+         (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
+          ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+        params![
+            r.id,
+            source.as_db_str(),
+            r.project_id,
+            r.record_type.as_db_str(),
+            r.title,
+            r.summary,
+            r.body,
+            row.body_origin_path,
+            row.tags_json,
+            row.tags_fts,
+            r.confidence.as_db_str(),
+            r.outcome.as_db_str(),
+            r.agent.as_db_str(),
+            row.session_refs_json,
+            row.files_json,
+            row.commits_json,
+            r.created.to_rfc3339(),
+            r.updated.to_rfc3339(),
+            r.content_hash,
+            index_hash,
+            row.crypto_result,
+            row.extras_json,
+            row.now,
+            row.record_commit_sha,
+            row.signer_fingerprint,
+        ],
+    )?;
     Ok(())
 }
 

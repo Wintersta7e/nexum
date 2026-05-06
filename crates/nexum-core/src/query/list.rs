@@ -4,10 +4,12 @@
 use rusqlite::Connection;
 
 use super::{
+    policy::{PolicyOpts, apply as apply_policy},
     search::build_filter_sql,
     types::{Filters, QueryError, ResultSet, SearchResult},
+    verify::{CachedCrypto, ProjectedTrust, ProjectionContext},
 };
-use crate::records::{RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
+use crate::records::{CryptoResult, RecordType, Source, TrustPolicy};
 
 /// Sentinel used in the keyset compare when no cursor is supplied. Any
 /// `updated` string (RFC3339 timestamp) compares strictly less than this
@@ -26,11 +28,14 @@ const CURSOR_SENTINEL_UPDATED: &str = "9999-12-31T23:59:59Z";
 ///
 /// `trust_policy` is passed through verbatim into the response envelope so
 /// the `_meta.trust_policy` field accurately reflects the runtime
-/// `[trust] unsigned_default` setting.
+/// `[trust] unsigned_default` setting. The strict-revocation overlay
+/// rides on [`Filters::strict_revocation`]; the api facade fills it from
+/// `cfg.trust.strict_revocation`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
-/// `QueryError::InvalidFilter` if the cursor is malformed.
+/// `QueryError::InvalidFilter` if the cursor is malformed;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn list(
     conn: &Connection,
     filters: &Filters,
@@ -64,7 +69,9 @@ pub fn list(
 
     let sql = format!(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
-                records.source, records.project_id, records.signature_status, records.updated \
+                records.source, records.project_id, records.crypto_result, records.updated, \
+                records.record_commit_sha, records.signer_fingerprint, \
+                records.relevant_trust_events_commit \
          FROM records \
          WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
          ORDER BY records.updated DESC, records.rowid DESC \
@@ -72,88 +79,124 @@ pub fn list(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?,
-                r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
-            ))
-        })?
+        .query_map(rusqlite::params_from_iter(params.iter()), row_to_raw)?
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut accumulated: Vec<(i64, SearchResult)> = Vec::new();
-    for (rowid, id, rt, title, summary, source, project_id, sig, updated) in rows {
-        let signature_status = SignatureStatus::from_db_str(&sig);
-        let trust_basis = if signature_status == SignatureStatus::Verified {
-            Some(TrustBasis::Current)
-        } else {
-            None
-        };
-        let mut warnings: Vec<String> = Vec::new();
-        if signature_status != SignatureStatus::Verified {
-            warnings.push("unsigned".into());
-        }
-        accumulated.push((
-            rowid,
-            SearchResult {
-                id,
-                record_type: RecordType::from_db_str(&rt),
-                title,
-                summary,
-                score: 0.0,
-                source: Source::from_db_str(&source),
-                project_id,
-                signature_status,
-                trust_basis,
-                warnings,
-                body: None,
-                updated,
-            },
-        ));
-    }
+    // Hydrate the chain once per verb invocation. Reused for every row's
+    // projection.
+    let ctx = ProjectionContext::new(conn)?;
 
-    // Drop the over-limit sentinel row so it does not leak into the
-    // results, then encode the cursor from the LAST RETURNED row's
-    // sort key. The next page asks for rows STRICTLY beyond that key
-    // (`(updated, rowid) < (cursor)`), which is the canonical keyset
-    // pagination invariant.
-    let over_limit = accumulated.len() > usize::try_from(limit).unwrap_or(0);
+    // Project every row up-front so the projected trust shape is
+    // available both for the policy filter and for materializing
+    // `SearchResult` items.
+    let mut projected_rows: Vec<(ListRow, ProjectedTrust)> =
+        ctx.project_rows(rows, filters.strict_revocation, |raw| CachedCrypto {
+            crypto_result: CryptoResult::from_db_str(&raw.crypto_result),
+            signer_fingerprint: raw.signer_fingerprint.as_deref(),
+            commit_sha: raw.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+        })?;
+
+    // Drop the over-limit sentinel row before policy filtering so the
+    // cursor is encoded from the last RETURNED row's sort key, regardless
+    // of whether that row would have been hidden by policy. The next page
+    // walks through the same projection + policy steps.
+    let over_limit = projected_rows.len() > usize::try_from(limit).unwrap_or(0);
     if over_limit {
-        accumulated.pop();
+        projected_rows.pop();
     }
     let next_cursor: Option<String> = if over_limit {
-        accumulated
+        projected_rows
             .last()
-            .map(|(rowid, r)| encode_cursor(&r.updated, *rowid))
+            .map(|(raw, _)| encode_cursor(&raw.updated, raw.rowid))
     } else {
         None
     };
-    let raw: Vec<SearchResult> = accumulated.into_iter().map(|(_, r)| r).collect();
-    // When the policy is Hide, strip unsigned and invalid records from the
-    // visible result set before building the meta envelope. The meta builder
-    // tallies hidden counts from the DB independently.
-    let results: Vec<SearchResult> = if trust_policy == TrustPolicy::Hide {
-        raw.into_iter()
-            .filter(|r| r.signature_status == SignatureStatus::Verified)
-            .collect()
-    } else {
-        raw
+
+    // Centralized warn/hide/strict policy filter.
+    let policy_opts = PolicyOpts {
+        policy: trust_policy,
+        require_signed: filters.require_signed,
     };
+    let mut outcome = apply_policy(projected_rows, policy_opts, |row| &row.1);
+
+    // Pluck the visible rows out so the policy bucket counters survive
+    // the rest of the `outcome` value being consumed via `meta.apply_*`.
+    let visible = std::mem::take(&mut outcome.visible);
+    let results: Vec<SearchResult> = visible
+        .into_iter()
+        .map(|(raw, projected)| row_to_search_result(raw, projected))
+        .collect();
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
-    let meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
+    let mut meta = super::meta::build_meta_listing(conn, trust_policy)?;
+    meta.apply_policy_outcome(&outcome);
     Ok(ResultSet {
         results,
         total_matched: total,
         next_cursor,
         meta,
     })
+}
+
+/// Raw column tuple read out of a `records` row in the list / recent SELECT.
+/// Mirrors the SELECT column order so `row_to_raw` stays a straight read.
+struct ListRow {
+    rowid: i64,
+    id: String,
+    record_type: String,
+    title: String,
+    summary: Option<String>,
+    source: String,
+    project_id: String,
+    /// `records.crypto_result` SQL column (one of `good` / `bad-signature` /
+    /// `unknown-signer` / `no-signature`).
+    crypto_result: String,
+    updated: String,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// Forwarded into [`CachedCrypto`] for the read-time projection.
+    relevant_trust_events_commit: Option<String>,
+}
+
+fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
+    Ok(ListRow {
+        rowid: r.get(0)?,
+        id: r.get(1)?,
+        record_type: r.get(2)?,
+        title: r.get(3)?,
+        summary: r.get(4)?,
+        source: r.get(5)?,
+        project_id: r.get(6)?,
+        crypto_result: r.get(7)?,
+        updated: r.get(8)?,
+        record_commit_sha: r.get(9)?,
+        signer_fingerprint: r.get(10)?,
+        relevant_trust_events_commit: r.get(11)?,
+    })
+}
+
+/// Materialize one (raw row, projected trust) pair into a `SearchResult`.
+/// Splits out of `list` so the verb stays under the strict-clippy
+/// `too-many-lines` threshold.
+fn row_to_search_result(raw: ListRow, projected: ProjectedTrust) -> SearchResult {
+    SearchResult {
+        id: raw.id,
+        record_type: RecordType::from_db_str(&raw.record_type),
+        title: raw.title,
+        summary: raw.summary,
+        score: 0.0,
+        source: Source::from_db_str(&raw.source),
+        project_id: raw.project_id,
+        signature_status: projected.signature_status,
+        trust_basis: projected.trust_basis,
+        record_commit_sha: raw.record_commit_sha,
+        signer_fingerprint: raw.signer_fingerprint,
+        warnings: projected.warnings,
+        body: None,
+        updated: raw.updated,
+    }
 }
 
 /// Encode the keyset pivot as an opaque cursor string.
@@ -175,23 +218,20 @@ fn decode_cursor(c: &str) -> Result<(String, i64), QueryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::db::open_or_create;
-    use tempfile::TempDir;
+    use crate::query::test_util::open_test_db_with_seeded_chain;
 
-    fn open() -> (TempDir, rusqlite::Connection) {
-        let dir = TempDir::new().unwrap();
-        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
-        (dir, conn)
+    fn open() -> (tempfile::TempDir, rusqlite::Connection) {
+        open_test_db_with_seeded_chain()
     }
 
     fn insert(conn: &rusqlite::Connection, id: &str, updated: &str) {
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, \
-             created, updated, content_hash, index_hash, signature_status, indexed_at) \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, \
+             created, updated, content_hash, index_hash, crypto_result, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?1, '', '[]', '', 'manual', \
-                     '[]', '[]', '[]', 'medium', \
-                     '2026-01-01T00:00:00Z', ?2, 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+                     '[]', '[]', '[]', 'medium', 'working', \
+                     '2026-01-01T00:00:00Z', ?2, 'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             rusqlite::params![id, updated],
         )
         .unwrap();
@@ -243,10 +283,10 @@ mod tests {
         // Insert a recommendation manually so the filter has a target.
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, agent, session_refs, files, commits, confidence, created, updated, \
-             content_hash, index_hash, signature_status, indexed_at) VALUES \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
              ('r1', 'local', 'p', 'recommendation', 't', '', '[]', '', 'manual', '[]', '[]', '[]', \
-              'medium', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'verified', '2026-04-29T00:01:00Z')",
+              'medium', 'proposed', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z', 'h', 'ih', 'good', '2026-04-29T00:01:00Z')",
             [],
         )
         .unwrap();

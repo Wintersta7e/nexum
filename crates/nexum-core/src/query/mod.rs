@@ -5,11 +5,13 @@ pub mod by_session;
 pub mod get;
 pub mod list;
 pub(crate) mod meta;
+pub(crate) mod policy;
 pub mod recent;
 pub mod search;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub mod types;
+pub mod verify;
 
 pub use by_session::{SessionLookup, by_session};
 pub use get::{GetOpts, get};

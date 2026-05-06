@@ -3,6 +3,7 @@
 
 use nexum_core::{
     api,
+    config::types::Config,
     indexer::db::open_or_create,
     query::{self, GetOpts},
     records::{GetOutcome, Source, TrustPolicy, types::RecordKey},
@@ -20,10 +21,10 @@ fn insert_minimal(conn: &Connection, id: &str, source: Source, project_id: &str)
     conn.execute(
         "INSERT INTO records (
             id, record_type, title, body, source, project_id,
-            agent, confidence, outcome, signature_status, tags, tags_fts,
+            agent, confidence, outcome, crypto_result, tags, tags_fts,
             session_refs, commits, files, created, updated, content_hash, index_hash, indexed_at
          ) VALUES (?1, 'decision', ?2, 'b', ?3, ?4,
-            'claude-code', 'medium', 'working', 'verified', '[]', '',
+            'claude-code', 'medium', 'working', 'good', '[]', '',
             '[]', '[]', '[]', '2026-05-04T00:00:00Z',
             '2026-05-04T00:00:00Z', 'h', 'ih', '2026-05-04T00:00:00Z')",
         rusqlite::params![id, format!("t-{id}"), source.as_db_str(), project_id],
@@ -69,10 +70,10 @@ fn same_source_project_id_triple_is_unique() {
     let result = conn.execute(
         "INSERT INTO records (
             id, record_type, title, body, source, project_id,
-            agent, confidence, outcome, signature_status, tags, tags_fts,
+            agent, confidence, outcome, crypto_result, tags, tags_fts,
             session_refs, commits, files, created, updated, content_hash, index_hash, indexed_at
          ) VALUES ('x', 'decision', 't', 'b', 'cc-native', 'git:p',
-            'claude-code', 'medium', 'working', 'verified', '[]', '',
+            'claude-code', 'medium', 'working', 'good', '[]', '',
             '[]', '[]', '[]', '2026-05-04T00:00:00Z',
             '2026-05-04T00:00:00Z', 'h', 'ih', '2026-05-04T00:00:00Z')",
         [],
@@ -88,6 +89,7 @@ fn get_by_bare_id_returns_ambiguous_when_multiple_match() {
     let opts = GetOpts {
         trust_policy: TrustPolicy::WarnButShow,
         include_unsigned: false,
+        strict_revocation: false,
     };
     let result = query::get(&conn, &RecordKey::bare("shared-id"), &opts);
     match result {
@@ -106,6 +108,7 @@ fn get_by_exact_key_returns_found() {
     let opts = GetOpts {
         trust_policy: TrustPolicy::WarnButShow,
         include_unsigned: false,
+        strict_revocation: false,
     };
     let key = RecordKey::exact(Source::CodexNative, "git:proj-a", "shared-id");
     let result = query::get(&conn, &key, &opts).unwrap();
@@ -119,6 +122,7 @@ fn get_by_bare_id_returns_found_when_unique() {
     let opts = GetOpts {
         trust_policy: TrustPolicy::WarnButShow,
         include_unsigned: false,
+        strict_revocation: false,
     };
     let result = query::get(&conn, &RecordKey::bare("uniq"), &opts).unwrap();
     assert!(matches!(result, GetOutcome::Found(_)));
@@ -136,7 +140,9 @@ fn api_get_round_trip_via_record_key() {
     let opts = GetOpts {
         include_unsigned: false,
         trust_policy: TrustPolicy::WarnButShow,
+        strict_revocation: false,
     };
-    let result = api::get(&paths, &RecordKey::bare("tau"), &opts).unwrap();
+    let cfg = Config::seed();
+    let result = api::get(&paths, &cfg, &RecordKey::bare("tau"), &opts).unwrap();
     assert!(matches!(result, GetOutcome::Found(_)));
 }

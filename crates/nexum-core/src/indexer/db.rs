@@ -22,6 +22,8 @@ pub enum IndexerError {
     Adapter(#[from] crate::adapter::AdapterError),
     #[error("config error: {0}")]
     Config(String),
+    #[error("trust error: {0}")]
+    Trust(#[from] crate::trust::events::TrustError),
 }
 
 /// Open an existing `index.db` for read-only access. Returns
@@ -44,16 +46,40 @@ pub enum IndexerError {
 /// is absent. Returns `QueryError::Rusqlite` on any rusqlite error
 /// after the file has been opened.
 pub fn open_existing(path: &Path) -> Result<Connection, crate::query::QueryError> {
+    open_existing_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+/// Open an existing index DB with read-write access. The no-create invariant
+/// (path-exists check + omitted `SQLITE_OPEN_CREATE`) is preserved.
+///
+/// Used by the api facade's read-verb entry point: read verbs run their SQL
+/// as logical reads, but the materializer (`events_view::ensure_current`)
+/// may rebuild `trust_events` on first read after a fresh init, which
+/// requires write access on the same connection.
+///
+/// # Errors
+/// Same shape as [`open_existing`].
+pub(crate) fn open_existing_writable(path: &Path) -> Result<Connection, crate::query::QueryError> {
+    open_existing_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+fn open_existing_with_flags(
+    path: &Path,
+    flags: rusqlite::OpenFlags,
+) -> Result<Connection, crate::query::QueryError> {
     if !path.exists() {
         return Err(crate::query::QueryError::IndexMissing {
             path: path.to_owned(),
         });
     }
     register_sqlite_vec_once();
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = Connection::open_with_flags(path, flags)?;
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     Ok(conn)
 }
@@ -80,14 +106,14 @@ pub fn open_or_create(path: &Path) -> Result<Connection, IndexerError> {
             source: e,
         })?;
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     let exists: i64 = conn.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='records'",
         [],
         |row| row.get(0),
     )?;
     if exists == 0 {
-        crate::index::schema::apply(&conn)?;
+        crate::index::schema::apply(&mut conn)?;
     } else {
         // Set pragmas on the open connection regardless (WAL is per-DB but
         // busy_timeout / foreign_keys are per-connection).
@@ -143,8 +169,8 @@ fn register_sqlite_vec_once() {
 #[cfg(test)]
 pub(crate) fn open_or_create_in_memory_for_tests() -> rusqlite::Connection {
     register_sqlite_vec_once();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    crate::index::schema::apply(&conn).unwrap();
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::index::schema::apply(&mut conn).unwrap();
     conn
 }
 
@@ -195,10 +221,11 @@ mod tests {
             let conn = open_or_create(&path).unwrap();
             conn.execute(
                 "INSERT INTO records (id, source, project_id, record_type, title, body, \
-                 tags, tags_fts, created, updated, content_hash, index_hash, signature_status, \
-                 indexed_at) VALUES \
+                 tags, tags_fts, agent, confidence, outcome, created, updated, content_hash, \
+                 index_hash, crypto_result, indexed_at) VALUES \
                  ('rec1', 'local', 'p', 'decision', 'titlec', '', '[]', '', \
-                  '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'hashc', 'ih', 'unsigned', \
+                  'manual', 'medium', 'working', \
+                  '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'hashc', 'ih', 'no-signature', \
                   '2026-04-29T00:01:00Z')",
                 [],
             )

@@ -1,9 +1,9 @@
-//! §13 project-identity resolution composer.
+//! Project-identity resolution composer.
 //!
-//! Walks the §13 precedence: `git_origin_url` → `registered_name` → `cwd`-based
-//! path identity → `CC` slug-decoded path candidates. Returns `Resolved` (one
-//! identity) or `Ambiguous` (multiple plausible identities, no higher-priority
-//! signal to pick) or `Unresolved` (no signal at all).
+//! Walks the resolution precedence: `git_origin_url` → `registered_name` →
+//! `cwd`-based path identity → `CC` slug-decoded path candidates. Returns
+//! `Resolved` (one identity) or `Ambiguous` (multiple plausible identities,
+//! no higher-priority signal to pick) or `Unresolved` (no signal at all).
 //!
 //! Ambiguous slugs MUST NOT auto-resolve. The resolver returns
 //! `ProjectResolution::Ambiguous` and lets the caller decide (typically: surface
@@ -16,7 +16,7 @@ use crate::project::{
 };
 use std::path::PathBuf;
 
-/// Resolve a `ProjectInput` to a `ProjectResolution` per the §13 precedence.
+/// Resolve a `ProjectInput` to a `ProjectResolution` following the precedence order.
 #[must_use]
 pub fn resolve(input: &ProjectInput) -> ProjectResolution {
     // Precedence 1: git_origin_url. Strongest signal — even if other inputs

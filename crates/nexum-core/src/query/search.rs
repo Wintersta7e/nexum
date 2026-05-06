@@ -3,9 +3,11 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::records::{Confidence, RecordType, SignatureStatus, Source, TrustBasis, TrustPolicy};
+use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
 
+use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
+use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
 /// `search` options. Compose via `SearchOpts::new(query)` and fluent setters,
 /// or by direct struct construction.
@@ -48,8 +50,84 @@ impl SearchOpts {
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on any rusqlite error;
-/// `QueryError::InvalidFilter` if a filter is malformed.
+/// `QueryError::InvalidFilter` if a filter is malformed;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryError> {
+    let projected_rows = fetch_and_project(conn, opts)?;
+
+    // Reciprocal-rank-fusion-style score over a single branch:
+    //   score(r) = 1 / (k + rank)
+    // With one branch the ranking degenerates to "by FTS rank ascending".
+    // Apply the unsigned penalty after RRF; the policy filter runs after
+    // sorting so the top-K cut is taken from the visible set.
+    let k_const: f64 = 60.0;
+    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (r, p))| {
+            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
+            let rank = f64::from(rank) + 1.0;
+            let mut score = 1.0 / (k_const + rank);
+            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
+            // ordinal above is the actual ranking signal; the underlying
+            // bm25 value is intentionally not surfaced here.
+
+            let is_unsigned = p.signature_status != SignatureStatus::Verified;
+            if is_unsigned && !opts.filters.no_unsigned_penalty {
+                score *= opts.unsigned_ranking_penalty;
+            }
+            (r, p, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Centralized warn/hide/strict policy filter. The closure plucks the
+    // projected trust shape out of the (row, projected, score) tuple so
+    // `apply` can route every row through the same decision tree as the
+    // other read verbs.
+    let policy_opts = PolicyOpts {
+        policy: opts.trust_policy,
+        require_signed: opts.filters.require_signed,
+    };
+    let mut outcome = apply_policy(scored, policy_opts, |row| &row.1);
+
+    let total = u32::try_from(outcome.visible.len()).unwrap_or(u32::MAX);
+    let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);
+    // Pluck the visible rows so the policy bucket counters and warnings on
+    // `outcome` survive the rest of the `outcome` value being consumed.
+    let visible = std::mem::take(&mut outcome.visible);
+    let top_n = visible.into_iter().take(top_k).collect::<Vec<_>>();
+
+    // Body inclusion: top-3 for search; full record fetched in `get`.
+    let results: Vec<SearchResult> = top_n
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (r, p, score))| project_row(r, p, score, idx < 3))
+        .collect();
+
+    let mut meta = super::meta::build_meta_search(
+        conn,
+        opts.trust_policy,
+        opts.embed_pool_saturated,
+        opts.saturation_wait_ms,
+    )?;
+    meta.apply_policy_outcome(&outcome);
+
+    Ok(ResultSet {
+        results,
+        total_matched: total,
+        next_cursor: None,
+        meta,
+    })
+}
+
+/// Fetch the FTS-matched rows and project per-row trust. Splits out of
+/// `search` so the verb stays under the strict-clippy `too-many-lines`
+/// threshold.
+fn fetch_and_project(
+    conn: &Connection,
+    opts: &SearchOpts,
+) -> Result<Vec<(FtsRow, ProjectedTrust)>, QueryError> {
     let (filter_sql, filter_params) = build_filter_sql(&opts.filters);
 
     // Cap on FTS candidates fed into RRF. 100 is enough for top-K=5 even
@@ -58,11 +136,16 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let fts_limit: u32 = 100;
 
     // FTS query with filter pushdown. ?1 = MATCH query; ?2 = limit;
-    // ?3..= filter params.
+    // ?3..= filter params. The SELECT also pulls the per-record
+    // `relevant_trust_events_commit` so the read-time projection can look
+    // up trust state at the events.yml commit effective when the record
+    // was signed.
     let fts_sql = format!(
         "SELECT records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
-                records.signature_status, records.updated \
+                records.crypto_result, records.updated, \
+                records.record_commit_sha, records.signer_fingerprint, \
+                records.relevant_trust_events_commit \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -79,6 +162,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         params.push(p);
     }
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        let crypto_result = CryptoResult::from_db_str(&row.get::<_, String>(7)?);
         Ok(FtsRow {
             id: row.get(0)?,
             record_type: row.get::<_, String>(1)?,
@@ -87,91 +171,37 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             body: row.get::<_, String>(4)?,
             source: row.get::<_, String>(5)?,
             project_id: row.get(6)?,
-            signature_status: row.get::<_, String>(7)?,
+            crypto_result,
             updated: row.get(8)?,
+            record_commit_sha: row.get::<_, Option<String>>(9)?,
+            signer_fingerprint: row.get::<_, Option<String>>(10)?,
+            relevant_trust_events_commit: row.get::<_, Option<String>>(11)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
 
-    // Reciprocal-rank-fusion-style score over a single branch:
-    //   score(r) = 1 / (k + rank)
-    // With one branch the ranking degenerates to "by FTS rank ascending".
-    // Apply the unsigned penalty after RRF, THEN the top-K cut.
-    let k_const: f64 = 60.0;
-    let mut scored: Vec<(FtsRow, f64)> = fts_rows
-        .into_iter()
-        .enumerate()
-        .map(|(idx, r)| {
-            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
-            let rank = f64::from(rank) + 1.0;
-            let mut score = 1.0 / (k_const + rank);
-            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
-            // ordinal above is the actual ranking signal; the underlying
-            // bm25 value is intentionally not surfaced here.
-
-            let is_unsigned = r.signature_status.as_str() != "verified";
-            if is_unsigned && !opts.filters.no_unsigned_penalty {
-                score *= opts.unsigned_ranking_penalty;
-            }
-            (r, score)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // require_signed override.
-    if opts.filters.require_signed {
-        scored.retain(|(r, _)| r.signature_status == "verified");
-    }
-    // hide policy: drop unverified.
-    if opts.trust_policy == TrustPolicy::Hide {
-        scored.retain(|(r, _)| r.signature_status == "verified");
-    }
-
-    let total = u32::try_from(scored.len()).unwrap_or(u32::MAX);
-    let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);
-    let top_n = scored.into_iter().take(top_k).collect::<Vec<_>>();
-
-    // Body inclusion: top-3 for search; full record fetched in `get`.
-    let results: Vec<SearchResult> = top_n
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (r, score))| project_row(r, score, idx < 3))
-        .collect();
-
-    let meta = super::meta::build_meta(
-        conn,
-        &results,
-        opts.trust_policy,
-        opts.embed_pool_saturated,
-        opts.saturation_wait_ms,
-    )?;
-
-    Ok(ResultSet {
-        results,
-        total_matched: total,
-        next_cursor: None,
-        meta,
+    // Hydrate the chain once per verb invocation. Reused for every row's
+    // projection. Empty trust_events / no notebook history degrades into a
+    // pre-bootstrap chain that trusts cached `Good` crypto on its face.
+    let ctx = ProjectionContext::new(conn)?;
+    ctx.project_rows(fts_rows, opts.filters.strict_revocation, |row| {
+        CachedCrypto {
+            crypto_result: row.crypto_result,
+            signer_fingerprint: row.signer_fingerprint.as_deref(),
+            commit_sha: row.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: row.relevant_trust_events_commit.as_deref(),
+        }
     })
 }
 
-/// Project a single FTS row + score into the public `SearchResult` shape,
-/// applying the body-on-top-3 rule and surfacing canonical warnings.
-fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
+/// Project a single FTS row + projected trust + score into the public
+/// `SearchResult` shape, applying the body-on-top-3 rule.
+fn project_row(r: FtsRow, p: ProjectedTrust, score: f64, include_body: bool) -> SearchResult {
     let body = if include_body {
         Some(r.body.clone())
     } else {
         None
     };
-    let signature_status = SignatureStatus::from_db_str(&r.signature_status);
-    let trust_basis = if matches!(signature_status, SignatureStatus::Verified) {
-        Some(TrustBasis::Current)
-    } else {
-        None
-    };
-    let mut warnings: Vec<String> = Vec::new();
-    if signature_status != SignatureStatus::Verified {
-        warnings.push("unsigned".into());
-    }
     SearchResult {
         id: r.id,
         record_type: RecordType::from_db_str(&r.record_type),
@@ -180,9 +210,11 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         score,
         source: Source::from_db_str(&r.source),
         project_id: r.project_id,
-        signature_status,
-        trust_basis,
-        warnings,
+        signature_status: p.signature_status,
+        trust_basis: p.trust_basis,
+        record_commit_sha: r.record_commit_sha,
+        signer_fingerprint: r.signer_fingerprint,
+        warnings: p.warnings,
         body,
         updated: r.updated,
     }
@@ -197,8 +229,17 @@ struct FtsRow {
     body: String,
     source: String,
     project_id: String,
-    signature_status: String,
+    /// Cached `git verify-commit` outcome read straight from
+    /// `records.crypto_result`. Forwarded into [`CachedCrypto`] for the
+    /// read-time projection.
+    crypto_result: CryptoResult,
     updated: String,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// `None` for adapters with no events.yml correlation (cc-native /
+    /// codex-native) or for records indexed before the column was wired.
+    relevant_trust_events_commit: Option<String>,
 }
 
 /// Build the per-table filter clause + bound params for the SQL pushdown.
@@ -284,25 +325,31 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
-    /// Open a fresh `index.db` under a `TempDir` so the schema (records +
-    /// `records_fts` + `record_embeddings`) and sqlite-vec auto-extension are
-    /// applied via the same path as production.
+    /// Open a fresh `index.db` under a `TempDir` with the bootstrap chain
+    /// seeded so verified rows resolve through the read-time projection.
+    /// Delegates to the shared helper used by all read-verb unit tests.
     fn open_test_db() -> (TempDir, Connection) {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("index.db");
-        let conn =
-            crate::indexer::db::open_or_create(&path).expect("open_or_create with full schema");
-        (dir, conn)
+        crate::query::test_util::open_test_db_with_seeded_chain()
     }
 
     fn insert_minimal(conn: &Connection, id: &str, title: &str, body: &str, signed: bool) {
-        let sig = if signed { "verified" } else { "unsigned" };
+        let cr = if signed { "good" } else { "no-signature" };
+        let (signer_fp, trust_commit) = if signed {
+            (
+                Some(crate::query::test_util::TEST_BOOTSTRAP_FP),
+                Some(crate::query::test_util::TEST_TRUST_COMMIT),
+            )
+        } else {
+            (None, None)
+        };
         conn.execute(
             "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
-             tags_fts, created, updated, content_hash, index_hash, signature_status, indexed_at) \
+             tags_fts, agent, confidence, outcome, created, updated, content_hash, index_hash, \
+             crypto_result, signer_fingerprint, relevant_trust_events_commit, indexed_at) \
              VALUES (?1, 'local', 'p', 'decision', ?2, ?3, '[]', '', \
-                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, '2026-04-29T00:00:00Z')",
-            rusqlite::params![id, title, body, sig],
+                     'manual', 'medium', 'working', \
+                     '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, ?5, ?6, '2026-04-29T00:00:00Z')",
+            rusqlite::params![id, title, body, cr, signer_fp, trust_commit],
         )
         .unwrap();
     }

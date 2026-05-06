@@ -1,4 +1,4 @@
-//! `nexum init` orchestrator — §8 10-step flow.
+//! `nexum init` orchestrator.
 
 use std::path::{Path, PathBuf};
 
@@ -22,7 +22,7 @@ use crate::{
 
 use super::options::{InitError, InitOpts, InitOutcome};
 
-/// Run `nexum init` per §8.
+/// Run `nexum init`.
 ///
 /// Acquires `<root>/.lock` before any writes, releases on return.
 /// On failure, removes the partial `<root>/` tree (best-effort).
@@ -55,7 +55,7 @@ pub fn run(opts: InitOpts) -> Result<InitOutcome, InitError> {
         source: e,
     })?;
 
-    // Acquire writer lock (§3.5).
+    // Acquire writer lock.
     let lock_path = root.join(".lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -213,9 +213,9 @@ fn write_bootstrap_commit(notebook_git: &Path, trust_dir: &Path) -> Result<Strin
         "bootstrap: initial signed commit",
     )?;
 
-    // Verify on the spot via historical-signers redirect (§8 step 9a).
-    // §8 step 9b (trust_events view row check) is deferred to Phase 3 because
-    // index.db does not yet exist at Phase 2 init time.
+    // Verify on the spot via historical-signers redirect.
+    // The trust_events view row check is deferred: index.db does not yet exist
+    // at init time, so that verification runs after the first `nexum index`.
     let historical_signers = trust_dir.join("historical_signers");
     git_verify_commit_with_signers(notebook_git, "HEAD", &historical_signers)?;
 

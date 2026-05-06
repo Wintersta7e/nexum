@@ -5,6 +5,9 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::api;
 
+// Clap-derived CLI flag struct: each bool is an independent --flag toggle, so
+// the state-machine refactor clippy suggests would obscure the surface.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Args, Debug)]
 pub struct IndexArgs {
     /// Force a full pass: bypass the stale-row gate and apply the entire
@@ -15,6 +18,10 @@ pub struct IndexArgs {
     /// Incremental pass (default; equivalent to passing no flag).
     #[arg(long, default_value_t = false)]
     pub incremental: bool,
+    /// Run a forced index pass and validate `.trust/events.yml` for
+    /// tampering. Exits 4 if any tampering is detected.
+    #[arg(long, default_value_t = false, conflicts_with = "incremental")]
+    pub check: bool,
     /// Print the per-source summary as JSON.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -26,7 +33,11 @@ pub fn run(args: &IndexArgs) -> ExitCode {
         Ok(v) => v,
         Err(c) => return c,
     };
-    let outcome = if args.force {
+    // --check forces a full crypto + materializer rebuild, then surfaces any
+    // detected tampering. When the index pass succeeds, the post-pass
+    // tampering check decides the final exit code; an index error short-
+    // circuits to STORE_INTEGRITY before the check ever runs.
+    let outcome = if args.force || args.check {
         api::index_run_force(&paths, &cfg)
     } else {
         api::index_run(&paths, &cfg)
@@ -58,11 +69,24 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                     );
                 }
             }
-            ExitCode::SUCCESS
+            if args.check {
+                check_tampering(&paths, args.json)
+            } else {
+                ExitCode::SUCCESS
+            }
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::RUNTIME)
-        }
+        Err(e) => super::common::handle_read_verb_error(&e),
     }
+}
+
+/// Run the cached tampering check after a successful `--check` index pass.
+/// The index pass already called `ensure_current` so the materialized view
+/// is fresh; `validate_events_cached` reads `trust_chain_tampering` without
+/// duplicating the rebuild walk.
+fn check_tampering(paths: &nexum_core::paths::Paths, json: bool) -> ExitCode {
+    let rows = match api::validate_events_cached(paths) {
+        Ok(r) => r,
+        Err(e) => return super::common::handle_read_verb_error(&e),
+    };
+    super::trust::render_tampering(&rows, json)
 }

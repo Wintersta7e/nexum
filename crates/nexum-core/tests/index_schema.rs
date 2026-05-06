@@ -1,4 +1,4 @@
-//! Integration tests for the §7 index DDL applied to a real `SQLite` connection.
+//! Integration tests for the index DDL applied to a real `SQLite` connection.
 //! Uses `NexumTestHome` to create an isolated temp dir for the database file,
 //! and the sqlite-vec extension is loaded via `auto_extension` before the connection
 //! opens (vec0 is required by the DDL).
@@ -34,16 +34,16 @@ fn register_sqlite_vec() {
 fn apply_succeeds_on_fresh_connection() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 }
 
 #[test]
 fn apply_creates_all_expected_tables_and_triggers() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -53,8 +53,15 @@ fn apply_creates_all_expected_tables_and_triggers() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     // sqlite-vec creates internal companion tables for vec0 (e.g.,
-    // record_embeddings_chunks, _info, _rowids); just check our 3 are there.
-    for required in ["records", "record_embeddings", "records_fts"] {
+    // record_embeddings_chunks, _info, _rowids); just check our 6 are there.
+    for required in [
+        "records",
+        "record_embeddings",
+        "records_fts",
+        "trust_events",
+        "trust_chain_tampering",
+        "meta",
+    ] {
         assert!(
             tables.iter().any(|t| t == required),
             "missing table {required} in {tables:?}"
@@ -79,17 +86,19 @@ fn apply_creates_all_expected_tables_and_triggers() {
 fn insert_record_propagates_to_records_fts_via_trigger() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 
     // Minimal record insert covering the NOT NULL columns.
     conn.execute(
         "INSERT INTO records (
             id, source, project_id, record_type, title, body, tags, tags_fts,
-            created, updated, content_hash, index_hash, signature_status, indexed_at
+            agent, confidence, outcome,
+            created, updated, content_hash, index_hash, crypto_result, indexed_at
         ) VALUES (?1, 'local', 'p', 'decision', ?2, '', ?3, ?4,
+                  'manual', 'medium', 'working',
                   '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z',
-                  'h', 'ih', 'unsigned', '2026-04-30T00:00:00Z')",
+                  'h', 'ih', 'no-signature', '2026-04-30T00:00:00Z')",
         rusqlite::params![
             "rec-A",
             "alpha title",
@@ -134,24 +143,27 @@ fn insert_record_propagates_to_records_fts_via_trigger() {
 fn delete_in_correct_order_leaves_no_orphans() {
     register_sqlite_vec();
     let home = NexumTestHome::new().expect("create test home");
-    let conn = Connection::open(home.paths().index_db).expect("open temp db");
-    schema::apply(&conn).expect("apply DDL");
+    let mut conn = Connection::open(home.paths().index_db).expect("open temp db");
+    schema::apply(&mut conn).expect("apply DDL");
 
     // Insert one record (FTS row populated by records_ai trigger).
     conn.execute(
         "INSERT INTO records (
             id, source, project_id, record_type, title, body, tags, tags_fts,
-            created, updated, content_hash, index_hash, signature_status, indexed_at
+            agent, confidence, outcome,
+            created, updated, content_hash, index_hash, crypto_result, indexed_at
         ) VALUES (?1, 'local', 'p', 'decision', ?2, '', ?3, ?4,
+                  'manual', 'medium', 'working',
                   '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z',
-                  'h', 'ih', 'unsigned', '2026-04-30T00:00:00Z')",
+                  'h', 'ih', 'no-signature', '2026-04-30T00:00:00Z')",
         rusqlite::params!["rec-B", "beta", r#"["t1"]"#, "t1"],
     )
     .expect("insert");
     let rowid = conn.last_insert_rowid();
 
-    // Application-managed: insert into record_embeddings AFTER records (per §7
-    // ordering rule). Use a placeholder embedding; vec0 needs a 1024-dim FLOAT[].
+    // Application-managed: insert into record_embeddings AFTER records (the
+    // schema's required ordering). Use a placeholder embedding; vec0 needs a
+    // 1024-dim FLOAT[].
     let embedding: Vec<u8> = (0..1024).flat_map(|_| 0.0_f32.to_le_bytes()).collect();
     conn.execute(
         "INSERT INTO record_embeddings(record_rowid, embedding) VALUES (?1, ?2)",
@@ -159,7 +171,7 @@ fn delete_in_correct_order_leaves_no_orphans() {
     )
     .expect("insert embedding");
 
-    // Now delete in the §7-mandated order: vec0 first, then records.
+    // Now delete in the schema-mandated order: vec0 first, then records.
     conn.execute(
         "DELETE FROM record_embeddings WHERE record_rowid = ?1",
         rusqlite::params![rowid],

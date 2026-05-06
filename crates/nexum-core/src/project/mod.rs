@@ -1,6 +1,6 @@
-//! Project identity resolution per §13 of the design spec.
+//! Project identity resolution.
 //!
-//! `resolve(input) -> ProjectResolution` composes the §13 resolution order:
+//! `resolve(input) -> ProjectResolution` composes the resolution order:
 //!   1. `git_origin_url` (canonicalized) — the strongest signal.
 //!   2. Registered project name from the user's `nexum` config, when supplied.
 //!   3. Path-based identity from canonicalized cwd (or, for CC, from one of the
@@ -18,7 +18,7 @@ pub mod resolve;
 use std::path::PathBuf;
 
 /// Input to `project::resolve`. Captures everything an adapter knows about a
-/// candidate project before the resolver runs the §13 precedence.
+/// candidate project before the resolver runs the precedence chain.
 #[derive(Debug, Clone)]
 pub struct ProjectInput {
     /// The cwd-encoded slug from a CC project dir, if known. Caller already

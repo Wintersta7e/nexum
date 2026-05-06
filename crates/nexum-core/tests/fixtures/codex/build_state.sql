@@ -1,12 +1,11 @@
 -- crates/nexum-core/tests/fixtures/codex/build_state.sql
 --
--- Refreshed in Phase 1b to mirror real Codex on-disk schema (post-patch4).
--- The §5 Codex adapter reads the projection: id, rollout_path, cwd,
--- git_origin_url, created_at, updated_at, title, git_sha, git_branch, model.
--- Real Codex `threads` has 27 columns total (sandbox_policy, tokens_used, etc.);
--- the fixture mirrors only the projection — the §5 "tolerate additional
--- columns" rule means tests that exercise the adapter's column SELECT must
--- still pass against a fixture that has FEWER columns than real Codex.
+-- Mirrors the real Codex on-disk schema. The Codex adapter SELECTs the
+-- projection: id, rollout_path, cwd, git_origin_url, created_at, updated_at,
+-- title, git_sha, git_branch, model. Real Codex `threads` has 27 columns
+-- total (sandbox_policy, tokens_used, etc.); the fixture mirrors only the
+-- projection — the adapter tolerates additional columns, so tests against a
+-- fixture with FEWER columns than real Codex still pass.
 --
 -- No `sessions` table — real Codex doesn't have one (transcripts live in
 -- JSONL files under sessions/<Y>/<M>/<D>/).

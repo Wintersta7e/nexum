@@ -4,7 +4,7 @@
 //! FTS5's expression parser treats `-` as a NOT operator, so a tag value like
 //! `perf-database` collides with the grammar when matched. Storing tags as raw
 //! JSON in an FTS5 column is brittle; the indexer normalizes at write time and
-//! FTS5 indexes the normalized column instead. (§7)
+//! FTS5 indexes the normalized column instead.
 //!
 //! Normalization rules:
 //!   - JSON brackets (`[`, `]`) become spaces.

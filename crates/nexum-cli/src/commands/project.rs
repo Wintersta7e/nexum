@@ -111,7 +111,7 @@ fn list(paths: &Paths, json: bool) -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::RUNTIME)
+            ExitCode::from(super::exit_codes::STORE_INTEGRITY)
         }
     }
 }

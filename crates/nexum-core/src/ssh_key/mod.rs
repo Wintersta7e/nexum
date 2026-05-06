@@ -1,8 +1,9 @@
-//! SSH key detection and fingerprint computation for §8 init flow.
+//! SSH key detection and fingerprint computation for `nexum init`.
 //!
-//! `detect_signing_key` implements the §8 step 2 lookup order.
-//! `compute_fingerprint` converts an OpenSSH public key line to the
-//! canonical `SHA256:<base64>` format used throughout the trust state machine.
+//! `detect_signing_key` probes the standard SSH key locations and returns the
+//! first usable signing key. `compute_fingerprint` converts an OpenSSH public
+//! key line to the canonical `SHA256:<base64>` format used throughout the trust
+//! state machine.
 
 pub mod detect;
 pub mod fingerprint;

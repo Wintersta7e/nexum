@@ -1,8 +1,8 @@
 //! Shell-out git helpers for `nexum init`.
 //!
 //! Production signing requires `git -c gpg.format=ssh …` because `git2` has
-//! no SSH-signing path (confirmed by spike S6). All helpers use
-//! `std::process::Command` and capture stdout/stderr for diagnostic errors.
+//! no SSH-signing path. All helpers use `std::process::Command` and capture
+//! stdout/stderr for diagnostic errors.
 
 use std::{
     path::Path,
@@ -46,8 +46,8 @@ pub fn git_init(repo_path: &Path) -> Result<(), InitError> {
 /// Configures `gpg.format`, `user.signingkey`, `user.email`, `user.name`,
 /// `commit.gpgsign`, `tag.gpgsign`, and `gpg.ssh.allowedSignersFile`.
 ///
-/// `private_key_path` must be an absolute path (§8 step 5 note — bare
-/// fingerprints do not work with git's SSH backend).
+/// `private_key_path` must be an absolute path — bare fingerprints do not
+/// work with git's SSH backend.
 ///
 /// # Errors
 ///
@@ -108,7 +108,7 @@ pub fn git_commit_signed(
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
-/// Verify `commit` using `historical_signers` (the §9 historical-verification redirect).
+/// Verify `commit` using `historical_signers` (the historical-verification redirect).
 ///
 /// Invokes:
 /// ```text
@@ -156,6 +156,108 @@ pub fn git_verify_commit_with_signers(
             ),
         })
     }
+}
+
+/// One-character signature status semantics derived from
+/// `git log -1 --format=%G?`. The `%G?` field is the spec-stable mapping
+/// from git's signature-verification machinery to a single character;
+/// stderr text from `verify-commit` differs across git versions and
+/// signing backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifyExit {
+    /// `G`: valid signature, signer accepted by `historical_signers`.
+    Good,
+    /// `B`/`X`/`Y`/`R`: signature itself was rejected (bad, expired,
+    /// expired-key, revoked-key).
+    BadSignature,
+    /// `U`/`E`: signature shape is fine but the signer is not in the
+    /// allowed file (or the signature could not be checked at all).
+    UnknownSigner,
+    /// `N`: no signature at all.
+    NoSignature,
+}
+
+/// Captured outcome of a single `git verify` run, carried by
+/// [`git_verify_commit_outcome`]. `signer_fingerprint` is populated only
+/// when `exit == Good`.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifyOutcome {
+    pub exit: VerifyExit,
+    pub signer_fingerprint: Option<String>,
+}
+
+/// Verify `commit` against `historical_signers` and return the captured
+/// G/B/U/N outcome plus the signer fingerprint when known.
+///
+/// Uses `git log -1 --format=%G?` (with the `gpg.ssh.allowedSignersFile`
+/// redirection in place) instead of parsing `verify-commit` stderr; the
+/// `%G?` character is stable across git versions while stderr text is
+/// not. On a `Good` outcome, runs a follow-up `--format=%GF` to capture
+/// the matched signer fingerprint.
+///
+/// # Errors
+///
+/// Returns `InitError::Io` if the git binary cannot be spawned.
+/// Returns `InitError::Git` if the `git log` invocation itself exits
+/// non-zero (distinct from a non-`G` signature status, which is
+/// expressed via the returned [`VerifyExit`]).
+pub(crate) fn git_verify_commit_outcome(
+    repo_path: &Path,
+    commit: &str,
+    historical_signers: &Path,
+) -> Result<VerifyOutcome, InitError> {
+    let signers_path = historical_signers.display().to_string();
+    // Single shell-out: `--format=%G?%x00%GF` returns the signature status
+    // followed by a NUL byte and the signer fingerprint (empty when the
+    // outcome isn't `Good`). The env-scrubbed `git()` helper strips
+    // global / system gitconfig so user-side overrides cannot reroute the
+    // verification path.
+    let out = crate::trust::git_history::git(repo_path)
+        .args([
+            "-c",
+            "gpg.format=ssh",
+            "-c",
+            &format!("gpg.ssh.allowedSignersFile={signers_path}"),
+            "log",
+            "-1",
+            "--format=%G?%x00%GF",
+            commit,
+        ])
+        .output()
+        .map_err(|e| InitError::Io {
+            path: repo_path.display().to_string(),
+            source: e,
+        })?;
+    if !out.status.success() {
+        return Err(InitError::Git {
+            cmd: format!("git log -1 --format=%G?%x00%GF {commit}"),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        });
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut parts = raw.splitn(2, '\0');
+    let status_char = parts.next().and_then(|s| s.trim().chars().next());
+    let fingerprint = parts.next().map_or("", str::trim);
+    let exit = match status_char {
+        Some('G') => VerifyExit::Good,
+        Some('B' | 'X' | 'Y' | 'R') => VerifyExit::BadSignature,
+        Some('N') | None => VerifyExit::NoSignature,
+        // `U` (unknown signer) and `E` (signature cannot be checked, e.g.
+        // missing key) both map to `UnknownSigner`; any future `%G?` value
+        // we don't recognize lands here too — conservative because it keeps
+        // the record out of the verified-good bucket without claiming the
+        // signature itself is invalid.
+        _ => VerifyExit::UnknownSigner,
+    };
+    let signer_fingerprint = if exit == VerifyExit::Good && !fingerprint.is_empty() {
+        Some(fingerprint.to_owned())
+    } else {
+        None
+    };
+    Ok(VerifyOutcome {
+        exit,
+        signer_fingerprint,
+    })
 }
 
 /// Read `user.name` and `user.email` from the global git config.

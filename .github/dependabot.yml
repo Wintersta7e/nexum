@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # GitHub Actions (e.g. actions/checkout@v4 → @v5).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: sunday
+    # Bundle all action updates into one PR per week to cut PR noise.
+    groups:
+      gh-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
+      include: scope
+
+  # Cargo workspace deps. Same weekly cadence; group patch + minor so a
+  # noisy dependency tree doesn't produce a flood of single-bump PRs.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: sunday
+    groups:
+      cargo-patch-minor:
+        update-types:
+          - patch
+          - minor
+    # Major bumps land as individual PRs so the changelog gets read.
+    commit-message:
+      prefix: deps
+      include: scope

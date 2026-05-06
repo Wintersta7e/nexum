@@ -1,9 +1,9 @@
 //! Git hook installation for `nexum init`.
 //!
-//! The `pre-merge-commit` hook (§9 linear-history requirement) rejects any
-//! merge that would touch paths under `.trust/`. This prevents merge commits
-//! from creating a non-linear history for `events.yml`, which would make
-//! topological-order trust verification ambiguous.
+//! The `pre-merge-commit` hook rejects any merge that would touch paths under
+//! `.trust/`. This prevents merge commits from creating a non-linear history
+//! for `events.yml`, which would make topological-order trust verification
+//! ambiguous.
 
 use std::path::Path;
 
@@ -16,7 +16,7 @@ use super::options::InitError;
 const PRE_MERGE_COMMIT_HOOK: &str = r#"#!/bin/sh
 # nexum pre-merge-commit hook — installed by `nexum init`.
 # Rejects any merge that touches .trust/* paths to preserve linear history
-# on the events.yml trust chain (§9 linear-history requirement).
+# to preserve a linear history on the events.yml trust chain.
 set -e
 if git diff --name-only HEAD MERGE_HEAD 2>/dev/null | grep -q '^\.trust/'; then
     echo "nexum: merge rejected — this merge touches .trust/ paths." >&2

@@ -1,12 +1,14 @@
 //! Local adapter — reads `notebook.git/{decisions,recommendations,failures}/*.yml`.
 //!
-//! Each `<id>.yml` parses to one `UnifiedRecord`. The signature status is
-//! computed by identifying the commit that last touched the file and
-//! redirecting `git verify-commit` through `.trust/historical_signers` (the
-//! historical-signers contract). Verifier OK → `Verified` + `TrustBasis::Current`;
-//! verifier rejects or no signature → `Unsigned`. The richer trust state
-//! machine integration with the materialized `trust_events` view is deferred
-//! to a later milestone.
+//! Each `<id>.yml` parses to one `UnifiedRecord`. The adapter only discovers
+//! the commit that last touched the record (`git log -1 --format=%H -- <path>`)
+//! and stamps it on `Provenance.record_commit_sha`. Cryptographic verification
+//! is run once per unique commit by the indexer's crypto-batch step, which
+//! then rewrites `crypto_result`, `signer_fingerprint`, and
+//! `relevant_trust_events_commit` on every record before upsert. The
+//! read-time projection joins the cached crypto outcome with the materialized
+//! `trust_events` view to produce the final `signature_status` / `trust_basis`
+//! / `warnings`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,17 +16,15 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use crate::{
     adapter::trait_def::{
         Adapter, AdapterError, AdapterPass, PassCompleteness, SkipKind, SkipReason,
     },
-    init::git_ops::git_verify_commit_with_signers,
     records::{
-        Agent, Confidence, FileEvidence, FileEvidenceKind, Outcome, ProjectId, Provenance,
-        RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source, TrustBasis,
+        Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome, ProjectId,
+        Provenance, RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source,
         UnifiedRecord, content_hash,
     },
 };
@@ -221,7 +221,12 @@ fn parse_local_record(
         .project_id
         .unwrap_or_else(|| "local-no-project".into());
 
-    let (signature_status, trust_basis) = compute_signature_status(notebook_git, path);
+    // The adapter only discovers `record_commit_sha` here. Cryptographic
+    // verification runs once per unique commit in the indexer's
+    // `crypto_batch` step, which then overwrites `crypto_result`,
+    // `signer_fingerprint`, and `relevant_trust_events_commit` on every
+    // record. The placeholders below are deliberate stubs.
+    let record_commit_sha = compute_record_commit_sha(notebook_git, path);
 
     Ok(Box::new(UnifiedRecord {
         id: parsed.id,
@@ -243,10 +248,18 @@ fn parse_local_record(
         outcome,
         provenance: Provenance {
             source: Source::Local,
-            signature_status,
-            trust_basis,
+            // The read-time projection derives the real signature status
+            // from `crypto_result` + `trust_events`; the adapter stamps a
+            // placeholder so the struct stays well-formed for callers
+            // (e.g., adapter-only unit tests) that bypass the batch.
+            signature_status: SignatureStatus::Unsigned,
             extractor: None,
             digest_hash: None,
+            record_commit_sha,
+            signer_fingerprint: None,
+            crypto_result: CryptoResult::NoSignature,
+            relevant_trust_events_commit: None,
+            warnings: Vec::new(),
         },
         extras: HashMap::new(),
         content_hash: hash,
@@ -316,41 +329,29 @@ fn decode_files(raw: Vec<serde_yaml::Value>) -> Vec<FileEvidence> {
         .collect()
 }
 
-fn compute_signature_status(
-    notebook_git: &Path,
-    record_path: &Path,
-) -> (SignatureStatus, Option<TrustBasis>) {
-    // Step 1: identify the commit that last touched `record_path`.
-    let Ok(relative) = record_path.strip_prefix(notebook_git) else {
-        return (SignatureStatus::Unsigned, None);
-    };
-    let log_out = Command::new("git")
+/// Identify the SHA of the commit that last touched `record_path` on
+/// `notebook_git`. Returns `None` when the path is outside the notebook,
+/// when `git log` fails to spawn, or when the file has no history yet
+/// (untracked or freshly added in the working tree). The crypto-batch
+/// step in `indexer::crypto_batch` consumes this SHA to drive the
+/// once-per-commit `git verify` shell-out.
+fn compute_record_commit_sha(notebook_git: &Path, record_path: &Path) -> Option<String> {
+    let relative = record_path.strip_prefix(notebook_git).ok()?;
+    // Route through the shared env-scrubbed `git()` helper so every
+    // SHA-resolving path in the workspace sees the same git config view —
+    // a user-global `gitconfig` rewriting `core.commitGraph` (or any other
+    // history-affecting setting) cannot make this lookup disagree with
+    // the verify pass that consumes the resulting SHA.
+    let out = crate::trust::git_history::git(notebook_git)
         .args(["log", "-1", "--format=%H", "--"])
         .arg(relative)
-        .current_dir(notebook_git)
-        .output();
-    let sha = match log_out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-        _ => return (SignatureStatus::Unsigned, None),
-    };
-    if sha.is_empty() {
-        return (SignatureStatus::Unsigned, None);
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
-    // Step 2: redirect verify-commit through historical_signers.
-    let historical_signers = notebook_git.join(".trust").join("historical_signers");
-    if !historical_signers.exists() {
-        return (SignatureStatus::Unsigned, None);
-    }
-    match git_verify_commit_with_signers(notebook_git, &sha, &historical_signers) {
-        Ok(()) => (SignatureStatus::Verified, Some(TrustBasis::Current)),
-        Err(_) => {
-            // Distinguishing "no signature" from "bad signature" via stderr would
-            // require a richer return shape; the current minimum mapping is
-            // "verifier rejected → unsigned". A future milestone promotes
-            // `Invalid` as a distinct status with a richer diagnostic.
-            (SignatureStatus::Unsigned, None)
-        }
-    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if sha.is_empty() { None } else { Some(sha) }
 }
 
 #[cfg(test)]

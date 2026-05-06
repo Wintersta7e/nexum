@@ -8,6 +8,10 @@ Cargo.lock.bak
 # Local-only design notes, plans, research artifacts. Not for public history.
 /docs/
 
+# Local-only stack-validation spike binaries. Kept out of the public tree;
+# can be re-introduced from git history when validation work is needed.
+/crates/nexum-spike/
+
 # Local-only project instructions for AI coding agents (per-user, never committed).
 CLAUDE.md
 **/CLAUDE.md

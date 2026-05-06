@@ -1,0 +1,19 @@
+# CodeQL config for nexum.
+#
+# Restricts analysis to first-party Rust source. Without this, alerts
+# would also surface from generated code under `target/` (rustc artifacts,
+# build scripts) and the canned test fixtures we vendor verbatim.
+
+name: "nexum CodeQL config"
+
+# Allow-list: only first-party trees.
+paths:
+  - crates/nexum-core/src
+  - crates/nexum-cli/src
+  - crates/nexum-mcp/src
+
+# Belt-and-braces: exclude build outputs and committed test fixtures
+# (synthetic memory blobs that aren't maintained as production code).
+paths-ignore:
+  - target
+  - "**/tests/fixtures/**"

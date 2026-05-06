@@ -26,6 +26,11 @@ pub enum QueryError {
     /// `RecordKey` (e.g. `local:git:abc:my-record`).
     #[error("ambiguous record id; {} candidates match", matches.len())]
     Ambiguous { matches: Vec<RecordKey> },
+    /// Trust-state error surfaced from `ChainState::from_view` or any
+    /// `TrustEventsView` query the read-time projection issues. Wraps the
+    /// underlying [`crate::trust::events::TrustError`].
+    #[error(transparent)]
+    Trust(#[from] crate::trust::events::TrustError),
 }
 
 /// Filter set shared across `search` / `list` / `recent` / `by_session`.
@@ -52,8 +57,11 @@ pub struct Filters {
     /// excluded regardless of policy.
     #[serde(default)]
     pub require_signed: bool,
-    /// Future-compat pass-through — the trust state machine isn't wired
-    /// up yet, so this currently has no effect.
+    /// When set, records signed by a key the chain now records as
+    /// compromised project to `Invalid` (carrying both the
+    /// `signed-by-compromised-key` and `strict-revocation-active`
+    /// warnings) instead of the default `Verified` with a warning. Other
+    /// branches of the read-time projection are unaffected.
     #[serde(default)]
     pub strict_revocation: bool,
     /// When true, suppress the unsigned-content ranking penalty (×0.7).
@@ -76,6 +84,16 @@ pub struct SearchResult {
     pub signature_status: SignatureStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_basis: Option<TrustBasis>,
+    /// Git commit SHA of the record's last-touching commit, as recorded by the
+    /// verifier. `None` for adapters that don't track commit provenance or for
+    /// rows written before the column was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_commit_sha: Option<String>,
+    /// Signing key fingerprint used to verify the record's last-touching
+    /// commit. `None` when the record is unsigned or the verifier has not yet
+    /// populated the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Body included only on top-3 in `search`; always in `get`.
@@ -113,18 +131,25 @@ pub struct Meta {
     pub embed_pool_saturated: bool,
     #[serde(default)]
     pub saturation_wait_ms: u32,
-    /// Count of `unsigned` records anywhere in the index that the current
-    /// `trust_policy` would withhold under `Hide`. Whole-table count, not
-    /// filter-respecting; a future revision may narrow this to the
-    /// requested filter scope if cost shows up.
+    /// Count of rows withheld from the response because their projected
+    /// `signature_status` is `Unsigned` and the active policy or
+    /// `require_signed` override filters them out. Counted from the
+    /// response rows after projection, not the whole index.
     #[serde(default)]
     pub hidden_unsigned: u32,
-    /// Count of `invalid` records anywhere in the index that the current
-    /// `trust_policy` would withhold under `Hide`. Whole-table count, not
-    /// filter-respecting; a future revision may narrow this to the
-    /// requested filter scope if cost shows up.
+    /// Count of rows withheld from the response because their projected
+    /// `signature_status` is `Invalid` (other than strict-revocation
+    /// hits, which are tallied separately in `hidden_compromised`).
+    /// Counted from the response rows after projection, not the whole
+    /// index.
     #[serde(default)]
     pub hidden_invalid: u32,
+    /// Count of rows withheld from the response because they were signed
+    /// by a key the trust chain marks compromised and the
+    /// `strict-revocation-active` overlay fired. Independent of policy
+    /// and `require_signed`; revocation hits are always filtered.
+    #[serde(default)]
+    pub hidden_compromised: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -136,7 +161,7 @@ pub struct MetaSourceCounts {
     pub codex_native: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MetaTrustSummary {
     pub verified: u32,
     pub unsigned: u32,
@@ -144,17 +169,53 @@ pub struct MetaTrustSummary {
     pub unknown: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// Tally of returned rows by `trust_basis`. Rows without a basis (unsigned,
+/// invalid, unknown-signer) carry `None` and are NOT counted here; the
+/// `trust_summary` field exposes the per-`SignatureStatus` counts. Wire
+/// shape uses kebab-case keys so the JSON form mirrors the spec value set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct MetaTrustBasisSummary {
     pub current: u32,
-    #[serde(rename = "rotated-historical")]
     pub rotated_historical: u32,
-    #[serde(rename = "rotated-historical-compromised")]
     pub rotated_historical_compromised: u32,
-    #[serde(rename = "pre-reanchor")]
     pub pre_reanchor: u32,
 }
 
 /// Cursor — opaque base64-encoded `last_rowid`. Currently uses a simple
 /// "after rowid X" strategy; richer cursors land later.
 pub type Cursor = String;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn meta_trust_basis_summary_serializes_kebab_case() {
+        let summary = MetaTrustBasisSummary {
+            current: 1,
+            rotated_historical: 2,
+            rotated_historical_compromised: 3,
+            pre_reanchor: 4,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        // Wire-format guard: all four keys must serialize as kebab-case so the
+        // JSON shape matches the value set used elsewhere in the API.
+        assert!(
+            json.contains("\"current\":1"),
+            "expected `current` key, got {json}"
+        );
+        assert!(
+            json.contains("\"rotated-historical\":2"),
+            "expected `rotated-historical` key, got {json}"
+        );
+        assert!(
+            json.contains("\"rotated-historical-compromised\":3"),
+            "expected `rotated-historical-compromised` key, got {json}"
+        );
+        assert!(
+            json.contains("\"pre-reanchor\":4"),
+            "expected `pre-reanchor` key, got {json}"
+        );
+    }
+}
