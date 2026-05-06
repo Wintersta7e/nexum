@@ -28,6 +28,16 @@ jobs:
         # rust-toolchain.toml at repo root pins channel 1.95.0 + clippy + rustfmt.
         run: rustup show
 
+      - name: Configure git identity for tests
+        # The init_cli.rs subprocess test shells out to `git commit` from
+        # nexum init's bootstrap-commit path. CI runners have no global
+        # git config; without an identity, the commit fails before any
+        # nexum logic runs. Generic CI identity matches the rest of the
+        # subprocess test pattern (`nexum-test@example.invalid`).
+        run: |
+          git config --global user.name "nexum-ci"
+          git config --global user.email "nexum-ci@example.invalid"
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
