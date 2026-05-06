@@ -281,7 +281,7 @@ pub struct TamperingRow {
 ///
 /// Re-walks `.trust/events.yml` from scratch, ignoring the sentinel cache,
 /// then reads `trust_chain_tampering`. Used by `nexum trust validate-events`
-/// and the orchestration in `nexum index --check`.
+/// where the forced rebuild is the diagnostic's raison d'être.
 ///
 /// # Errors
 ///
@@ -289,8 +289,25 @@ pub struct TamperingRow {
 /// `ApiError::Query(QueryError::Trust)` on materializer error.
 pub fn validate_events(paths: &Paths) -> Result<Vec<TamperingRow>, ApiError> {
     let mut conn = open_or_create(&paths.index_db)?;
-    crate::trust::events_view::rebuild(&mut conn, &paths.notebook_git)
-        .map_err(crate::query::QueryError::Trust)?;
+    crate::trust::events_view::rebuild(&mut conn, &paths.notebook_git)?;
+    read_tampering_rows(&conn)
+}
+
+/// Read tampering rows without forcing a rebuild. Used by
+/// `nexum index --check` post-index, where the just-completed index pass
+/// already called `ensure_current` and a second rebuild would duplicate
+/// the same git walk.
+///
+/// # Errors
+///
+/// Same as [`validate_events`] minus the rebuild path.
+pub fn validate_events_cached(paths: &Paths) -> Result<Vec<TamperingRow>, ApiError> {
+    let mut conn = open_or_create(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    read_tampering_rows(&conn)
+}
+
+fn read_tampering_rows(conn: &rusqlite::Connection) -> Result<Vec<TamperingRow>, ApiError> {
     let mut stmt = conn
         .prepare(
             "SELECT at_commit, at_topo_pos, event_id, kind, detected_at \
@@ -309,8 +326,9 @@ pub fn validate_events(paths: &Paths) -> Result<Vec<TamperingRow>, ApiError> {
             })
         })
         .map_err(crate::query::QueryError::from)?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|e| ApiError::Query(crate::query::QueryError::from(e)))
+    Ok(rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::query::QueryError::from)?)
 }
 
 fn identity_kind_for(project_id: &str) -> &'static str {

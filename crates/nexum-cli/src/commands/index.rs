@@ -20,7 +20,7 @@ pub struct IndexArgs {
     pub incremental: bool,
     /// Run a forced index pass and validate `.trust/events.yml` for
     /// tampering. Exits 4 if any tampering is detected.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, conflicts_with = "incremental")]
     pub check: bool,
     /// Print the per-source summary as JSON.
     #[arg(long, default_value_t = false)]
@@ -34,8 +34,9 @@ pub fn run(args: &IndexArgs) -> ExitCode {
         Err(c) => return c,
     };
     // --check forces a full crypto + materializer rebuild, then surfaces any
-    // detected tampering. If tampering is present, exit 4 even if the index
-    // pass itself succeeded — the integrity signal wins over the upsert count.
+    // detected tampering. When the index pass succeeds, the post-pass
+    // tampering check decides the final exit code; an index error short-
+    // circuits to STORE_INTEGRITY before the check ever runs.
     let outcome = if args.force || args.check {
         api::index_run_force(&paths, &cfg)
     } else {
@@ -78,33 +79,14 @@ pub fn run(args: &IndexArgs) -> ExitCode {
     }
 }
 
-/// Run `validate_events` after a successful `--check` index pass and surface
-/// any detected tampering. Splits out so the orchestration is testable
-/// independently of the index pass.
+/// Run the cached tampering check after a successful `--check` index pass.
+/// The index pass already called `ensure_current` so the materialized view
+/// is fresh; `validate_events_cached` reads `trust_chain_tampering` without
+/// duplicating the rebuild walk.
 fn check_tampering(paths: &nexum_core::paths::Paths, json: bool) -> ExitCode {
-    let rows = match api::validate_events(paths) {
+    let rows = match api::validate_events_cached(paths) {
         Ok(r) => r,
         Err(e) => return super::common::handle_read_verb_error(&e),
     };
-    if json {
-        if let Err(e) = serde_json::to_string_pretty(&rows).map(|s| println!("{s}")) {
-            eprintln!("error: serialize: {e}");
-            return ExitCode::FAILURE;
-        }
-    } else if rows.is_empty() {
-        println!("trust events: clean (no tampering detected)");
-    } else {
-        eprintln!("trust events: {} tampering event(s) detected:", rows.len());
-        for r in &rows {
-            eprintln!(
-                "  - commit {} (topo {}): {} on event {}",
-                r.at_commit, r.at_topo_pos, r.kind, r.event_id
-            );
-        }
-    }
-    if rows.is_empty() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(super::exit_codes::STORE_INTEGRITY)
-    }
+    super::trust::render_tampering(&rows, json)
 }

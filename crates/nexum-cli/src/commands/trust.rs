@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
-use nexum_core::api;
+use nexum_core::api::{self, TamperingRow};
 
 #[derive(Subcommand, Debug)]
 pub enum TrustCommand {
@@ -36,8 +36,15 @@ fn run_validate_events(args: &ValidateEventsArgs) -> ExitCode {
         Ok(r) => r,
         Err(e) => return super::common::handle_read_verb_error(&e),
     };
-    if args.json {
-        match serde_json::to_string_pretty(&rows) {
+    render_tampering(&rows, args.json)
+}
+
+/// Print tampering rows (human or JSON) and translate to an exit code.
+/// Shared between `nexum trust validate-events` and the post-index step
+/// in `nexum index --check`.
+pub(crate) fn render_tampering(rows: &[TamperingRow], json: bool) -> ExitCode {
+    if json {
+        match serde_json::to_string_pretty(rows) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("error: serialize: {e}");
@@ -48,7 +55,7 @@ fn run_validate_events(args: &ValidateEventsArgs) -> ExitCode {
         println!("trust events: clean (no tampering detected)");
     } else {
         eprintln!("trust events: {} tampering event(s) detected:", rows.len());
-        for r in &rows {
+        for r in rows {
             eprintln!(
                 "  - commit {} (topo {}): {} on event {}",
                 r.at_commit, r.at_topo_pos, r.kind, r.event_id
