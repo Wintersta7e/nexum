@@ -33,13 +33,16 @@ pub fn run(args: &GetArgs) -> ExitCode {
     let opts = GetOpts {
         include_unsigned: args.include_unsigned,
         trust_policy: cfg.trust.unsigned_default,
-        strict_revocation: cfg.trust.strict_revocation,
+        // `strict_revocation` is populated from cfg by the api facade so the
+        // CLI does not have to re-thread it. Default keeps the construction
+        // exhaustive without leaning on `#[derive(Default)]`'s field defaults.
+        strict_revocation: false,
     };
     let key = match parse_key(&args.id) {
         Ok(k) => k,
         Err(c) => return c,
     };
-    match api::get(&paths, &key, &opts) {
+    match api::get(&paths, &cfg, &key, &opts) {
         Ok(GetOutcome::Found(r)) => {
             if args.json {
                 match serde_json::to_string_pretty(&r) {

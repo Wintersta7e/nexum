@@ -4,12 +4,10 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
-use crate::trust::chain_state::ChainState;
-use crate::trust::events_view::TrustEventsView;
 
 use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
-use super::verify::{CachedCrypto, ProjectedTrust, project_trust};
+use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
 /// `search` options. Compose via `SearchOpts::new(query)` and fluent setters,
 /// or by direct struct construction.
@@ -91,11 +89,14 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         policy: opts.trust_policy,
         require_signed: opts.filters.require_signed,
     };
-    let outcome = apply_policy(scored, policy_opts, |row| &row.1);
+    let mut outcome = apply_policy(scored, policy_opts, |row| &row.1);
 
     let total = u32::try_from(outcome.visible.len()).unwrap_or(u32::MAX);
     let top_k = usize::try_from(opts.top_k).unwrap_or(usize::MAX);
-    let top_n = outcome.visible.into_iter().take(top_k).collect::<Vec<_>>();
+    // Pluck the visible rows so the policy bucket counters and warnings on
+    // `outcome` survive the rest of the `outcome` value being consumed.
+    let visible = std::mem::take(&mut outcome.visible);
+    let top_n = visible.into_iter().take(top_k).collect::<Vec<_>>();
 
     // Body inclusion: top-3 for search; full record fetched in `get`.
     let results: Vec<SearchResult> = top_n
@@ -104,17 +105,14 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         .map(|(idx, (r, p, score))| project_row(r, p, score, idx < 3))
         .collect();
 
-    let mut meta = super::meta::build_meta(
+    let mut meta = super::meta::build_meta_search(
         conn,
         &results,
         opts.trust_policy,
         opts.embed_pool_saturated,
         opts.saturation_wait_ms,
     )?;
-    meta.hidden_unsigned = outcome.hidden_unsigned;
-    meta.hidden_invalid = outcome.hidden_invalid;
-    meta.hidden_compromised = outcome.hidden_compromised;
-    meta.policy_warnings = outcome.policy_warnings;
+    meta.apply_policy_outcome(&outcome);
 
     Ok(ResultSet {
         results,
@@ -186,22 +184,15 @@ fn fetch_and_project(
     // Hydrate the chain once per verb invocation. Reused for every row's
     // projection. Empty trust_events / no notebook history degrades into a
     // pre-bootstrap chain that trusts cached `Good` crypto on its face.
-    let view = TrustEventsView::new(conn);
-    let chain = ChainState::from_view(&view)?;
-
-    fts_rows
-        .into_iter()
-        .map(|row| {
-            let cached = CachedCrypto {
-                crypto_result: row.crypto_result,
-                signer_fingerprint: row.signer_fingerprint.as_deref(),
-                commit_sha: row.record_commit_sha.as_deref(),
-                relevant_trust_events_commit: row.relevant_trust_events_commit.as_deref(),
-            };
-            let projected = project_trust(cached, &view, &chain, opts.filters.strict_revocation)?;
-            Ok::<_, QueryError>((row, projected))
-        })
-        .collect()
+    let ctx = ProjectionContext::new(conn)?;
+    ctx.project_rows(fts_rows, opts.filters.strict_revocation, |row| {
+        CachedCrypto {
+            crypto_result: row.crypto_result,
+            signer_fingerprint: row.signer_fingerprint.as_deref(),
+            commit_sha: row.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: row.relevant_trust_events_commit.as_deref(),
+        }
+    })
 }
 
 /// Project a single FTS row + projected trust + score into the public
@@ -335,16 +326,11 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::TempDir;
 
-    /// Open a fresh `index.db` under a `TempDir` so the schema (records +
-    /// `records_fts` + `record_embeddings`) and sqlite-vec auto-extension are
-    /// applied via the same path as production.
+    /// Open a fresh `index.db` under a `TempDir` with the bootstrap chain
+    /// seeded so verified rows resolve through the read-time projection.
+    /// Delegates to the shared helper used by all read-verb unit tests.
     fn open_test_db() -> (TempDir, Connection) {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("index.db");
-        let conn =
-            crate::indexer::db::open_or_create(&path).expect("open_or_create with full schema");
-        crate::query::test_util::seed_bootstrap_chain(&conn);
-        (dir, conn)
+        crate::query::test_util::open_test_db_with_seeded_chain()
     }
 
     fn insert_minimal(conn: &Connection, id: &str, title: &str, body: &str, signed: bool) {

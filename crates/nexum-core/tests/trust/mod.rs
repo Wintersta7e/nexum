@@ -47,3 +47,30 @@ pub fn fresh_notebook_with_bootstrap() -> (NotebookFixture, KeyPair, Uuid, TempD
     commit_events_yml(fixture.path(), &yaml, &primary.private_path);
     (fixture, primary, bootstrap_event, key_dir)
 }
+
+/// Build the canonical "`BootstrapKey` + `KeyAdded`" two-event events.yml
+/// payload used by every test that needs a secondary key in the chain.
+/// `bootstrap_event` ties back to the seed bootstrap row written by
+/// [`fresh_notebook_with_bootstrap`]; `added_event` is the new secondary's
+/// event UUID. Returns the YAML string ready to feed into
+/// `commit_events_yml`.
+pub fn bootstrap_plus_secondary(
+    bootstrap_event: Uuid,
+    primary: &KeyPair,
+    added_event: Uuid,
+    secondary: &KeyPair,
+    add_reason: &str,
+) -> String {
+    format!(
+        "schema_version: 1\n\
+         events:\n  \
+         - event_id: {ev1}\n    kind: BootstrapKey\n    fingerprint: \"{fp1}\"\n    public_key: \"{pk1}\"\n    reason: \"Initial bootstrap\"\n  \
+         - event_id: {ev2}\n    kind: KeyAdded\n    fingerprint: \"{fp2}\"\n    public_key: \"{pk2}\"\n    reason: \"{add_reason}\"\n",
+        ev1 = bootstrap_event,
+        fp1 = primary.fingerprint,
+        pk1 = primary.public_openssh.trim(),
+        ev2 = added_event,
+        fp2 = secondary.fingerprint,
+        pk2 = secondary.public_openssh.trim(),
+    )
+}

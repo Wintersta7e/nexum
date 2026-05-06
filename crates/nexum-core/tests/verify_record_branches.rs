@@ -15,7 +15,7 @@ use nexum_core::trust::chain_state::ChainState;
 use nexum_core::trust::events_view::{TrustEventsView, ensure_current, rebuild};
 use rusqlite::Connection;
 use trust::fixtures::{KeyPair, NotebookFixture, commit_events_yml, new_keypair};
-use trust::{fresh_index_db, fresh_notebook_with_bootstrap};
+use trust::{bootstrap_plus_secondary, fresh_index_db, fresh_notebook_with_bootstrap};
 use uuid::Uuid;
 
 /// SHA of the events.yml-touching commit at HEAD. Production records carry
@@ -107,17 +107,12 @@ fn good_crypto_rotated_projects_verified_rotated_historical() {
     let secondary = new_keypair(fixture.path(), "secondary");
 
     let added_event = Uuid::now_v7();
-    let after_added = format!(
-        "schema_version: 1\n\
-         events:\n  \
-         - event_id: {ev1}\n    kind: BootstrapKey\n    fingerprint: \"{fp1}\"\n    public_key: \"{pk1}\"\n    reason: \"Initial bootstrap\"\n  \
-         - event_id: {ev2}\n    kind: KeyAdded\n    fingerprint: \"{fp2}\"\n    public_key: \"{pk2}\"\n    reason: \"Add secondary\"\n",
-        ev1 = bootstrap_event,
-        fp1 = primary.fingerprint,
-        pk1 = primary.public_openssh.trim(),
-        ev2 = added_event,
-        fp2 = secondary.fingerprint,
-        pk2 = secondary.public_openssh.trim(),
+    let after_added = bootstrap_plus_secondary(
+        bootstrap_event,
+        &primary,
+        added_event,
+        &secondary,
+        "Add secondary",
     );
     commit_events_yml(fixture.path(), &after_added, &primary.private_path);
 
@@ -159,17 +154,12 @@ fn good_crypto_compromised_default_projects_verified_with_compromise_warning() {
     let secondary = new_keypair(fixture.path(), "secondary");
 
     let added_event = Uuid::now_v7();
-    let after_added = format!(
-        "schema_version: 1\n\
-         events:\n  \
-         - event_id: {ev1}\n    kind: BootstrapKey\n    fingerprint: \"{fp1}\"\n    public_key: \"{pk1}\"\n    reason: \"Initial bootstrap\"\n  \
-         - event_id: {ev2}\n    kind: KeyAdded\n    fingerprint: \"{fp2}\"\n    public_key: \"{pk2}\"\n    reason: \"Add secondary\"\n",
-        ev1 = bootstrap_event,
-        fp1 = primary.fingerprint,
-        pk1 = primary.public_openssh.trim(),
-        ev2 = added_event,
-        fp2 = secondary.fingerprint,
-        pk2 = secondary.public_openssh.trim(),
+    let after_added = bootstrap_plus_secondary(
+        bootstrap_event,
+        &primary,
+        added_event,
+        &secondary,
+        "Add secondary",
     );
     commit_events_yml(fixture.path(), &after_added, &primary.private_path);
 
@@ -215,17 +205,12 @@ fn good_crypto_compromised_strict_projects_invalid_with_two_warnings() {
     let secondary = new_keypair(fixture.path(), "secondary");
 
     let added_event = Uuid::now_v7();
-    let after_added = format!(
-        "schema_version: 1\n\
-         events:\n  \
-         - event_id: {ev1}\n    kind: BootstrapKey\n    fingerprint: \"{fp1}\"\n    public_key: \"{pk1}\"\n    reason: \"Initial bootstrap\"\n  \
-         - event_id: {ev2}\n    kind: KeyAdded\n    fingerprint: \"{fp2}\"\n    public_key: \"{pk2}\"\n    reason: \"Add secondary\"\n",
-        ev1 = bootstrap_event,
-        fp1 = primary.fingerprint,
-        pk1 = primary.public_openssh.trim(),
-        ev2 = added_event,
-        fp2 = secondary.fingerprint,
-        pk2 = secondary.public_openssh.trim(),
+    let after_added = bootstrap_plus_secondary(
+        bootstrap_event,
+        &primary,
+        added_event,
+        &secondary,
+        "Add secondary",
     );
     commit_events_yml(fixture.path(), &after_added, &primary.private_path);
 
@@ -268,17 +253,12 @@ fn good_crypto_pre_reanchor_case_a_projects_verified_pre_reanchor() {
     let secondary = new_keypair(fixture.path(), "secondary");
 
     let added_event = Uuid::now_v7();
-    let after_added = format!(
-        "schema_version: 1\n\
-         events:\n  \
-         - event_id: {ev1}\n    kind: BootstrapKey\n    fingerprint: \"{fp1}\"\n    public_key: \"{pk1}\"\n    reason: \"Initial bootstrap\"\n  \
-         - event_id: {ev2}\n    kind: KeyAdded\n    fingerprint: \"{fp2}\"\n    public_key: \"{pk2}\"\n    reason: \"Pre-recovery key add\"\n",
-        ev1 = bootstrap_event,
-        fp1 = primary.fingerprint,
-        pk1 = primary.public_openssh.trim(),
-        ev2 = added_event,
-        fp2 = secondary.fingerprint,
-        pk2 = secondary.public_openssh.trim(),
+    let after_added = bootstrap_plus_secondary(
+        bootstrap_event,
+        &primary,
+        added_event,
+        &secondary,
+        "Pre-recovery key add",
     );
     commit_events_yml(fixture.path(), &after_added, &primary.private_path);
     let pre_reanchor_commit = head_commit(fixture.path());
@@ -318,17 +298,12 @@ fn good_crypto_pre_reanchor_case_b_projects_invalid_with_chain_anchor_lost() {
     let secondary = new_keypair(fixture.path(), "secondary");
 
     let added_event = Uuid::now_v7();
-    let after_added = format!(
-        "schema_version: 1\n\
-         events:\n  \
-         - event_id: {ev1}\n    kind: BootstrapKey\n    fingerprint: \"{fp1}\"\n    public_key: \"{pk1}\"\n    reason: \"Initial bootstrap\"\n  \
-         - event_id: {ev2}\n    kind: KeyAdded\n    fingerprint: \"{fp2}\"\n    public_key: \"{pk2}\"\n    reason: \"Pre-recovery key add\"\n",
-        ev1 = bootstrap_event,
-        fp1 = primary.fingerprint,
-        pk1 = primary.public_openssh.trim(),
-        ev2 = added_event,
-        fp2 = secondary.fingerprint,
-        pk2 = secondary.public_openssh.trim(),
+    let after_added = bootstrap_plus_secondary(
+        bootstrap_event,
+        &primary,
+        added_event,
+        &secondary,
+        "Pre-recovery key add",
     );
     commit_events_yml(fixture.path(), &after_added, &primary.private_path);
     let pre_reanchor_commit = head_commit(fixture.path());
@@ -497,39 +472,14 @@ fn tampering_at_or_before_overrides_to_invalid_event_tampered() {
     let (_db_dir, mut conn) = fresh_index_db();
     rebuild(&mut conn, fixture.path()).expect("rebuild");
 
-    // A record whose relevant_trust_events_commit is the BOOTSTRAP commit
-    // (not the mutated one). The bootstrap commit IS in `trust_events`
-    // (topo_pos 0) and any tampering row has at_topo_pos >= 1, so the
-    // precondition `tampering at-or-before topo 0` fires only if the
-    // tampering row at topo 1 sits before the queried commit's topo 0,
-    // which it does NOT. Use the MUTATED commit's lookup instead, which is
-    // not directly in trust_events — so the precondition returns Ok(false).
-    //
-    // To exercise the precondition properly we need a tampering row at
-    // topo 0 OR at the same topo position as the queried commit. Build a
-    // 3-revision fixture: bootstrap → KeyAdded (signed by primary) →
-    // forbidden mutation. The middle commit IS in trust_events; the
-    // tampering at topo 2 fires the precondition for a record looking up
-    // the middle commit only when topo 2 <= topo of middle (= 1), which
-    // is false.
-    //
-    // The right way: query the tampering commit itself. The tampering
-    // commit is NOT inserted into trust_events (Diff::Forbidden writes to
-    // trust_chain_tampering only). So the precondition lookup on the
-    // tampering commit returns None, and `project_trust` falls through to
-    // the BrokenChain branch via state_of. That's covered in the broken
-    // chain test above.
-    //
-    // For the precondition to fire we need a record whose
-    // relevant_trust_events_commit IS in trust_events AND a tampering
-    // row at-or-before that commit's topo_pos. Append a third revision
-    // (legitimate KeyAdded), record-against-it. Then create tampering at
-    // topo 1 or topo 2 by mutating revision 2 in-place via a fourth
-    // revision that re-uses the existing event_id.
-    //
-    // Simpler shortcut for this test: insert the tampering row directly
-    // at topo 0 alongside the existing trust_events row. That exercises
-    // the read path's precondition without re-walking history.
+    // The precondition fires when a record's events.yml commit IS in
+    // trust_events AND a tampering row sits at-or-before that commit's
+    // topo_pos. Forbidden-mutation commits are written to
+    // trust_chain_tampering only (not trust_events), so directly querying
+    // them falls through to the BrokenChain branch (covered above).
+    // Insert the tampering row directly at topo 0 alongside the bootstrap
+    // commit's trust_events row — exercises the precondition without
+    // re-walking history to build a multi-revision fixture.
     conn.execute(
         "INSERT INTO trust_chain_tampering (at_commit, at_topo_pos, event_id, kind, detected_at) \
          VALUES (?1, ?2, ?3, ?4, ?5)",

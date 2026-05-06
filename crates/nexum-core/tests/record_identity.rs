@@ -3,6 +3,7 @@
 
 use nexum_core::{
     api,
+    config::types::Config,
     indexer::db::open_or_create,
     query::{self, GetOpts},
     records::{GetOutcome, Source, TrustPolicy, types::RecordKey},
@@ -141,6 +142,7 @@ fn api_get_round_trip_via_record_key() {
         trust_policy: TrustPolicy::WarnButShow,
         strict_revocation: false,
     };
-    let result = api::get(&paths, &RecordKey::bare("tau"), &opts).unwrap();
+    let cfg = Config::seed();
+    let result = api::get(&paths, &cfg, &RecordKey::bare("tau"), &opts).unwrap();
     assert!(matches!(result, GetOutcome::Found(_)));
 }

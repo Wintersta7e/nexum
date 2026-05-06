@@ -6,12 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     policy::{PolicyOpts, apply as apply_policy},
-    types::{Meta, QueryError, ResultSet, SearchResult},
-    verify::{CachedCrypto, ProjectedTrust, project_trust},
+    types::{Filters, Meta, QueryError, ResultSet, SearchResult},
+    verify::{CachedCrypto, ProjectedTrust, ProjectionContext},
 };
 use crate::records::{CryptoResult, RecordType, Source, TrustPolicy};
-use crate::trust::chain_state::ChainState;
-use crate::trust::events_view::TrustEventsView;
 
 /// Discriminator for [`by_session`] queries — names the kind of session
 /// reference to look up.
@@ -46,17 +44,18 @@ fn escape_like(s: &str) -> String {
 ///
 /// `trust_policy` is reflected verbatim in the response envelope's
 /// `_meta.trust_policy` so callers see the runtime policy that produced the
-/// result set. `strict_revocation` flips the compromised-key projection
-/// from Verified to Invalid; the api facade fills it from
-/// `cfg.trust.strict_revocation`.
+/// result set. The strict-revocation overlay rides on
+/// [`Filters::strict_revocation`] (and `require_signed` on the same shape
+/// applies the stricter override); the api facade fills both from
+/// `cfg.trust.*`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
 /// `QueryError::Trust` if the chain-state hydration fails.
 pub fn by_session(
     conn: &Connection,
+    filters: &Filters,
     trust_policy: TrustPolicy,
-    strict_revocation: bool,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, QueryError> {
     let needle = match lookup {
@@ -117,35 +116,30 @@ pub fn by_session(
 
     // Hydrate the chain once per verb invocation. Reused for every row's
     // projection.
-    let view = TrustEventsView::new(conn);
-    let chain = ChainState::from_view(&view)?;
+    let ctx = ProjectionContext::new(conn)?;
 
     // Project every row up-front so the policy filter and the SearchResult
     // shape both consume the same per-row trust state.
-    let projected_rows: Vec<(SessionRow, ProjectedTrust)> = raw_rows
-        .into_iter()
-        .map(|raw| {
-            let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-            let cached = CachedCrypto {
-                crypto_result,
-                signer_fingerprint: raw.signer_fingerprint.as_deref(),
-                commit_sha: raw.record_commit_sha.as_deref(),
-                relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
-            };
-            let projected = project_trust(cached, &view, &chain, strict_revocation)?;
-            Ok::<_, QueryError>((raw, projected))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let projected_rows: Vec<(SessionRow, ProjectedTrust)> =
+        ctx.project_rows(raw_rows, filters.strict_revocation, |raw| CachedCrypto {
+            crypto_result: CryptoResult::from_db_str(&raw.crypto_result),
+            signer_fingerprint: raw.signer_fingerprint.as_deref(),
+            commit_sha: raw.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+        })?;
 
     // Centralized warn/hide/strict policy filter.
     let policy_opts = PolicyOpts {
         policy: trust_policy,
-        require_signed: false,
+        require_signed: filters.require_signed,
     };
-    let outcome = apply_policy(projected_rows, policy_opts, |row| &row.1);
+    let mut outcome = apply_policy(projected_rows, policy_opts, |row| &row.1);
 
-    let results: Vec<SearchResult> = outcome
-        .visible
+    // Pluck the visible rows so the policy bucket counters and warnings on
+    // `outcome` survive the rest of the value being consumed by
+    // `meta.apply_policy_outcome`.
+    let visible = std::mem::take(&mut outcome.visible);
+    let results: Vec<SearchResult> = visible
         .into_iter()
         .map(|(raw, projected)| SearchResult {
             id: raw.id,
@@ -166,11 +160,8 @@ pub fn by_session(
         .collect();
 
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
-    let mut meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
-    meta.hidden_unsigned = outcome.hidden_unsigned;
-    meta.hidden_invalid = outcome.hidden_invalid;
-    meta.hidden_compromised = outcome.hidden_compromised;
-    meta.policy_warnings = outcome.policy_warnings;
+    let mut meta = super::meta::build_meta_listing(conn, &results, trust_policy)?;
+    meta.apply_policy_outcome(&outcome);
 
     Ok(ResultSet {
         results,
@@ -204,15 +195,7 @@ struct SessionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::db::open_or_create;
-    use tempfile::TempDir;
-
-    fn open() -> (TempDir, rusqlite::Connection) {
-        let dir = TempDir::new().unwrap();
-        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
-        crate::query::test_util::seed_bootstrap_chain(&conn);
-        (dir, conn)
-    }
+    use crate::query::test_util::open_test_db_with_seeded_chain;
 
     fn insert(conn: &rusqlite::Connection, id: &str, session_refs_json: &str) {
         conn.execute(
@@ -228,7 +211,7 @@ mod tests {
 
     #[test]
     fn cc_session_lookup_matches_records() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         insert(
             &conn,
             "alpha",
@@ -236,8 +219,8 @@ mod tests {
         );
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
             },
@@ -249,7 +232,7 @@ mod tests {
 
     #[test]
     fn codex_thread_lookup_matches_records() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         insert(
             &conn,
             "beta",
@@ -257,8 +240,8 @@ mod tests {
         );
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             &SessionLookup::CodexThread {
                 thread_id: "thread-aaa".into(),
             },
@@ -269,7 +252,7 @@ mod tests {
 
     #[test]
     fn by_session_with_hide_filters_and_counts() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         // Insert one verified, one unsigned, and one invalid record that all
         // reference the same CC session UUID so the lookup exercises both
         // hidden buckets.
@@ -312,8 +295,8 @@ mod tests {
 
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::Hide,
-            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
             },
@@ -332,11 +315,11 @@ mod tests {
 
     #[test]
     fn trust_policy_round_trips_into_meta() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -345,8 +328,8 @@ mod tests {
         assert_eq!(res.meta.trust_policy, TrustPolicy::WarnButShow);
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::Hide,
-            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -357,11 +340,11 @@ mod tests {
 
     #[test]
     fn unknown_session_returns_empty() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -377,7 +360,7 @@ mod tests {
     /// character, both of which would yield false positives.
     #[test]
     fn codex_rollout_lookup_matches_records_with_wildcard_chars_in_path() {
-        let (_dir, conn) = open();
+        let (_dir, conn) = open_test_db_with_seeded_chain();
         // Use forward slashes so the test runs identically on Windows
         // and Linux. `Path::display()` won't transform forward slashes
         // on either platform.
@@ -396,8 +379,8 @@ mod tests {
 
         let res = by_session(
             &conn,
+            &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             &SessionLookup::CodexRollout {
                 path: std::path::PathBuf::from(real_path),
             },

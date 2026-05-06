@@ -231,6 +231,21 @@ mod tests {
         assert_eq!(out.hidden_invalid, 1);
         assert_eq!(out.hidden_compromised, 1);
     }
+
+    /// Empty input must produce a default outcome — zero counters, no
+    /// envelope warnings, empty `visible`. Default-shape covers
+    /// `Vec::new()` rows and lets callers default-construct an outcome
+    /// when they short-circuit before invoking `apply`.
+    #[test]
+    fn apply_with_empty_rows_returns_default_outcome() {
+        let rows: Vec<(usize, ProjectedTrust)> = Vec::new();
+        let out = apply(rows, opts(TrustPolicy::WarnButShow, false), pluck);
+        assert!(out.visible.is_empty());
+        assert_eq!(out.hidden_unsigned, 0);
+        assert_eq!(out.hidden_invalid, 0);
+        assert_eq!(out.hidden_compromised, 0);
+        assert!(out.policy_warnings.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -241,8 +256,7 @@ mod cell_tests {
     //! alongside the helper logic.
 
     use crate::query::test_util::{
-        TEST_BOOTSTRAP_FP, TEST_COMPROMISED_FP, TEST_TRUST_COMMIT, TEST_TRUST_COMMIT_COMPROMISED,
-        seed_bootstrap_chain, seed_compromised_key_chain,
+        CELL_TOKEN, seed_bootstrap_chain, seed_canonical_records, seed_compromised_key_chain,
     };
     use crate::query::{
         Filters, GetOpts,
@@ -260,60 +274,6 @@ mod cell_tests {
         seed_bootstrap_chain(&conn);
         seed_compromised_key_chain(&conn);
         conn
-    }
-
-    /// FTS-indexed token shared by every cell-test record so a single
-    /// `search` invocation matches the whole canonical set. The
-    /// `body` column carries it; FTS5 indexes `title`, `summary`, `body`,
-    /// and `tags_fts`.
-    const CELL_TOKEN: &str = "celltoken";
-
-    fn insert_record(
-        conn: &Connection,
-        id: &str,
-        crypto_result: &str,
-        signer_fp: Option<&str>,
-        trust_commit: Option<&str>,
-    ) {
-        conn.execute(
-            "INSERT INTO records (
-                id, record_type, title, body, source, project_id,
-                agent, confidence, outcome,
-                session_refs, files, commits,
-                crypto_result, signer_fingerprint, relevant_trust_events_commit,
-                tags, tags_fts,
-                created, updated, content_hash, index_hash, indexed_at
-             ) VALUES (?1, 'decision', ?1, ?5, 'local', 'git:test',
-                'manual', 'medium', 'working',
-                '[]', '[]', '[]',
-                ?2, ?3, ?4,
-                '[]', '',
-                '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', '2026-04-29T00:00:00Z')",
-            rusqlite::params![id, crypto_result, signer_fp, trust_commit, CELL_TOKEN],
-        )
-        .unwrap();
-    }
-
-    /// Seed the four canonical record shapes (verified, unsigned,
-    /// bad-signature, signed-by-compromised-key) that drive the policy
-    /// decision tree's full coverage.
-    fn seed_canonical_records(conn: &Connection) {
-        insert_record(
-            conn,
-            "verified",
-            "good",
-            Some(TEST_BOOTSTRAP_FP),
-            Some(TEST_TRUST_COMMIT),
-        );
-        insert_record(conn, "unsigned", "no-signature", None, None);
-        insert_record(conn, "bad-sig", "bad-signature", None, None);
-        insert_record(
-            conn,
-            "compromised",
-            "good",
-            Some(TEST_COMPROMISED_FP),
-            Some(TEST_TRUST_COMMIT_COMPROMISED),
-        );
     }
 
     fn search_opts(
@@ -526,5 +486,65 @@ mod cell_tests {
         )
         .unwrap();
         assert!(matches!(outcome, GetOutcome::Found(_)));
+    }
+
+    /// Under `WarnButShow + include_unsigned=false`, an unsigned record
+    /// must surface as `Found` (the policy keeps non-verified rows
+    /// visible) and carry the `unsigned` warning in its provenance — the
+    /// regression-prone path the per-verb wire-up has to honor.
+    #[test]
+    fn get_under_warn_but_show_returns_unsigned_record_with_warning() {
+        let conn = open();
+        seed_canonical_records(&conn);
+        let outcome = get(
+            &conn,
+            &RecordKey::bare("unsigned"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found(record) = outcome else {
+            panic!("expected Found under WarnButShow, got non-Found");
+        };
+        assert_eq!(record.id, "unsigned");
+        assert_eq!(
+            record.provenance.signature_status,
+            SignatureStatus::Unsigned
+        );
+        assert!(record.provenance.warnings.contains(&"unsigned".to_owned()));
+    }
+
+    /// Same shape for a bad-signature record: `WarnButShow` keeps it
+    /// visible, the projection still flags it Invalid with
+    /// `bad-signature`. Confirms `get`'s policy delegation does not
+    /// incorrectly hide non-Verified rows under `WarnButShow`.
+    #[test]
+    fn get_under_warn_but_show_returns_invalid_record_with_warning() {
+        let conn = open();
+        seed_canonical_records(&conn);
+        let outcome = get(
+            &conn,
+            &RecordKey::bare("bad-sig"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found(record) = outcome else {
+            panic!("expected Found under WarnButShow, got non-Found");
+        };
+        assert_eq!(record.id, "bad-sig");
+        assert_eq!(record.provenance.signature_status, SignatureStatus::Invalid);
+        assert!(
+            record
+                .provenance
+                .warnings
+                .contains(&"bad-signature".to_owned())
+        );
     }
 }

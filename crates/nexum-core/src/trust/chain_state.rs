@@ -328,8 +328,14 @@ impl ChainState {
         for row in rows {
             let (event_id, kind, fp, old_fp, new_fp, topo_pos_i64, chain_anchor_lost) = row?;
             let topo_pos = u64::try_from(topo_pos_i64).unwrap_or(0);
+            // Schema CHECK constraint guarantees `kind` is one of the five
+            // tag values. Drop rows with anything else (defensive — the
+            // schema makes this unreachable).
+            let Some(tag) = crate::trust::events::EventKindTag::from_db_str(kind.as_str()) else {
+                continue;
+            };
             chain.apply_persisted_event(&PersistedEvent {
-                kind: kind.as_str(),
+                kind: tag,
                 fp: fp.as_deref(),
                 old_fp: old_fp.as_deref(),
                 new_fp: new_fp.as_deref(),
@@ -372,27 +378,27 @@ impl ChainState {
     /// line budget.
     fn apply_persisted_event(&mut self, ev: &PersistedEvent<'_>) {
         match ev.kind {
-            "BootstrapKey" => {
+            crate::trust::events::EventKindTag::BootstrapKey => {
                 if let Some(fp) = ev.fp {
                     self.set_bootstrap(fp, ev.event_id, ev.topo_pos);
                 }
             }
-            "KeyAdded" => {
+            crate::trust::events::EventKindTag::KeyAdded => {
                 if let Some(fp) = ev.fp {
                     self.apply_key_added(fp, ev.event_id, ev.topo_pos);
                 }
             }
-            "KeyRotatedOut" => {
+            crate::trust::events::EventKindTag::KeyRotatedOut => {
                 if let Some(fp) = ev.fp {
                     self.apply_key_rotated_out(fp, ev.topo_pos);
                 }
             }
-            "KeyCompromised" => {
+            crate::trust::events::EventKindTag::KeyCompromised => {
                 if let Some(fp) = ev.fp {
                     self.apply_key_compromised(fp, ev.topo_pos);
                 }
             }
-            "BootstrapReanchor" => {
+            crate::trust::events::EventKindTag::BootstrapReanchor => {
                 if let (Some(_old), Some(new)) = (ev.old_fp, ev.new_fp) {
                     let case = if ev.chain_anchor_lost.unwrap_or(0) != 0 {
                         ReanchorCase::B
@@ -402,7 +408,6 @@ impl ChainState {
                     self.apply_reanchor(new, ev.event_id, ev.topo_pos, case);
                 }
             }
-            _ => {}
         }
     }
 }
@@ -411,7 +416,7 @@ impl ChainState {
 /// the materializer-row fields so the dispatch helper stays under the
 /// strict-clippy `too_many_arguments` cap.
 struct PersistedEvent<'a> {
-    kind: &'a str,
+    kind: crate::trust::events::EventKindTag,
     fp: Option<&'a str>,
     old_fp: Option<&'a str>,
     new_fp: Option<&'a str>,

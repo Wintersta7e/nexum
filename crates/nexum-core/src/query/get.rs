@@ -14,12 +14,10 @@ use crate::records::{
     Agent, Confidence, CryptoResult, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey,
     RecordType, SessionRef, Source, TrustPolicy, UnifiedRecord,
 };
-use crate::trust::chain_state::ChainState;
-use crate::trust::events_view::TrustEventsView;
 
 use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::QueryError;
-use super::verify::{CachedCrypto, ProjectedTrust, project_trust};
+use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
 /// `get` options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,15 +81,15 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     // Exactly one candidate — project trust then apply policy.
     let raw = candidates.swap_remove(0);
     let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-    let view = TrustEventsView::new(conn);
-    let chain = ChainState::from_view(&view)?;
-    let cached = CachedCrypto {
-        crypto_result,
-        signer_fingerprint: raw.signer_fingerprint.as_deref(),
-        commit_sha: raw.record_commit_sha.as_deref(),
-        relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
-    };
-    let projected = project_trust(cached, &view, &chain, opts.strict_revocation)?;
+    let ctx = ProjectionContext::new(conn)?;
+    let mut projected =
+        ctx.project_rows(vec![raw], opts.strict_revocation, |raw| CachedCrypto {
+            crypto_result,
+            signer_fingerprint: raw.signer_fingerprint.as_deref(),
+            commit_sha: raw.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+        })?;
+    let (raw, projected) = projected.swap_remove(0);
 
     // `include_unsigned` is the per-call escape hatch for agents that
     // need to inspect a record regardless of trust state. When set, we
@@ -288,15 +286,11 @@ struct RawRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::db::open_or_create;
+    use crate::query::test_util::open_test_db_with_seeded_chain;
     use crate::records::SignatureStatus;
-    use tempfile::TempDir;
 
-    fn open() -> (TempDir, rusqlite::Connection) {
-        let dir = TempDir::new().unwrap();
-        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
-        crate::query::test_util::seed_bootstrap_chain(&conn);
-        (dir, conn)
+    fn open() -> (tempfile::TempDir, rusqlite::Connection) {
+        open_test_db_with_seeded_chain()
     }
 
     fn insert(conn: &rusqlite::Connection, id: &str, signed: bool) {

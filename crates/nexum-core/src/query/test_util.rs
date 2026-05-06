@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
+use tempfile::TempDir;
 
 /// Stable fingerprint for the bootstrap key seeded by
 /// [`seed_bootstrap_chain`]. Verified rows in fixture data carry this
@@ -88,6 +89,19 @@ pub(crate) fn seed_compromised_key_chain(conn: &Connection) {
     .unwrap();
 }
 
+/// Open a fresh on-disk DB seeded with the bootstrap chain. The returned
+/// `TempDir` owns the directory holding `index.db`; tests must keep it
+/// alive while they hold the connection. Centralizes the open-and-seed
+/// pattern every read verb's unit-test fixture replays so all four read
+/// verbs hydrate the chain identically.
+pub(crate) fn open_test_db_with_seeded_chain() -> (TempDir, Connection) {
+    let dir = TempDir::new().expect("tempdir");
+    let conn = crate::indexer::db::open_or_create(&dir.path().join("index.db"))
+        .expect("open_or_create with full schema");
+    seed_bootstrap_chain(&conn);
+    (dir, conn)
+}
+
 /// Open an in-memory DB pre-populated with 3 verified, 2 unsigned, and 1
 /// invalid record. Used by `list`, `recent`, and `by_session` trust-policy
 /// tests that need a mixed-status fixture. The `crypto_result` SQL column
@@ -111,6 +125,64 @@ pub(crate) fn setup_test_db_with_mixed_signature_status() -> rusqlite::Connectio
         insert_minimal_record(&conn, id, status, now);
     }
     conn
+}
+
+/// FTS-indexed token shared by every cell-test record so a single
+/// `search` invocation matches the whole canonical set. Carried in the
+/// `body` column; FTS5 indexes `title`, `summary`, `body`, and
+/// `tags_fts`.
+pub(crate) const CELL_TOKEN: &str = "celltoken";
+
+/// Seed the four canonical record shapes (verified, unsigned,
+/// bad-signature, signed-by-compromised-key) that drive the policy
+/// decision tree's full coverage. Caller must invoke
+/// [`seed_bootstrap_chain`] (and [`seed_compromised_key_chain`] for the
+/// fourth row) first so the fixture's signer fingerprints resolve.
+pub(crate) fn seed_canonical_records(conn: &Connection) {
+    insert_canonical_record(
+        conn,
+        "verified",
+        "good",
+        Some(TEST_BOOTSTRAP_FP),
+        Some(TEST_TRUST_COMMIT),
+    );
+    insert_canonical_record(conn, "unsigned", "no-signature", None, None);
+    insert_canonical_record(conn, "bad-sig", "bad-signature", None, None);
+    insert_canonical_record(
+        conn,
+        "compromised",
+        "good",
+        Some(TEST_COMPROMISED_FP),
+        Some(TEST_TRUST_COMMIT_COMPROMISED),
+    );
+}
+
+/// Insert one canonical-shape record into `records`. Body carries
+/// [`CELL_TOKEN`] so a single `search` matches every cell-test record.
+fn insert_canonical_record(
+    conn: &Connection,
+    id: &str,
+    crypto_result: &str,
+    signer_fp: Option<&str>,
+    trust_commit: Option<&str>,
+) {
+    conn.execute(
+        "INSERT INTO records (
+            id, record_type, title, body, source, project_id,
+            agent, confidence, outcome,
+            session_refs, files, commits,
+            crypto_result, signer_fingerprint, relevant_trust_events_commit,
+            tags, tags_fts,
+            created, updated, content_hash, index_hash, indexed_at
+         ) VALUES (?1, 'decision', ?1, ?5, 'local', 'git:test',
+            'manual', 'medium', 'working',
+            '[]', '[]', '[]',
+            ?2, ?3, ?4,
+            '[]', '',
+            '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', '2026-04-29T00:00:00Z')",
+        params![id, crypto_result, signer_fp, trust_commit, CELL_TOKEN],
+    )
+    .unwrap();
 }
 
 /// Insert the bare minimum record needed for trust-policy and hide-filter

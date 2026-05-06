@@ -26,15 +26,19 @@ pub enum ApiError {
     Query(#[from] crate::query::QueryError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
-    /// Trust-events materializer surfaced an error during the per-verb
-    /// `ensure_current` call. Verb-internal trust errors (raised inside a
-    /// [`crate::query::QueryError::Trust`]) reach the caller via
-    /// [`ApiError::Query`]; this variant is reserved for the facade-level
-    /// `ensure_current` step that runs before the verb is delegated to.
-    #[error(transparent)]
-    Trust(#[from] crate::trust::events::TrustError),
     #[error("index schema v{v_disk} is older than this binary (v{v_code}); run `nexum migrate`")]
     MigrationRequired { v_disk: u32, v_code: u32 },
+}
+
+// Trust-events materializer errors raised by the facade-level
+// `ensure_current` call route through the same wire shape as verb-internal
+// trust errors: `ApiError::Query(QueryError::Trust(_))`. Single canonical
+// path so callers don't have to discriminate where in the read pipeline
+// the error originated.
+impl From<crate::trust::events::TrustError> for ApiError {
+    fn from(e: crate::trust::events::TrustError) -> Self {
+        ApiError::Query(crate::query::QueryError::Trust(e))
+    }
 }
 
 /// Run a reindex pass (default: incremental).
@@ -57,19 +61,35 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
     Ok(indexer_run_force(&mut conn, cfg, paths)?)
 }
 
+/// Open the index DB and prime the trust-events view for a read verb.
+///
+/// Read verbs share two preconditions: the DB must already exist
+/// (`open_existing` errors if not — surfaced as `IndexMissing` so the CLI
+/// can hint at running `nexum index`), and the materialized trust view
+/// must be current with respect to `notebook.git` (`ensure_current` is a
+/// no-op on a hot path / a full rebuild on a stale or missing one).
+/// Centralizing both steps so a future read verb cannot land without
+/// either.
+fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
+    let mut conn = open_existing(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    Ok(conn)
+}
+
 /// FTS-only search (vector branch lands later).
 ///
 /// The `cfg.trust.ranking_penalty` value overrides any
 /// `unsigned_ranking_penalty` set on `opts` so a single configured value
-/// drives both ranking and presentation.
+/// drives both ranking and presentation. `cfg.trust.strict_revocation`
+/// likewise overrides `opts.filters.strict_revocation` so the projection
+/// uses the runtime configuration.
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite or filter encoding failure;
-/// `ApiError::Trust` if the trust-events materializer rebuild fails.
+/// Returns `ApiError::Query` on rusqlite or filter encoding failure (and
+/// on materializer rebuild failure, routed through `QueryError::Trust`).
 pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
-    let mut conn = open_existing(&paths.index_db)?;
-    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    let conn = open_for_query(paths)?;
     let mut effective_opts = opts.clone();
     effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
     effective_opts.filters.strict_revocation = cfg.trust.strict_revocation;
@@ -83,20 +103,24 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
 /// `key` may be exact, partial, or bare; partial / bare keys that match
 /// more than one row produce `ApiError::Query(QueryError::Ambiguous)`.
 ///
-/// The caller-supplied `opts.strict_revocation` is honored as-is: callers
-/// (CLI / MCP) fill it from `cfg.trust.strict_revocation` so a single
-/// configured value drives the projection without re-routing through the
-/// facade.
+/// `cfg.trust.strict_revocation` overrides `opts.strict_revocation` so the
+/// projection uses the runtime configuration verbatim — same shape as
+/// `search`'s opts override.
 ///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite / deserialization failure or
-/// when the key matches multiple records (`QueryError::Ambiguous`);
-/// `ApiError::Trust` if the trust-events materializer rebuild fails.
-pub fn get(paths: &Paths, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome, ApiError> {
-    let mut conn = open_existing(&paths.index_db)?;
-    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
-    Ok(query_get(&conn, key, opts)?)
+/// when the key matches multiple records (`QueryError::Ambiguous`).
+pub fn get(
+    paths: &Paths,
+    cfg: &Config,
+    key: &RecordKey,
+    opts: &GetOpts,
+) -> Result<GetOutcome, ApiError> {
+    let conn = open_for_query(paths)?;
+    let mut effective_opts = opts.clone();
+    effective_opts.strict_revocation = cfg.trust.strict_revocation;
+    Ok(query_get(&conn, key, &effective_opts)?)
 }
 
 /// List with filters + pagination.
@@ -104,11 +128,12 @@ pub fn get(paths: &Paths, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome,
 /// `cfg.trust.unsigned_default` is forwarded into the query verb so the
 /// response envelope's `_meta.trust_policy` reflects the runtime
 /// configuration rather than a hardcoded default.
+/// `cfg.trust.strict_revocation` overrides `filters.strict_revocation` so
+/// every read verb consults the same configured value.
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite failure;
-/// `ApiError::Trust` if the trust-events materializer rebuild fails.
+/// Returns `ApiError::Query` on rusqlite failure.
 pub fn list(
     paths: &Paths,
     cfg: &Config,
@@ -116,13 +141,13 @@ pub fn list(
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
-    let mut conn = open_existing(&paths.index_db)?;
-    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    let conn = open_for_query(paths)?;
+    let mut effective_filters = filters.clone();
+    effective_filters.strict_revocation = cfg.trust.strict_revocation;
     Ok(query_list(
         &conn,
-        filters,
+        &effective_filters,
         cfg.trust.unsigned_default,
-        cfg.trust.strict_revocation,
         limit,
         cursor,
     )?)
@@ -133,23 +158,27 @@ pub fn list(
 /// `cfg.trust.unsigned_default` is forwarded into the query verb so the
 /// response envelope's `_meta.trust_policy` reflects the runtime
 /// configuration rather than a hardcoded default.
+/// `cfg.trust.strict_revocation` flips the compromised-key projection
+/// from Verified to Invalid.
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite failure or unknown source name;
-/// `ApiError::Trust` if the trust-events materializer rebuild fails.
+/// Returns `ApiError::Query` on rusqlite failure or unknown source name.
 pub fn recent(
     paths: &Paths,
     cfg: &Config,
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
-    let mut conn = open_existing(&paths.index_db)?;
-    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    let conn = open_for_query(paths)?;
+    let filters = Filters {
+        strict_revocation: cfg.trust.strict_revocation,
+        ..Filters::default()
+    };
     Ok(query_recent(
         &conn,
+        &filters,
         cfg.trust.unsigned_default,
-        cfg.trust.strict_revocation,
         limit,
         source,
     )?)
@@ -160,22 +189,26 @@ pub fn recent(
 /// `cfg.trust.unsigned_default` is forwarded into the query verb so the
 /// response envelope's `_meta.trust_policy` reflects the runtime
 /// configuration rather than a hardcoded default.
+/// `cfg.trust.strict_revocation` flips the compromised-key projection
+/// from Verified to Invalid.
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite failure;
-/// `ApiError::Trust` if the trust-events materializer rebuild fails.
+/// Returns `ApiError::Query` on rusqlite failure.
 pub fn by_session(
     paths: &Paths,
     cfg: &Config,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, ApiError> {
-    let mut conn = open_existing(&paths.index_db)?;
-    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    let conn = open_for_query(paths)?;
+    let filters = Filters {
+        strict_revocation: cfg.trust.strict_revocation,
+        ..Filters::default()
+    };
     Ok(query_by_session(
         &conn,
+        &filters,
         cfg.trust.unsigned_default,
-        cfg.trust.strict_revocation,
         lookup,
     )?)
 }

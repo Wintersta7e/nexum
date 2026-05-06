@@ -7,11 +7,9 @@ use super::{
     policy::{PolicyOpts, apply as apply_policy},
     search::build_filter_sql,
     types::{Filters, QueryError, ResultSet, SearchResult},
-    verify::{CachedCrypto, ProjectedTrust, project_trust},
+    verify::{CachedCrypto, ProjectedTrust, ProjectionContext},
 };
 use crate::records::{CryptoResult, RecordType, Source, TrustPolicy};
-use crate::trust::chain_state::ChainState;
-use crate::trust::events_view::TrustEventsView;
 
 /// Sentinel used in the keyset compare when no cursor is supplied. Any
 /// `updated` string (RFC3339 timestamp) compares strictly less than this
@@ -30,9 +28,9 @@ const CURSOR_SENTINEL_UPDATED: &str = "9999-12-31T23:59:59Z";
 ///
 /// `trust_policy` is passed through verbatim into the response envelope so
 /// the `_meta.trust_policy` field accurately reflects the runtime
-/// `[trust] unsigned_default` setting. `strict_revocation` flips the
-/// compromised-key projection from Verified to Invalid; the api facade
-/// fills it from `cfg.trust.strict_revocation`.
+/// `[trust] unsigned_default` setting. The strict-revocation overlay
+/// rides on [`Filters::strict_revocation`]; the api facade fills it from
+/// `cfg.trust.strict_revocation`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
@@ -42,7 +40,6 @@ pub fn list(
     conn: &Connection,
     filters: &Filters,
     trust_policy: TrustPolicy,
-    strict_revocation: bool,
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -87,26 +84,18 @@ pub fn list(
 
     // Hydrate the chain once per verb invocation. Reused for every row's
     // projection.
-    let view = TrustEventsView::new(conn);
-    let chain = ChainState::from_view(&view)?;
+    let ctx = ProjectionContext::new(conn)?;
 
     // Project every row up-front so the projected trust shape is
     // available both for the policy filter and for materializing
     // `SearchResult` items.
-    let mut projected_rows: Vec<(ListRow, ProjectedTrust)> = rows
-        .into_iter()
-        .map(|raw| {
-            let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-            let cached = CachedCrypto {
-                crypto_result,
-                signer_fingerprint: raw.signer_fingerprint.as_deref(),
-                commit_sha: raw.record_commit_sha.as_deref(),
-                relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
-            };
-            let projected = project_trust(cached, &view, &chain, strict_revocation)?;
-            Ok::<_, QueryError>((raw, projected))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut projected_rows: Vec<(ListRow, ProjectedTrust)> =
+        ctx.project_rows(rows, filters.strict_revocation, |raw| CachedCrypto {
+            crypto_result: CryptoResult::from_db_str(&raw.crypto_result),
+            signer_fingerprint: raw.signer_fingerprint.as_deref(),
+            commit_sha: raw.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+        })?;
 
     // Drop the over-limit sentinel row before policy filtering so the
     // cursor is encoded from the last RETURNED row's sort key, regardless
@@ -129,20 +118,19 @@ pub fn list(
         policy: trust_policy,
         require_signed: filters.require_signed,
     };
-    let outcome = apply_policy(projected_rows, policy_opts, |row| &row.1);
+    let mut outcome = apply_policy(projected_rows, policy_opts, |row| &row.1);
 
-    let results: Vec<SearchResult> = outcome
-        .visible
+    // Pluck the visible rows out so the policy bucket counters survive
+    // the rest of the `outcome` value being consumed via `meta.apply_*`.
+    let visible = std::mem::take(&mut outcome.visible);
+    let results: Vec<SearchResult> = visible
         .into_iter()
         .map(|(raw, projected)| row_to_search_result(raw, projected))
         .collect();
     let total = u32::try_from(results.len()).unwrap_or(u32::MAX);
 
-    let mut meta = super::meta::build_meta(conn, &results, trust_policy, false, 0)?;
-    meta.hidden_unsigned = outcome.hidden_unsigned;
-    meta.hidden_invalid = outcome.hidden_invalid;
-    meta.hidden_compromised = outcome.hidden_compromised;
-    meta.policy_warnings = outcome.policy_warnings;
+    let mut meta = super::meta::build_meta_listing(conn, &results, trust_policy)?;
+    meta.apply_policy_outcome(&outcome);
     Ok(ResultSet {
         results,
         total_matched: total,
@@ -230,13 +218,10 @@ fn decode_cursor(c: &str) -> Result<(String, i64), QueryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::db::open_or_create;
-    use tempfile::TempDir;
+    use crate::query::test_util::open_test_db_with_seeded_chain;
 
-    fn open() -> (TempDir, rusqlite::Connection) {
-        let dir = TempDir::new().unwrap();
-        let conn = open_or_create(&dir.path().join("index.db")).unwrap();
-        (dir, conn)
+    fn open() -> (tempfile::TempDir, rusqlite::Connection) {
+        open_test_db_with_seeded_chain()
     }
 
     fn insert(conn: &rusqlite::Connection, id: &str, updated: &str) {
@@ -261,7 +246,6 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             10,
             None,
         )
@@ -284,7 +268,6 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             3,
             None,
         )
@@ -311,7 +294,7 @@ mod tests {
             record_type: Some(crate::records::RecordType::Recommendation),
             ..Filters::default()
         };
-        let rs = list(&conn, &filters, TrustPolicy::WarnButShow, false, 10, None).unwrap();
+        let rs = list(&conn, &filters, TrustPolicy::WarnButShow, 10, None).unwrap();
         assert_eq!(rs.results.len(), 1);
         assert_eq!(rs.results[0].id, "r1");
     }
@@ -344,7 +327,6 @@ mod tests {
                 &conn,
                 &Filters::default(),
                 TrustPolicy::WarnButShow,
-                false,
                 1,
                 cursor.as_deref(),
             )
@@ -397,21 +379,12 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             10,
             None,
         )
         .unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::WarnButShow);
-        let rs = list(
-            &conn,
-            &Filters::default(),
-            TrustPolicy::Hide,
-            false,
-            10,
-            None,
-        )
-        .unwrap();
+        let rs = list(&conn, &Filters::default(), TrustPolicy::Hide, 10, None).unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
     }
 
@@ -422,7 +395,6 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             1,
             Some("not-a-cursor"),
         )
@@ -432,7 +404,6 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             1,
             Some("2026-04-01T00:00:00Z|notanint"),
         )
@@ -444,15 +415,7 @@ mod tests {
     fn list_with_hide_policy_filters_unsigned_and_counts_hidden() {
         let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
         // 3 verified, 2 unsigned, 1 invalid in fixtures.
-        let rs = list(
-            &conn,
-            &Filters::default(),
-            TrustPolicy::Hide,
-            false,
-            100,
-            None,
-        )
-        .unwrap();
+        let rs = list(&conn, &Filters::default(), TrustPolicy::Hide, 100, None).unwrap();
         assert_eq!(
             rs.results.len(),
             3,
@@ -470,7 +433,6 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
-            false,
             100,
             None,
         )

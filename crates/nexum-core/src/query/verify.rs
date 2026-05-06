@@ -7,6 +7,9 @@
 //! and joins it with the materialized `trust_events` view to produce the
 //! API contract: `signature_status`, `trust_basis`, `warnings`.
 
+use rusqlite::Connection;
+
+use super::types::QueryError;
 use crate::records::{CryptoResult, SignatureStatus, TrustBasis};
 use crate::trust::chain_state::{ChainState, ReanchorCase, TrustState};
 use crate::trust::events::TrustError;
@@ -69,6 +72,56 @@ impl ProjectedTrust {
     }
 }
 
+/// One-time hydration shared across every row of a single read-verb
+/// invocation. Pairs the materialized [`TrustEventsView`] with the
+/// in-memory [`ChainState`] hydrated from the same DB so per-row projections
+/// only consume cheap references rather than re-running the hydration.
+pub(crate) struct ProjectionContext<'a> {
+    /// View over `trust_events` / `trust_chain_tampering`. Borrowed by
+    /// per-row [`project_trust`] calls.
+    pub view: TrustEventsView<'a>,
+    /// In-memory state machine hydrated from the `view`. Borrowed by
+    /// per-row [`project_trust`] calls.
+    pub chain: ChainState,
+}
+
+impl<'a> ProjectionContext<'a> {
+    /// Hydrate the projection context for the supplied connection.
+    ///
+    /// # Errors
+    /// Returns [`QueryError::Trust`] when [`ChainState::from_view`] fails.
+    pub(crate) fn new(conn: &'a Connection) -> Result<Self, QueryError> {
+        let view = TrustEventsView::new(conn);
+        let chain = ChainState::from_view(&view)?;
+        Ok(Self { view, chain })
+    }
+
+    /// Project a batch of raw rows + their `CachedCrypto` shape into
+    /// `(raw, ProjectedTrust)` tuples, surfacing any [`QueryError::Trust`]
+    /// from a per-row tampering / topo lookup.
+    ///
+    /// `to_cached` plucks the [`CachedCrypto`] view out of each raw row;
+    /// the closure intentionally borrows so callers can carry per-verb
+    /// side data (commit shas, scores) without copying.
+    pub(crate) fn project_rows<R, F>(
+        &self,
+        rows: Vec<R>,
+        strict_revocation: bool,
+        to_cached: F,
+    ) -> Result<Vec<(R, ProjectedTrust)>, QueryError>
+    where
+        F: Fn(&R) -> CachedCrypto<'_>,
+    {
+        rows.into_iter()
+            .map(|raw| {
+                let cached = to_cached(&raw);
+                let projected = project_trust(cached, &self.view, &self.chain, strict_revocation)?;
+                Ok::<_, QueryError>((raw, projected))
+            })
+            .collect()
+    }
+}
+
 /// Per-record cached crypto state read straight from the `records` table.
 /// The verb-side row reader populates this for every row before delegating
 /// to [`project_trust`].
@@ -121,13 +174,22 @@ pub fn project_trust(
     chain: &ChainState,
     strict_revocation: bool,
 ) -> Result<ProjectedTrust, TrustError> {
-    let trust_commit = cached.relevant_trust_events_commit;
+    // Resolve the events.yml commit's topo position once. Both the
+    // tampering precondition and the state-machine projection key on it,
+    // so a single SQL roundtrip serves both. Records without a trust-events
+    // commit (cc-native / codex-native) get `None` here, which short-
+    // circuits the tampering precondition and routes Good crypto through
+    // the BrokenChain branch below.
+    let topo_pos = match cached.relevant_trust_events_commit {
+        Some(c) => view.topo_pos_of(c)?,
+        None => None,
+    };
 
     // Step 0: tampering precondition. If the record's events.yml commit
     // is at-or-before any tampering row, force Invalid regardless of
     // crypto_result.
-    if let Some(c) = trust_commit
-        && view.has_tampering_at_or_before(c)?
+    if let Some(topo) = topo_pos
+        && view.has_tampering_at_topo(topo)?
     {
         return Ok(ProjectedTrust::invalid(&[
             "broken-trust-chain",
@@ -147,15 +209,10 @@ pub fn project_trust(
         CryptoResult::Good => {}
     }
 
-    // Steps 5-6: state-machine projection. Look up the events.yml commit's
-    // topological position; that's the trust state effective when the
-    // record was signed.
+    // Steps 5-6: state-machine projection. The pre-resolved topo position
+    // pinpoints the trust state effective when the record was signed.
     let signer_fp = cached.signer_fingerprint.unwrap_or("");
-    let Some(topo_pos) = trust_commit
-        .map(|c| view.topo_pos_of(c))
-        .transpose()?
-        .flatten()
-    else {
+    let Some(topo_pos) = topo_pos else {
         // No events.yml commit reachable from this record (or commit not
         // recorded by the materializer). Conservative: Invalid +
         // broken-trust-chain.

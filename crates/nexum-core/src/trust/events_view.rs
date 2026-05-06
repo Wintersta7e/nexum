@@ -67,6 +67,12 @@ impl<'a> TrustEventsView<'a> {
     /// stopped accumulating new rows) return `Ok(false)` because the
     /// tampering precondition does not apply to them.
     ///
+    /// Convenience wrapper over [`Self::has_tampering_at_topo`] for callers
+    /// that have a commit SHA but not its topo position. Read-time
+    /// projection prefers the topo-keyed variant since it has already
+    /// resolved the commit's topo position for the state-machine lookup
+    /// and avoids a second SQL roundtrip.
+    ///
     /// # Errors
     ///
     /// Returns `TrustError::Sqlite` if the underlying `count(*)` query fails.
@@ -74,9 +80,21 @@ impl<'a> TrustEventsView<'a> {
         let Some(topo) = self.topo_pos_of(commit)? else {
             return Ok(false);
         };
+        self.has_tampering_at_topo(topo)
+    }
+
+    /// True if any tampering row was recorded at or before `at_topo`. Used
+    /// by read-time projection when the topo position has already been
+    /// resolved for the state-machine lookup so the second SQL roundtrip
+    /// (commit → topo) can be skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TrustError::Sqlite` if the underlying `count(*)` query fails.
+    pub(crate) fn has_tampering_at_topo(&self, at_topo: u64) -> Result<bool, TrustError> {
         let count: i64 = self.conn.query_row(
             "SELECT count(*) FROM trust_chain_tampering WHERE at_topo_pos <= ?1",
-            [i64::try_from(topo).unwrap_or(i64::MAX)],
+            [i64::try_from(at_topo).unwrap_or(i64::MAX)],
             |r| r.get(0),
         )?;
         Ok(count > 0)

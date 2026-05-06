@@ -67,17 +67,64 @@ pub enum EventKind {
     },
 }
 
+/// Tag form of [`EventKind`] for the `trust_events.kind` SQL column. Encodes
+/// the same five kinds without the per-variant payload, so call sites can
+/// dispatch on the schema discriminator without re-matching string literals.
+/// Single source of truth for the `kind` column's CHECK-constraint value set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventKindTag {
+    BootstrapKey,
+    KeyAdded,
+    KeyRotatedOut,
+    KeyCompromised,
+    BootstrapReanchor,
+}
+
+impl EventKindTag {
+    /// String form persisted to `trust_events.kind`. Matches the schema's
+    /// CHECK constraint and the `#[serde(tag = "kind")]` discriminator.
+    pub(crate) fn as_db_str(self) -> &'static str {
+        match self {
+            EventKindTag::BootstrapKey => "BootstrapKey",
+            EventKindTag::KeyAdded => "KeyAdded",
+            EventKindTag::KeyRotatedOut => "KeyRotatedOut",
+            EventKindTag::KeyCompromised => "KeyCompromised",
+            EventKindTag::BootstrapReanchor => "BootstrapReanchor",
+        }
+    }
+
+    /// Inverse of [`Self::as_db_str`]. Returns `None` for values outside the
+    /// CHECK-constraint set; callers that read straight from
+    /// `trust_events.kind` can rely on the schema and `unwrap_or_else` with
+    /// an `unreachable!`.
+    pub(crate) fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "BootstrapKey" => Some(EventKindTag::BootstrapKey),
+            "KeyAdded" => Some(EventKindTag::KeyAdded),
+            "KeyRotatedOut" => Some(EventKindTag::KeyRotatedOut),
+            "KeyCompromised" => Some(EventKindTag::KeyCompromised),
+            "BootstrapReanchor" => Some(EventKindTag::BootstrapReanchor),
+            _ => None,
+        }
+    }
+}
+
 impl EventKind {
     /// String form used in the `trust_events.kind` SQL column. Matches
     /// the schema's `CHECK` constraint and the `#[serde(tag = "kind")]`
     /// discriminator used in `events.yml`.
     pub(crate) fn as_db_str(&self) -> &'static str {
+        self.kind_tag().as_db_str()
+    }
+
+    /// Project the payload kind onto the schema-aligned [`EventKindTag`].
+    pub(crate) fn kind_tag(&self) -> EventKindTag {
         match self {
-            EventKind::BootstrapKey { .. } => "BootstrapKey",
-            EventKind::KeyAdded { .. } => "KeyAdded",
-            EventKind::KeyRotatedOut { .. } => "KeyRotatedOut",
-            EventKind::KeyCompromised { .. } => "KeyCompromised",
-            EventKind::BootstrapReanchor { .. } => "BootstrapReanchor",
+            EventKind::BootstrapKey { .. } => EventKindTag::BootstrapKey,
+            EventKind::KeyAdded { .. } => EventKindTag::KeyAdded,
+            EventKind::KeyRotatedOut { .. } => EventKindTag::KeyRotatedOut,
+            EventKind::KeyCompromised { .. } => EventKindTag::KeyCompromised,
+            EventKind::BootstrapReanchor { .. } => EventKindTag::BootstrapReanchor,
         }
     }
 }

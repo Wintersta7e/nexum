@@ -22,4 +22,3 @@ pub use types::{
     Cursor, Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
     ResultSet, SearchResult,
 };
-pub use verify::{CachedCrypto, ProjectedTrust, project_trust};

@@ -63,7 +63,8 @@ fn get_against_missing_index_errors_without_creating_db() {
     assert!(!paths.index_db.exists());
 
     let key = RecordKey::bare("anything");
-    let result = api::get(&paths, &key, &GetOpts::default());
+    let cfg = common::test_cfg_local_only();
+    let result = api::get(&paths, &cfg, &key, &GetOpts::default());
     let err = result.expect_err("get must error when index is missing");
     assert_index_missing(&err);
     assert!(!paths.index_db.exists(), "get must not create the index DB");
