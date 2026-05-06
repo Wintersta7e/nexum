@@ -39,6 +39,7 @@ DOCKER_ARGS=(
 	--rm
 	--network none
 	--cap-drop ALL
+	--cap-add DAC_READ_SEARCH
 	--security-opt no-new-privileges
 	-v "$NEXUM_BIN:/usr/local/bin/nexum:ro"
 )
