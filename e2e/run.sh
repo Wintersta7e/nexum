@@ -3,17 +3,19 @@
 #
 # Usage:
 #   ./e2e/run.sh codex          # run codex adapter e2e against bundled fixtures
+#   ./e2e/run.sh cc             # run cc adapter e2e against bundled fixtures
 #   CODEX_HOME=$HOME/.codex ./e2e/run.sh codex  # use real codex install (read-only)
+#   CC_HOME=$HOME/.claude ./e2e/run.sh cc       # use real cc install (read-only)
 #
 # Env vars:
 #   NEXUM_BIN   path to nexum binary (default: ./target/release/nexum)
 #   CODEX_HOME  host dir to bind-mount as /root/.codex (codex adapter only)
-#   CC_HOME     host dir to bind-mount as /root/.claude (cc adapter; not yet wired)
+#   CC_HOME     host dir to bind-mount as /root/.claude (cc adapter)
 set -euo pipefail
 
 ADAPTER="${1:-}"
 if [ -z "$ADAPTER" ]; then
-	echo "usage: $0 <adapter>   (currently supported: codex)" >&2
+	echo "usage: $0 <adapter>   (currently supported: codex, cc)" >&2
 	exit 2
 fi
 
@@ -49,6 +51,15 @@ codex)
 			exit 2
 		fi
 		DOCKER_ARGS+=(-v "$CODEX_HOME:/root/.codex:ro")
+	fi
+	;;
+cc)
+	if [ -n "${CC_HOME:-}" ]; then
+		if [ ! -d "$CC_HOME" ]; then
+			echo "CC_HOME=$CC_HOME does not exist" >&2
+			exit 2
+		fi
+		DOCKER_ARGS+=(-v "$CC_HOME:/root/.claude:ro")
 	fi
 	;;
 *)

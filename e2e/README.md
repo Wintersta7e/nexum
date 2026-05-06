@@ -14,37 +14,40 @@ pre-arrange too much state to catch them.
 
 - [`codex/`](codex/) — codex adapter (reads `<memories_dir>/MEMORY.md`,
   `<memories_dir>/rollout_summaries/`, and `<state_db>` for thread metadata).
-- `cc/` — cc adapter, planned.
+- [`cc/`](cc/) — cc adapter (reads `<projects_dir>/<slug>/memory/<topic>.md`
+  files; per-topic YAML frontmatter records).
 
-## Quick start (codex)
+## Quick start
 
 ```bash
 # Build the release binary, build the image, run the test against bundled fixtures.
 ./e2e/run.sh codex
+./e2e/run.sh cc
 ```
 
-The default flow uses synthetic fixtures bundled in this repo. No real codex
-memory data is mounted; no host paths are read.
+The default flow uses synthetic fixtures bundled in this repo. No real
+adapter data is mounted; no host paths are read.
 
-## Testing against your real codex install
+## Testing against your real install
 
 Override the mount path via env var. The container always reads it as `:ro`:
 
 ```bash
-CODEX_HOME="$HOME/.codex" ./e2e/run.sh codex
+CODEX_HOME="$HOME/.codex"   ./e2e/run.sh codex
+CC_HOME="$HOME/.claude"     ./e2e/run.sh cc
 ```
 
-`CODEX_HOME` is bound at `/root/.codex` inside the container, replacing the
-bundled fixtures. The container still uses an ephemeral SSH key, ephemeral
-`~/.nexum/`, and `--rm` on exit — your host is untouched.
+The bind-mount replaces the bundled fixtures inside the container. The
+container still uses an ephemeral SSH key, ephemeral `~/.nexum/`, and
+`--rm` on exit — your host is untouched.
 
 ## Env vars
 
-| Var          | Default                            | Purpose                               |
-|--------------|------------------------------------|---------------------------------------|
-| `NEXUM_BIN`  | `./target/release/nexum`           | Host path to the nexum binary.        |
-| `CODEX_HOME` | _(bundled fixtures)_               | Codex install dir to mount read-only. |
-| `CC_HOME`    | _(bundled fixtures, when added)_   | CC install dir to mount read-only.    |
+| Var          | Default                  | Purpose                                |
+|--------------|--------------------------|----------------------------------------|
+| `NEXUM_BIN`  | `./target/release/nexum` | Host path to the nexum binary.         |
+| `CODEX_HOME` | _(bundled fixtures)_     | Codex install dir to mount read-only.  |
+| `CC_HOME`    | _(bundled fixtures)_     | CC install dir to mount read-only.     |
 
 ## Hygiene
 
