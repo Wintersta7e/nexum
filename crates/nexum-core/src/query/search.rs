@@ -4,10 +4,11 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
-
-use super::{project_trust, signature_status_for};
+use crate::trust::chain_state::ChainState;
+use crate::trust::events_view::TrustEventsView;
 
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
+use super::verify::{CachedCrypto, ProjectedTrust, project_trust};
 
 /// `search` options. Compose via `SearchOpts::new(query)` and fluent setters,
 /// or by direct struct construction.
@@ -50,7 +51,8 @@ impl SearchOpts {
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on any rusqlite error;
-/// `QueryError::InvalidFilter` if a filter is malformed.
+/// `QueryError::InvalidFilter` if a filter is malformed;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryError> {
     let (filter_sql, filter_params) = build_filter_sql(&opts.filters);
 
@@ -60,12 +62,16 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let fts_limit: u32 = 100;
 
     // FTS query with filter pushdown. ?1 = MATCH query; ?2 = limit;
-    // ?3..= filter params.
+    // ?3..= filter params. The SELECT now also pulls the per-record
+    // `relevant_trust_events_commit` so the read-time projection can look
+    // up trust state at the events.yml commit effective when the record
+    // was signed.
     let fts_sql = format!(
         "SELECT records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
                 records.crypto_result, records.updated, \
-                records.record_commit_sha, records.signer_fingerprint \
+                records.record_commit_sha, records.signer_fingerprint, \
+                records.relevant_trust_events_commit \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -83,7 +89,6 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     }
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         let crypto_result = CryptoResult::from_db_str(&row.get::<_, String>(7)?);
-        let signature_status = signature_status_for(crypto_result);
         Ok(FtsRow {
             id: row.get(0)?,
             record_type: row.get::<_, String>(1)?,
@@ -93,23 +98,46 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             source: row.get::<_, String>(5)?,
             project_id: row.get(6)?,
             crypto_result,
-            signature_status,
             updated: row.get(8)?,
             record_commit_sha: row.get::<_, Option<String>>(9)?,
             signer_fingerprint: row.get::<_, Option<String>>(10)?,
+            relevant_trust_events_commit: row.get::<_, Option<String>>(11)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
+
+    // Hydrate the chain once per verb invocation. Reused for every row's
+    // projection. Empty trust_events / no notebook history degrades into a
+    // pre-bootstrap chain that trusts cached `Good` crypto on its face.
+    let view = TrustEventsView::new(conn);
+    let chain = ChainState::from_view(&view)?;
+
+    // Project every row up-front so the (signature_status, trust_basis,
+    // warnings) triple is available for both ranking / retention filters
+    // and the final `SearchResult` shape.
+    let projected_rows: Vec<(FtsRow, ProjectedTrust)> = fts_rows
+        .into_iter()
+        .map(|row| {
+            let cached = CachedCrypto {
+                crypto_result: row.crypto_result,
+                signer_fingerprint: row.signer_fingerprint.as_deref(),
+                commit_sha: row.record_commit_sha.as_deref(),
+                relevant_trust_events_commit: row.relevant_trust_events_commit.as_deref(),
+            };
+            let projected = project_trust(cached, &view, &chain, opts.filters.strict_revocation)?;
+            Ok::<_, QueryError>((row, projected))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Reciprocal-rank-fusion-style score over a single branch:
     //   score(r) = 1 / (k + rank)
     // With one branch the ranking degenerates to "by FTS rank ascending".
     // Apply the unsigned penalty after RRF, THEN the top-K cut.
     let k_const: f64 = 60.0;
-    let mut scored: Vec<(FtsRow, f64)> = fts_rows
+    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
         .into_iter()
         .enumerate()
-        .map(|(idx, r)| {
+        .map(|(idx, (r, p))| {
             let rank = u32::try_from(idx).unwrap_or(u32::MAX);
             let rank = f64::from(rank) + 1.0;
             let mut score = 1.0 / (k_const + rank);
@@ -117,22 +145,22 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
             // ordinal above is the actual ranking signal; the underlying
             // bm25 value is intentionally not surfaced here.
 
-            let is_unsigned = r.signature_status != SignatureStatus::Verified;
+            let is_unsigned = p.signature_status != SignatureStatus::Verified;
             if is_unsigned && !opts.filters.no_unsigned_penalty {
                 score *= opts.unsigned_ranking_penalty;
             }
-            (r, score)
+            (r, p, score)
         })
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
     // require_signed override.
     if opts.filters.require_signed {
-        scored.retain(|(r, _)| r.signature_status == SignatureStatus::Verified);
+        scored.retain(|(_, p, _)| p.signature_status == SignatureStatus::Verified);
     }
     // hide policy: drop unverified.
     if opts.trust_policy == TrustPolicy::Hide {
-        scored.retain(|(r, _)| r.signature_status == SignatureStatus::Verified);
+        scored.retain(|(_, p, _)| p.signature_status == SignatureStatus::Verified);
     }
 
     let total = u32::try_from(scored.len()).unwrap_or(u32::MAX);
@@ -143,7 +171,7 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     let results: Vec<SearchResult> = top_n
         .into_iter()
         .enumerate()
-        .map(|(idx, (r, score))| project_row(r, score, idx < 3))
+        .map(|(idx, (r, p, score))| project_row(r, p, score, idx < 3))
         .collect();
 
     let meta = super::meta::build_meta(
@@ -162,15 +190,14 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     })
 }
 
-/// Project a single FTS row + score into the public `SearchResult` shape,
-/// applying the body-on-top-3 rule and surfacing canonical warnings.
-fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
+/// Project a single FTS row + projected trust + score into the public
+/// `SearchResult` shape, applying the body-on-top-3 rule.
+fn project_row(r: FtsRow, p: ProjectedTrust, score: f64, include_body: bool) -> SearchResult {
     let body = if include_body {
         Some(r.body.clone())
     } else {
         None
     };
-    let (signature_status, trust_basis, warnings) = project_trust(r.crypto_result);
     SearchResult {
         id: r.id,
         record_type: RecordType::from_db_str(&r.record_type),
@@ -179,11 +206,11 @@ fn project_row(r: FtsRow, score: f64, include_body: bool) -> SearchResult {
         score,
         source: Source::from_db_str(&r.source),
         project_id: r.project_id,
-        signature_status,
-        trust_basis,
+        signature_status: p.signature_status,
+        trust_basis: p.trust_basis,
         record_commit_sha: r.record_commit_sha,
         signer_fingerprint: r.signer_fingerprint,
-        warnings,
+        warnings: p.warnings,
         body,
         updated: r.updated,
     }
@@ -199,20 +226,16 @@ struct FtsRow {
     source: String,
     project_id: String,
     /// Cached `git verify-commit` outcome read straight from
-    /// `records.crypto_result`. The full `(signature_status, trust_basis,
-    /// warnings)` triple is materialized at projection time via
-    /// `project_trust`; `signature_status` is also lifted onto this row at
-    /// build time so the post-FTS scoring / `retain` passes don't re-derive
-    /// it per row.
+    /// `records.crypto_result`. Forwarded into [`CachedCrypto`] for the
+    /// read-time projection.
     crypto_result: CryptoResult,
-    /// Pre-derived `SignatureStatus` lifted from `crypto_result` at row build
-    /// time. The post-FTS scoring loop and the two `retain` filters
-    /// (`require_signed`, `Hide` policy) read this field instead of
-    /// re-calling `signature_status_for` per row.
-    signature_status: SignatureStatus,
     updated: String,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// `None` for adapters with no events.yml correlation (cc-native /
+    /// codex-native) or for records indexed before the column was wired.
+    relevant_trust_events_commit: Option<String>,
 }
 
 /// Build the per-table filter clause + bound params for the SQL pushdown.

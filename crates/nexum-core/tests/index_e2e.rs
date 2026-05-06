@@ -46,6 +46,7 @@ fn full_pass_indexes_cc_fixtures_local_yaml_and_runs_search() {
     let opts = GetOpts {
         include_unsigned: false,
         trust_policy: TrustPolicy::WarnButShow,
+        strict_revocation: false,
     };
     let outcome = api::get(&paths, &RecordKey::bare("alpha"), &opts).unwrap();
     let GetOutcome::Found(r) = outcome else {

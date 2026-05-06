@@ -33,6 +33,7 @@ pub fn run(args: &GetArgs) -> ExitCode {
     let opts = GetOpts {
         include_unsigned: args.include_unsigned,
         trust_policy: cfg.trust.unsigned_default,
+        strict_revocation: cfg.trust.strict_revocation,
     };
     let key = match parse_key(&args.id) {
         Ok(k) => k,

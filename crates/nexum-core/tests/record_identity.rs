@@ -88,6 +88,7 @@ fn get_by_bare_id_returns_ambiguous_when_multiple_match() {
     let opts = GetOpts {
         trust_policy: TrustPolicy::WarnButShow,
         include_unsigned: false,
+        strict_revocation: false,
     };
     let result = query::get(&conn, &RecordKey::bare("shared-id"), &opts);
     match result {
@@ -106,6 +107,7 @@ fn get_by_exact_key_returns_found() {
     let opts = GetOpts {
         trust_policy: TrustPolicy::WarnButShow,
         include_unsigned: false,
+        strict_revocation: false,
     };
     let key = RecordKey::exact(Source::CodexNative, "git:proj-a", "shared-id");
     let result = query::get(&conn, &key, &opts).unwrap();
@@ -119,6 +121,7 @@ fn get_by_bare_id_returns_found_when_unique() {
     let opts = GetOpts {
         trust_policy: TrustPolicy::WarnButShow,
         include_unsigned: false,
+        strict_revocation: false,
     };
     let result = query::get(&conn, &RecordKey::bare("uniq"), &opts).unwrap();
     assert!(matches!(result, GetOutcome::Found(_)));
@@ -136,6 +139,7 @@ fn api_get_round_trip_via_record_key() {
     let opts = GetOpts {
         include_unsigned: false,
         trust_policy: TrustPolicy::WarnButShow,
+        strict_revocation: false,
     };
     let result = api::get(&paths, &RecordKey::bare("tau"), &opts).unwrap();
     assert!(matches!(result, GetOutcome::Found(_)));

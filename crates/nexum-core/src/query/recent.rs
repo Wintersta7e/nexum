@@ -13,13 +13,17 @@ use crate::records::{Source, TrustPolicy};
 ///
 /// `trust_policy` is forwarded into [`list`] so the response envelope's
 /// `_meta.trust_policy` reflects the runtime configuration.
+/// `strict_revocation` flips the compromised-key projection from Verified
+/// to Invalid; the api facade fills it from `cfg.trust.strict_revocation`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
-/// `QueryError::InvalidFilter` if `source` is unrecognized.
+/// `QueryError::InvalidFilter` if `source` is unrecognized;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn recent(
     conn: &Connection,
     trust_policy: TrustPolicy,
+    strict_revocation: bool,
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -38,7 +42,7 @@ pub fn recent(
         source: source_filter,
         ..Filters::default()
     };
-    list(conn, &filters, trust_policy, limit, None)
+    list(conn, &filters, trust_policy, strict_revocation, limit, None)
 }
 
 #[cfg(test)]
@@ -56,16 +60,23 @@ mod tests {
     #[test]
     fn unknown_source_yields_invalid_filter() {
         let (_dir, conn) = open();
-        let err = recent(&conn, TrustPolicy::WarnButShow, 10, Some("not-a-source")).unwrap_err();
+        let err = recent(
+            &conn,
+            TrustPolicy::WarnButShow,
+            false,
+            10,
+            Some("not-a-source"),
+        )
+        .unwrap_err();
         assert!(matches!(err, QueryError::InvalidFilter { .. }));
     }
 
     #[test]
     fn trust_policy_round_trips_into_meta() {
         let (_dir, conn) = open();
-        let rs = recent(&conn, TrustPolicy::WarnButShow, 10, None).unwrap();
+        let rs = recent(&conn, TrustPolicy::WarnButShow, false, 10, None).unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::WarnButShow);
-        let rs = recent(&conn, TrustPolicy::Hide, 10, None).unwrap();
+        let rs = recent(&conn, TrustPolicy::Hide, false, 10, None).unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
     }
 
@@ -73,7 +84,7 @@ mod tests {
     fn recent_with_hide_filters_and_counts_hidden() {
         let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
         // 3 verified, 2 unsigned, 1 invalid in the fixture.
-        let rs = recent(&conn, TrustPolicy::Hide, 100, None).unwrap();
+        let rs = recent(&conn, TrustPolicy::Hide, false, 100, None).unwrap();
         assert_eq!(
             rs.results.len(),
             3,
@@ -98,7 +109,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let rs = recent(&conn, TrustPolicy::WarnButShow, 10, None).unwrap();
+        let rs = recent(&conn, TrustPolicy::WarnButShow, false, 10, None).unwrap();
         assert_eq!(rs.results.len(), 2);
     }
 }

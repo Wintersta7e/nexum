@@ -14,8 +14,11 @@ use crate::records::{
     Agent, Confidence, CryptoResult, FileEvidence, GetOutcome, Outcome, Provenance, RecordKey,
     RecordType, SessionRef, SignatureStatus, Source, TrustPolicy, UnifiedRecord,
 };
+use crate::trust::chain_state::ChainState;
+use crate::trust::events_view::TrustEventsView;
 
-use super::{signature_status_for, types::QueryError};
+use super::types::QueryError;
+use super::verify::{CachedCrypto, ProjectedTrust, project_trust};
 
 /// `get` options.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +30,13 @@ pub struct GetOpts {
     /// AND `include_unsigned == false`, an unverified record is returned
     /// as `GetOutcome::HiddenByPolicy`.
     pub trust_policy: TrustPolicy,
+    /// Mirrors `[trust] strict_revocation` from `config.toml`. When `true`,
+    /// records signed by a key that has since been marked compromised
+    /// project as `Invalid` (with both `signed-by-compromised-key` and
+    /// `strict-revocation-active` warnings). The api facade fills this from
+    /// `cfg.trust.strict_revocation`.
+    #[serde(default)]
+    pub strict_revocation: bool,
 }
 
 impl Default for GetOpts {
@@ -34,6 +44,7 @@ impl Default for GetOpts {
         Self {
             include_unsigned: false,
             trust_policy: TrustPolicy::WarnButShow,
+            strict_revocation: false,
         }
     }
 }
@@ -52,8 +63,9 @@ impl Default for GetOpts {
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure,
-/// `QueryError::Json` on JSON column deserialization failure, or
-/// `QueryError::Ambiguous` when the key under-specifies and matches >1 row.
+/// `QueryError::Json` on JSON column deserialization failure,
+/// `QueryError::Ambiguous` when the key under-specifies and matches >1 row,
+/// or `QueryError::Trust` if the chain-state hydration fails.
 pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome, QueryError> {
     let mut candidates = fetch_candidates(conn, key)?;
 
@@ -67,17 +79,27 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
             .collect();
         return Err(QueryError::Ambiguous { matches });
     }
-    // Exactly one candidate — apply hide-policy then materialize.
+    // Exactly one candidate — project trust then apply hide-policy.
     let raw = candidates.swap_remove(0);
     let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-    let signature_status = signature_status_for(crypto_result);
+    let view = TrustEventsView::new(conn);
+    let chain = ChainState::from_view(&view)?;
+    let cached = CachedCrypto {
+        crypto_result,
+        signer_fingerprint: raw.signer_fingerprint.as_deref(),
+        commit_sha: raw.record_commit_sha.as_deref(),
+        relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+    };
+    let projected = project_trust(cached, &view, &chain, opts.strict_revocation)?;
     if opts.trust_policy == TrustPolicy::Hide
         && !opts.include_unsigned
-        && signature_status != SignatureStatus::Verified
+        && projected.signature_status != SignatureStatus::Verified
     {
-        return Ok(GetOutcome::HiddenByPolicy { signature_status });
+        return Ok(GetOutcome::HiddenByPolicy {
+            signature_status: projected.signature_status,
+        });
     }
-    build_record(raw, crypto_result, signature_status).map(|r| GetOutcome::Found(Box::new(r)))
+    build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))
 }
 
 /// Run the appropriate `SELECT` for the key shape and collect the rows.
@@ -85,7 +107,8 @@ fn fetch_candidates(conn: &Connection, key: &RecordKey) -> Result<Vec<RawRow>, Q
     const COLUMNS: &str = "id, source, project_id, record_type, title, summary, body, \
                            body_origin_path, tags, confidence, outcome, agent, session_refs, \
                            files, commits, created, updated, content_hash, crypto_result, \
-                           extras, record_commit_sha, signer_fingerprint";
+                           extras, record_commit_sha, signer_fingerprint, \
+                           relevant_trust_events_commit";
 
     let (where_clause, params): (&str, Vec<Box<dyn ToSql>>) =
         match (key.source, key.project_id.as_deref()) {
@@ -143,13 +166,14 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
         extras: r.get::<_, Option<String>>(19)?,
         record_commit_sha: r.get::<_, Option<String>>(20)?,
         signer_fingerprint: r.get::<_, Option<String>>(21)?,
+        relevant_trust_events_commit: r.get::<_, Option<String>>(22)?,
     })
 }
 
 fn build_record(
     raw: RawRow,
     crypto_result: CryptoResult,
-    signature_status: SignatureStatus,
+    projected: ProjectedTrust,
 ) -> Result<UnifiedRecord, QueryError> {
     let extras: std::collections::HashMap<String, serde_json::Value> =
         serde_json::from_str(raw.extras.as_deref().unwrap_or("{}"))?;
@@ -200,16 +224,14 @@ fn build_record(
         outcome,
         provenance: Provenance {
             source,
-            signature_status,
+            signature_status: projected.signature_status,
             extractor: None,
             digest_hash: None,
             record_commit_sha: raw.record_commit_sha,
             signer_fingerprint: raw.signer_fingerprint,
             crypto_result,
-            // Both `relevant_trust_events_commit` and `warnings` are populated
-            // by the read-time verifier projection in a later task.
-            relevant_trust_events_commit: None,
-            warnings: Vec::new(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit,
+            warnings: projected.warnings,
         },
         extras,
         content_hash: raw.content_hash,
@@ -241,6 +263,10 @@ struct RawRow {
     extras: Option<String>,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// Forwarded into [`CachedCrypto`] for the read-time projection and onto
+    /// `Provenance::relevant_trust_events_commit` for downstream consumers.
+    relevant_trust_events_commit: Option<String>,
 }
 
 #[cfg(test)]
@@ -286,6 +312,7 @@ mod tests {
             &GetOpts {
                 include_unsigned: false,
                 trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
             },
         )
         .unwrap();
@@ -303,6 +330,7 @@ mod tests {
         let hide_default = GetOpts {
             include_unsigned: false,
             trust_policy: TrustPolicy::Hide,
+            strict_revocation: false,
         };
         assert!(matches!(
             get(&conn, &RecordKey::bare("u"), &hide_default).unwrap(),
@@ -313,6 +341,7 @@ mod tests {
         let hide_override = GetOpts {
             include_unsigned: true,
             trust_policy: TrustPolicy::Hide,
+            strict_revocation: false,
         };
         assert!(matches!(
             get(&conn, &RecordKey::bare("u"), &hide_override).unwrap(),
@@ -330,6 +359,7 @@ mod tests {
             &GetOpts {
                 include_unsigned: false,
                 trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
             },
         )
         .unwrap();

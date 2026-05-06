@@ -5,10 +5,12 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    project_trust,
     types::{Meta, QueryError, ResultSet, SearchResult},
+    verify::{CachedCrypto, project_trust},
 };
 use crate::records::{CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
+use crate::trust::chain_state::ChainState;
+use crate::trust::events_view::TrustEventsView;
 
 /// Discriminator for [`by_session`] queries — names the kind of session
 /// reference to look up.
@@ -43,13 +45,17 @@ fn escape_like(s: &str) -> String {
 ///
 /// `trust_policy` is reflected verbatim in the response envelope's
 /// `_meta.trust_policy` so callers see the runtime policy that produced the
-/// result set.
+/// result set. `strict_revocation` flips the compromised-key projection
+/// from Verified to Invalid; the api facade fills it from
+/// `cfg.trust.strict_revocation`.
 ///
 /// # Errors
-/// Returns `QueryError::Rusqlite` on rusqlite failure.
+/// Returns `QueryError::Rusqlite` on rusqlite failure;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn by_session(
     conn: &Connection,
     trust_policy: TrustPolicy,
+    strict_revocation: bool,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, QueryError> {
     let needle = match lookup {
@@ -69,47 +75,75 @@ pub fn by_session(
     let pattern = format!("%{escaped}%");
     let sql = "SELECT records.id, records.record_type, records.title, records.summary, \
                       records.source, records.project_id, records.crypto_result, records.updated, \
-                      records.record_commit_sha, records.signer_fingerprint \
+                      records.record_commit_sha, records.signer_fingerprint, \
+                      records.relevant_trust_events_commit \
                FROM records \
                WHERE session_refs LIKE ?1 ESCAPE '\\' \
                ORDER BY records.updated DESC";
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![pattern], |r| {
-        let crypto_result = CryptoResult::from_db_str(&r.get::<_, String>(6)?);
-        let (signature_status, trust_basis, warnings) = project_trust(crypto_result);
-        let record_commit_sha: Option<String> = r.get(8)?;
-        let signer_fingerprint: Option<String> = r.get(9)?;
-        Ok(SearchResult {
-            id: r.get(0)?,
-            record_type: RecordType::from_db_str(&r.get::<_, String>(1)?),
-            title: r.get(2)?,
-            summary: r.get::<_, Option<String>>(3)?,
-            score: 0.0,
-            source: Source::from_db_str(&r.get::<_, String>(4)?),
-            project_id: r.get(5)?,
-            signature_status,
-            trust_basis,
-            record_commit_sha,
-            signer_fingerprint,
-            warnings,
-            body: None,
-            updated: r.get(7)?,
-        })
-    })?;
-    let results: Vec<SearchResult> = rows.collect::<Result<Vec<_>, _>>()?;
+    let raw_rows = stmt
+        .query_map(params![pattern], |r| {
+            Ok(SessionRow {
+                id: r.get(0)?,
+                record_type: r.get::<_, String>(1)?,
+                title: r.get(2)?,
+                summary: r.get::<_, Option<String>>(3)?,
+                source: r.get::<_, String>(4)?,
+                project_id: r.get(5)?,
+                crypto_result: r.get::<_, String>(6)?,
+                updated: r.get(7)?,
+                record_commit_sha: r.get::<_, Option<String>>(8)?,
+                signer_fingerprint: r.get::<_, Option<String>>(9)?,
+                relevant_trust_events_commit: r.get::<_, Option<String>>(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Empty-result fast path: skip any further bookkeeping. Returning a
     // fresh `ResultSet` is also more honest — an empty session lookup
     // shouldn't paint the global meta envelope onto the response.
-    if results.is_empty() {
+    if raw_rows.is_empty() {
         return Ok(ResultSet {
-            results,
+            results: Vec::new(),
             total_matched: 0,
             next_cursor: None,
             meta: Meta {
                 trust_policy,
                 ..Default::default()
             },
+        });
+    }
+
+    // Hydrate the chain once per verb invocation. Reused for every row's
+    // projection.
+    let view = TrustEventsView::new(conn);
+    let chain = ChainState::from_view(&view)?;
+
+    let mut results: Vec<SearchResult> = Vec::with_capacity(raw_rows.len());
+    for raw in raw_rows {
+        let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
+        let cached = CachedCrypto {
+            crypto_result,
+            signer_fingerprint: raw.signer_fingerprint.as_deref(),
+            commit_sha: raw.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+        };
+        let projected = project_trust(cached, &view, &chain, strict_revocation)?;
+        results.push(SearchResult {
+            id: raw.id,
+            record_type: RecordType::from_db_str(&raw.record_type),
+            title: raw.title,
+            summary: raw.summary,
+            score: 0.0,
+            source: Source::from_db_str(&raw.source),
+            project_id: raw.project_id,
+            signature_status: projected.signature_status,
+            trust_basis: projected.trust_basis,
+            record_commit_sha: raw.record_commit_sha,
+            signer_fingerprint: raw.signer_fingerprint,
+            warnings: projected.warnings,
+            body: None,
+            updated: raw.updated,
         });
     }
 
@@ -133,6 +167,27 @@ pub fn by_session(
         next_cursor: None,
         meta,
     })
+}
+
+/// Raw per-row read of a session-matching record. Mirrors the SELECT column
+/// order; chain-state hydration runs once and the projection consumes one
+/// `SessionRow` at a time.
+struct SessionRow {
+    id: String,
+    record_type: String,
+    title: String,
+    summary: Option<String>,
+    source: String,
+    project_id: String,
+    /// `records.crypto_result` SQL column (one of `good` / `bad-signature` /
+    /// `unknown-signer` / `no-signature`).
+    crypto_result: String,
+    updated: String,
+    record_commit_sha: Option<String>,
+    signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// Forwarded into [`CachedCrypto`] for the read-time projection.
+    relevant_trust_events_commit: Option<String>,
 }
 
 #[cfg(test)]
@@ -170,6 +225,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::WarnButShow,
+            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
             },
@@ -190,6 +246,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::WarnButShow,
+            false,
             &SessionLookup::CodexThread {
                 thread_id: "thread-aaa".into(),
             },
@@ -237,6 +294,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::Hide,
+            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
             },
@@ -259,6 +317,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::WarnButShow,
+            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -268,6 +327,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::Hide,
+            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -282,6 +342,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::WarnButShow,
+            false,
             &SessionLookup::CcSession {
                 uuid: uuid::Uuid::nil(),
             },
@@ -317,6 +378,7 @@ mod tests {
         let res = by_session(
             &conn,
             TrustPolicy::WarnButShow,
+            false,
             &SessionLookup::CodexRollout {
                 path: std::path::PathBuf::from(real_path),
             },

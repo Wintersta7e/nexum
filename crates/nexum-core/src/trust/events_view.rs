@@ -71,7 +71,28 @@ impl<'a> TrustEventsView<'a> {
     ///
     /// Returns `TrustError::Sqlite` if the underlying `count(*)` query fails.
     pub fn has_tampering_at_or_before(&self, commit: &str) -> Result<bool, TrustError> {
-        let topo: Option<i64> = self
+        let Some(topo) = self.topo_pos_of(commit)? else {
+            return Ok(false);
+        };
+        let count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM trust_chain_tampering WHERE at_topo_pos <= ?1",
+            [i64::try_from(topo).unwrap_or(i64::MAX)],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Topological position of `commit` in the materialized `trust_events`
+    /// table, or `None` if the commit isn't an events.yml-touching revision
+    /// the materializer recorded. Read-time projection consumes this when
+    /// looking up trust state effective at a record's commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TrustError::Sqlite` if the underlying lookup fails for
+    /// reasons other than "no row".
+    pub fn topo_pos_of(&self, commit: &str) -> Result<Option<u64>, TrustError> {
+        let pos: Option<i64> = self
             .conn
             .query_row(
                 "SELECT effective_commit_topo_pos FROM trust_events WHERE effective_commit = ?1",
@@ -79,15 +100,15 @@ impl<'a> TrustEventsView<'a> {
                 |r| r.get(0),
             )
             .ok();
-        let Some(topo) = topo else {
-            return Ok(false);
-        };
-        let count: i64 = self.conn.query_row(
-            "SELECT count(*) FROM trust_chain_tampering WHERE at_topo_pos <= ?1",
-            [topo],
-            |r| r.get(0),
-        )?;
-        Ok(count > 0)
+        Ok(pos.and_then(|p| u64::try_from(p).ok()))
+    }
+
+    /// Borrow the underlying connection. Used by `ChainState::from_view`
+    /// (and any sibling helper) that needs to issue read queries against
+    /// the same materialized rows.
+    #[must_use]
+    pub fn conn(&self) -> &Connection {
+        self.conn
     }
 }
 
@@ -621,10 +642,21 @@ pub fn is_current(conn: &Connection, notebook_git: &Path) -> Result<bool, TrustE
 /// Lazy-rebuild wrapper: callable once per query verb invocation. Cheap when
 /// the view is already current; full rebuild otherwise.
 ///
+/// Skips the rebuild when `notebook_git` is missing or has not yet been
+/// initialized as a git working tree. The read verbs degrade to the
+/// empty-chain projection in that case (cached crypto on its face), which
+/// matches the pre-bootstrap state of a fresh install before `nexum init`
+/// has run.
+///
 /// # Errors
 ///
 /// Returns any error surfaced by [`is_current`] or [`rebuild`].
 pub fn ensure_current(conn: &mut Connection, notebook_git: &Path) -> Result<(), TrustError> {
+    if !notebook_git.join(".git").exists() && !notebook_git.join("HEAD").exists() {
+        // Missing notebook.git or not yet initialized. The materializer has
+        // nothing to walk; defer to the empty-chain projection at read time.
+        return Ok(());
+    }
     if !is_current(conn, notebook_git)? {
         rebuild(conn, notebook_git)?;
     }

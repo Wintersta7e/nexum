@@ -7,10 +7,8 @@ use std::collections::HashMap;
 
 /// Outcome of a trust-state lookup at a given topological position.
 ///
-/// Forward-looking surface: variants are populated by `state_of`, which the
-/// read-time trust projection consumes when its wiring lands. Until then the
-/// only callers are the chain-state unit tests.
-#[allow(dead_code)]
+/// Populated by [`ChainState::state_of`], which the read-time trust
+/// projection consumes (see `crate::query::verify::project_trust`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustState {
     /// Signer is trusted at the current head of events.yml.
@@ -35,7 +33,6 @@ pub enum TrustState {
 /// Pre-reanchor disposition for keys carried over from a chain that was
 /// later reanchored. `A` = pin intact (records still verify under default
 /// policy); `B` = pin lost (records carry a chain-anchor-lost warning).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReanchorCase {
     /// Pin intact: the post-reanchor chain root matches the recorded pin.
@@ -74,8 +71,14 @@ struct KeyEntry {
 /// Trusted-signer state machine. Mutated by the materializer; queried both
 /// internally (to authorize new appends) and externally (by read-time trust
 /// projection helpers).
+///
+/// `ChainState` is `pub` because the integration-test crate constructs it
+/// via [`Self::from_view`] when exercising the read-time projection. The
+/// mutating helpers (`set_bootstrap`, `apply_*`, `freeze`) stay
+/// `pub(crate)` so external code cannot synthesize unauthorized chain
+/// state.
 #[derive(Debug, Default)]
-pub(crate) struct ChainState {
+pub struct ChainState {
     /// All signers ever introduced into the chain, keyed by SSH fingerprint
     /// (`SHA256:...` form). Private — read access is via the typed methods
     /// (`is_trusted_at`, `state_of`, `introducer_of`) so the storage shape
@@ -194,6 +197,16 @@ impl ChainState {
         self.current_bootstrap_fp.as_deref()
     }
 
+    /// True when no events have been applied yet (no bootstrap, no keys).
+    /// Read-time projection treats an empty chain as the pre-bootstrap state
+    /// and trusts cached crypto on its face: `Good` crypto projects to
+    /// `Verified` + `TrustBasis::Current`, mirroring the bootstrap-only
+    /// behavior the index has when `notebook.git` has no events.yml history.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
     /// True if `fingerprint` is in the trusted set at `topo_pos` — i.e., was
     /// introduced at-or-before this position and has not been rotated out
     /// before this position.
@@ -243,12 +256,10 @@ impl ChainState {
 
     /// Returns the trust state of `fingerprint` at `topo_pos` (the commit's
     /// topological position) given the current chain head's view.
-    ///
-    /// Currently only consumed by the chain-state unit tests; the read-time
-    /// trust projection wires it once the verifier is end-to-end.
-    #[allow(dead_code)]
+    /// Consumed by the read-time trust projection
+    /// (`crate::query::verify::project_trust`).
     #[must_use]
-    pub(crate) fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
+    pub fn state_of(&self, fingerprint: &str, topo_pos: u64) -> TrustState {
         if let Some(frozen) = self.frozen_at_topo
             && topo_pos >= frozen
         {
@@ -287,6 +298,136 @@ impl ChainState {
             .get(fingerprint)
             .map(|e| e.introduced_by_event_id.clone())
     }
+
+    /// Hydrate a `ChainState` from the materialized `trust_events` table
+    /// plus the `chain_frozen_at_topo` meta sentinel. Used by query verbs
+    /// to reconstruct chain state at read time without re-walking
+    /// `notebook.git`.
+    ///
+    /// Reads two sources of freeze information and applies the earliest:
+    /// 1. `trust_chain_tampering` rows (forbidden mutations).
+    /// 2. The `chain_frozen_at_topo` meta key (unauthorized reanchor).
+    ///
+    /// # Errors
+    ///
+    /// Returns `crate::trust::events::TrustError::Sqlite` if any of the
+    /// underlying queries fail.
+    pub fn from_view(
+        view: &crate::trust::events_view::TrustEventsView<'_>,
+    ) -> Result<Self, crate::trust::events::TrustError> {
+        let mut chain = Self::new();
+        let conn = view.conn();
+        let mut stmt = conn.prepare(
+            "SELECT event_id, kind, fingerprint, old_fingerprint, new_fingerprint,
+                    effective_commit_topo_pos, chain_anchor_lost
+             FROM trust_events
+             ORDER BY effective_commit_topo_pos ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,         // event_id
+                r.get::<_, String>(1)?,         // kind
+                r.get::<_, Option<String>>(2)?, // fingerprint
+                r.get::<_, Option<String>>(3)?, // old_fingerprint
+                r.get::<_, Option<String>>(4)?, // new_fingerprint
+                r.get::<_, i64>(5)?,            // topo_pos (i64 in SQL)
+                r.get::<_, Option<i64>>(6)?,    // chain_anchor_lost
+            ))
+        })?;
+
+        for row in rows {
+            let (event_id, kind, fp, old_fp, new_fp, topo_pos_i64, chain_anchor_lost) = row?;
+            let topo_pos = u64::try_from(topo_pos_i64).unwrap_or(0);
+            chain.apply_persisted_event(&PersistedEvent {
+                kind: kind.as_str(),
+                fp: fp.as_deref(),
+                old_fp: old_fp.as_deref(),
+                new_fp: new_fp.as_deref(),
+                event_id: &event_id,
+                topo_pos,
+                chain_anchor_lost,
+            });
+        }
+
+        // Earliest freeze across both persistence sources: tampering rows
+        // (forbidden mutations) and the meta sentinel (unauthorized
+        // reanchor). The two sources can overlap; take the minimum so a
+        // pre-existing tampering freeze isn't masked by a later sentinel.
+        let earliest_tamper: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(at_topo_pos) FROM trust_chain_tampering",
+                [],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        let chain_frozen_meta =
+            crate::index::meta::read_topo(conn, crate::index::meta::KEY_CHAIN_FROZEN_AT_TOPO)
+                .ok()
+                .flatten();
+        let earliest = match (earliest_tamper, chain_frozen_meta) {
+            (Some(a), Some(b)) => Some(a.min(i64::try_from(b).unwrap_or(i64::MAX))),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(i64::try_from(b).unwrap_or(i64::MAX)),
+            (None, None) => None,
+        };
+        if let Some(t) = earliest {
+            chain.freeze(u64::try_from(t).unwrap_or(0));
+        }
+        Ok(chain)
+    }
+
+    /// Apply one persisted `trust_events` row to `self`. Encapsulates the
+    /// kind dispatch so [`Self::from_view`] stays under the per-function
+    /// line budget.
+    fn apply_persisted_event(&mut self, ev: &PersistedEvent<'_>) {
+        match ev.kind {
+            "BootstrapKey" => {
+                if let Some(fp) = ev.fp {
+                    self.set_bootstrap(fp, ev.event_id, ev.topo_pos);
+                }
+            }
+            "KeyAdded" => {
+                if let Some(fp) = ev.fp {
+                    self.apply_key_added(fp, ev.event_id, ev.topo_pos);
+                }
+            }
+            "KeyRotatedOut" => {
+                if let Some(fp) = ev.fp {
+                    self.apply_key_rotated_out(fp, ev.topo_pos);
+                }
+            }
+            "KeyCompromised" => {
+                if let Some(fp) = ev.fp {
+                    self.apply_key_compromised(fp, ev.topo_pos);
+                }
+            }
+            "BootstrapReanchor" => {
+                if let (Some(_old), Some(new)) = (ev.old_fp, ev.new_fp) {
+                    let case = if ev.chain_anchor_lost.unwrap_or(0) != 0 {
+                        ReanchorCase::B
+                    } else {
+                        ReanchorCase::A
+                    };
+                    self.apply_reanchor(new, ev.event_id, ev.topo_pos, case);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Per-row shape consumed by [`ChainState::apply_persisted_event`]. Bundles
+/// the materializer-row fields so the dispatch helper stays under the
+/// strict-clippy `too_many_arguments` cap.
+struct PersistedEvent<'a> {
+    kind: &'a str,
+    fp: Option<&'a str>,
+    old_fp: Option<&'a str>,
+    new_fp: Option<&'a str>,
+    event_id: &'a str,
+    topo_pos: u64,
+    chain_anchor_lost: Option<i64>,
 }
 
 #[cfg(test)]

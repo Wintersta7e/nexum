@@ -26,6 +26,11 @@ pub enum QueryError {
     /// `RecordKey` (e.g. `local:git:abc:my-record`).
     #[error("ambiguous record id; {} candidates match", matches.len())]
     Ambiguous { matches: Vec<RecordKey> },
+    /// Trust-state error surfaced from `ChainState::from_view` or any
+    /// `TrustEventsView` query the read-time projection issues. Wraps the
+    /// underlying [`crate::trust::events::TrustError`].
+    #[error(transparent)]
+    Trust(#[from] crate::trust::events::TrustError),
 }
 
 /// Filter set shared across `search` / `list` / `recent` / `by_session`.

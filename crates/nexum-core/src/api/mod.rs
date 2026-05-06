@@ -26,6 +26,13 @@ pub enum ApiError {
     Query(#[from] crate::query::QueryError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
+    /// Trust-events materializer surfaced an error during the per-verb
+    /// `ensure_current` call. Verb-internal trust errors (raised inside a
+    /// [`crate::query::QueryError::Trust`]) reach the caller via
+    /// [`ApiError::Query`]; this variant is reserved for the facade-level
+    /// `ensure_current` step that runs before the verb is delegated to.
+    #[error(transparent)]
+    Trust(#[from] crate::trust::events::TrustError),
     #[error("index schema v{v_disk} is older than this binary (v{v_code}); run `nexum migrate`")]
     MigrationRequired { v_disk: u32, v_code: u32 },
 }
@@ -58,11 +65,14 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite or filter encoding failure.
+/// Returns `ApiError::Query` on rusqlite or filter encoding failure;
+/// `ApiError::Trust` if the trust-events materializer rebuild fails.
 pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
-    let conn = open_existing(&paths.index_db)?;
+    let mut conn = open_existing(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     let mut effective_opts = opts.clone();
     effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
+    effective_opts.filters.strict_revocation = cfg.trust.strict_revocation;
     Ok(query_search(&conn, &effective_opts)?)
 }
 
@@ -73,12 +83,19 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
 /// `key` may be exact, partial, or bare; partial / bare keys that match
 /// more than one row produce `ApiError::Query(QueryError::Ambiguous)`.
 ///
+/// The caller-supplied `opts.strict_revocation` is honored as-is: callers
+/// (CLI / MCP) fill it from `cfg.trust.strict_revocation` so a single
+/// configured value drives the projection without re-routing through the
+/// facade.
+///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite / deserialization failure or
-/// when the key matches multiple records (`QueryError::Ambiguous`).
+/// when the key matches multiple records (`QueryError::Ambiguous`);
+/// `ApiError::Trust` if the trust-events materializer rebuild fails.
 pub fn get(paths: &Paths, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome, ApiError> {
-    let conn = open_existing(&paths.index_db)?;
+    let mut conn = open_existing(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     Ok(query_get(&conn, key, opts)?)
 }
 
@@ -90,7 +107,8 @@ pub fn get(paths: &Paths, key: &RecordKey, opts: &GetOpts) -> Result<GetOutcome,
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite failure.
+/// Returns `ApiError::Query` on rusqlite failure;
+/// `ApiError::Trust` if the trust-events materializer rebuild fails.
 pub fn list(
     paths: &Paths,
     cfg: &Config,
@@ -98,11 +116,13 @@ pub fn list(
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
-    let conn = open_existing(&paths.index_db)?;
+    let mut conn = open_existing(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     Ok(query_list(
         &conn,
         filters,
         cfg.trust.unsigned_default,
+        cfg.trust.strict_revocation,
         limit,
         cursor,
     )?)
@@ -116,17 +136,20 @@ pub fn list(
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite failure or unknown source name.
+/// Returns `ApiError::Query` on rusqlite failure or unknown source name;
+/// `ApiError::Trust` if the trust-events materializer rebuild fails.
 pub fn recent(
     paths: &Paths,
     cfg: &Config,
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
-    let conn = open_existing(&paths.index_db)?;
+    let mut conn = open_existing(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     Ok(query_recent(
         &conn,
         cfg.trust.unsigned_default,
+        cfg.trust.strict_revocation,
         limit,
         source,
     )?)
@@ -140,14 +163,21 @@ pub fn recent(
 ///
 /// # Errors
 ///
-/// Returns `ApiError::Query` on rusqlite failure.
+/// Returns `ApiError::Query` on rusqlite failure;
+/// `ApiError::Trust` if the trust-events materializer rebuild fails.
 pub fn by_session(
     paths: &Paths,
     cfg: &Config,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, ApiError> {
-    let conn = open_existing(&paths.index_db)?;
-    Ok(query_by_session(&conn, cfg.trust.unsigned_default, lookup)?)
+    let mut conn = open_existing(&paths.index_db)?;
+    crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
+    Ok(query_by_session(
+        &conn,
+        cfg.trust.unsigned_default,
+        cfg.trust.strict_revocation,
+        lookup,
+    )?)
 }
 
 /// Per-project record + signed-record counts. The `list_projects` MCP tool

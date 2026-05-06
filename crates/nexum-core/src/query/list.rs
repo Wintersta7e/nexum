@@ -4,11 +4,13 @@
 use rusqlite::Connection;
 
 use super::{
-    project_trust,
     search::build_filter_sql,
     types::{Filters, QueryError, ResultSet, SearchResult},
+    verify::{CachedCrypto, project_trust},
 };
 use crate::records::{CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
+use crate::trust::chain_state::ChainState;
+use crate::trust::events_view::TrustEventsView;
 
 /// Sentinel used in the keyset compare when no cursor is supplied. Any
 /// `updated` string (RFC3339 timestamp) compares strictly less than this
@@ -27,15 +29,19 @@ const CURSOR_SENTINEL_UPDATED: &str = "9999-12-31T23:59:59Z";
 ///
 /// `trust_policy` is passed through verbatim into the response envelope so
 /// the `_meta.trust_policy` field accurately reflects the runtime
-/// `[trust] unsigned_default` setting.
+/// `[trust] unsigned_default` setting. `strict_revocation` flips the
+/// compromised-key projection from Verified to Invalid; the api facade
+/// fills it from `cfg.trust.strict_revocation`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on rusqlite failure;
-/// `QueryError::InvalidFilter` if the cursor is malformed.
+/// `QueryError::InvalidFilter` if the cursor is malformed;
+/// `QueryError::Trust` if the chain-state hydration fails.
 pub fn list(
     conn: &Connection,
     filters: &Filters,
     trust_policy: TrustPolicy,
+    strict_revocation: bool,
     limit: u32,
     cursor: Option<&str>,
 ) -> Result<ResultSet, QueryError> {
@@ -66,7 +72,8 @@ pub fn list(
     let sql = format!(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
                 records.source, records.project_id, records.crypto_result, records.updated, \
-                records.record_commit_sha, records.signer_fingerprint \
+                records.record_commit_sha, records.signer_fingerprint, \
+                records.relevant_trust_events_commit \
          FROM records \
          WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
          ORDER BY records.updated DESC, records.rowid DESC \
@@ -76,10 +83,20 @@ pub fn list(
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), row_to_raw)?
         .collect::<Result<Vec<_>, _>>()?;
+
+    // Hydrate the chain once per verb invocation. Reused for every row's
+    // projection.
+    let view = TrustEventsView::new(conn);
+    let chain = ChainState::from_view(&view)?;
+
     let mut accumulated: Vec<(i64, SearchResult)> = rows
         .into_iter()
-        .map(|raw| (raw.rowid, row_to_search_result(raw)))
-        .collect();
+        .map(|raw| {
+            let rowid = raw.rowid;
+            let result = row_to_search_result(raw, &view, &chain, strict_revocation)?;
+            Ok::<_, QueryError>((rowid, result))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Drop the over-limit sentinel row so it does not leak into the
     // results, then encode the cursor from the LAST RETURNED row's
@@ -135,6 +152,9 @@ struct ListRow {
     updated: String,
     record_commit_sha: Option<String>,
     signer_fingerprint: Option<String>,
+    /// SHA of the events.yml commit effective at the record's commit time.
+    /// Forwarded into [`CachedCrypto`] for the read-time projection.
+    relevant_trust_events_commit: Option<String>,
 }
 
 fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
@@ -150,15 +170,27 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
         updated: r.get(8)?,
         record_commit_sha: r.get(9)?,
         signer_fingerprint: r.get(10)?,
+        relevant_trust_events_commit: r.get(11)?,
     })
 }
 
 /// Materialize one DB row into a `SearchResult`. Splits out of `list` so
 /// the verb stays under the strict-clippy `too-many-lines` threshold.
-fn row_to_search_result(raw: ListRow) -> SearchResult {
+fn row_to_search_result(
+    raw: ListRow,
+    view: &TrustEventsView<'_>,
+    chain: &ChainState,
+    strict_revocation: bool,
+) -> Result<SearchResult, QueryError> {
     let crypto_result = CryptoResult::from_db_str(&raw.crypto_result);
-    let (signature_status, trust_basis, warnings) = project_trust(crypto_result);
-    SearchResult {
+    let cached = CachedCrypto {
+        crypto_result,
+        signer_fingerprint: raw.signer_fingerprint.as_deref(),
+        commit_sha: raw.record_commit_sha.as_deref(),
+        relevant_trust_events_commit: raw.relevant_trust_events_commit.as_deref(),
+    };
+    let projected = project_trust(cached, view, chain, strict_revocation)?;
+    Ok(SearchResult {
         id: raw.id,
         record_type: RecordType::from_db_str(&raw.record_type),
         title: raw.title,
@@ -166,14 +198,14 @@ fn row_to_search_result(raw: ListRow) -> SearchResult {
         score: 0.0,
         source: Source::from_db_str(&raw.source),
         project_id: raw.project_id,
-        signature_status,
-        trust_basis,
+        signature_status: projected.signature_status,
+        trust_basis: projected.trust_basis,
         record_commit_sha: raw.record_commit_sha,
         signer_fingerprint: raw.signer_fingerprint,
-        warnings,
+        warnings: projected.warnings,
         body: None,
         updated: raw.updated,
-    }
+    })
 }
 
 /// Encode the keyset pivot as an opaque cursor string.
@@ -226,6 +258,7 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
+            false,
             10,
             None,
         )
@@ -248,6 +281,7 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
+            false,
             3,
             None,
         )
@@ -274,7 +308,7 @@ mod tests {
             record_type: Some(crate::records::RecordType::Recommendation),
             ..Filters::default()
         };
-        let rs = list(&conn, &filters, TrustPolicy::WarnButShow, 10, None).unwrap();
+        let rs = list(&conn, &filters, TrustPolicy::WarnButShow, false, 10, None).unwrap();
         assert_eq!(rs.results.len(), 1);
         assert_eq!(rs.results[0].id, "r1");
     }
@@ -307,6 +341,7 @@ mod tests {
                 &conn,
                 &Filters::default(),
                 TrustPolicy::WarnButShow,
+                false,
                 1,
                 cursor.as_deref(),
             )
@@ -359,12 +394,21 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
+            false,
             10,
             None,
         )
         .unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::WarnButShow);
-        let rs = list(&conn, &Filters::default(), TrustPolicy::Hide, 10, None).unwrap();
+        let rs = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::Hide,
+            false,
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs.meta.trust_policy, TrustPolicy::Hide);
     }
 
@@ -375,6 +419,7 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
+            false,
             1,
             Some("not-a-cursor"),
         )
@@ -384,6 +429,7 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
+            false,
             1,
             Some("2026-04-01T00:00:00Z|notanint"),
         )
@@ -395,7 +441,15 @@ mod tests {
     fn list_with_hide_policy_filters_unsigned_and_counts_hidden() {
         let conn = crate::query::test_util::setup_test_db_with_mixed_signature_status();
         // 3 verified, 2 unsigned, 1 invalid in fixtures.
-        let rs = list(&conn, &Filters::default(), TrustPolicy::Hide, 100, None).unwrap();
+        let rs = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::Hide,
+            false,
+            100,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             rs.results.len(),
             3,
@@ -413,6 +467,7 @@ mod tests {
             &conn,
             &Filters::default(),
             TrustPolicy::WarnButShow,
+            false,
             100,
             None,
         )
