@@ -46,16 +46,40 @@ pub enum IndexerError {
 /// is absent. Returns `QueryError::Rusqlite` on any rusqlite error
 /// after the file has been opened.
 pub fn open_existing(path: &Path) -> Result<Connection, crate::query::QueryError> {
+    open_existing_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+/// Open an existing index DB with read-write access. The no-create invariant
+/// (path-exists check + omitted `SQLITE_OPEN_CREATE`) is preserved.
+///
+/// Used by the api facade's read-verb entry point: read verbs run their SQL
+/// as logical reads, but the materializer (`events_view::ensure_current`)
+/// may rebuild `trust_events` on first read after a fresh init, which
+/// requires write access on the same connection.
+///
+/// # Errors
+/// Same shape as [`open_existing`].
+pub(crate) fn open_existing_writable(path: &Path) -> Result<Connection, crate::query::QueryError> {
+    open_existing_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+}
+
+fn open_existing_with_flags(
+    path: &Path,
+    flags: rusqlite::OpenFlags,
+) -> Result<Connection, crate::query::QueryError> {
     if !path.exists() {
         return Err(crate::query::QueryError::IndexMissing {
             path: path.to_owned(),
         });
     }
     register_sqlite_vec_once();
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    let conn = Connection::open_with_flags(path, flags)?;
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
     Ok(conn)
 }

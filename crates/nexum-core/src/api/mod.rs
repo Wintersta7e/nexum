@@ -6,7 +6,7 @@ use crate::{
     config::types::Config,
     indexer::{
         IndexerOutcome,
-        db::{open_existing, open_or_create},
+        db::{open_existing, open_existing_writable, open_or_create},
         run::{run as indexer_run, run_force as indexer_run_force},
     },
     paths::Paths,
@@ -71,7 +71,7 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
 /// Centralizing both steps so a future read verb cannot land without
 /// either.
 fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
-    let mut conn = open_existing(&paths.index_db)?;
+    let mut conn = open_existing_writable(&paths.index_db)?;
     crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     Ok(conn)
 }
