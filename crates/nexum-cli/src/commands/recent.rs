@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, query::QueryError};
+use nexum_core::{api, query::Filters};
 
 #[derive(Args, Debug)]
 pub struct RecentArgs {
@@ -11,6 +11,10 @@ pub struct RecentArgs {
     pub limit: u32,
     #[arg(long)]
     pub source: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub require_signed: bool,
+    #[arg(long, default_value_t = false)]
+    pub strict_revocation: bool,
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
@@ -20,7 +24,12 @@ pub fn run(args: &RecentArgs) -> ExitCode {
         Ok(v) => v,
         Err(c) => return c,
     };
-    match api::recent(&paths, &cfg, args.limit, args.source.as_deref()) {
+    let filters = Filters {
+        require_signed: args.require_signed,
+        strict_revocation: args.strict_revocation,
+        ..Filters::default()
+    };
+    match api::recent(&paths, &cfg, &filters, args.limit, args.source.as_deref()) {
         Ok(rs) => {
             if args.json {
                 match serde_json::to_string_pretty(&rs) {
@@ -37,12 +46,6 @@ pub fn run(args: &RecentArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            super::common::handle_index_missing(&path)
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::STORE_INTEGRITY)
-        }
+        Err(e) => super::common::handle_read_verb_error(&e),
     }
 }

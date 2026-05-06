@@ -92,7 +92,10 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
     let conn = open_for_query(paths)?;
     let mut effective_opts = opts.clone();
     effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
-    effective_opts.filters.strict_revocation = cfg.trust.strict_revocation;
+    // Stricter prevails: per-call flag wins if set, config default applies
+    // otherwise. Same shape across every read verb.
+    effective_opts.filters.strict_revocation =
+        opts.filters.strict_revocation || cfg.trust.strict_revocation;
     Ok(query_search(&conn, &effective_opts)?)
 }
 
@@ -119,7 +122,7 @@ pub fn get(
 ) -> Result<GetOutcome, ApiError> {
     let conn = open_for_query(paths)?;
     let mut effective_opts = opts.clone();
-    effective_opts.strict_revocation = cfg.trust.strict_revocation;
+    effective_opts.strict_revocation = opts.strict_revocation || cfg.trust.strict_revocation;
     Ok(query_get(&conn, key, &effective_opts)?)
 }
 
@@ -143,7 +146,7 @@ pub fn list(
 ) -> Result<ResultSet, ApiError> {
     let conn = open_for_query(paths)?;
     let mut effective_filters = filters.clone();
-    effective_filters.strict_revocation = cfg.trust.strict_revocation;
+    effective_filters.strict_revocation = filters.strict_revocation || cfg.trust.strict_revocation;
     Ok(query_list(
         &conn,
         &effective_filters,
@@ -167,14 +170,14 @@ pub fn list(
 pub fn recent(
     paths: &Paths,
     cfg: &Config,
+    filters: &Filters,
     limit: u32,
     source: Option<&str>,
 ) -> Result<ResultSet, ApiError> {
     let conn = open_for_query(paths)?;
-    let filters = Filters {
-        strict_revocation: cfg.trust.strict_revocation,
-        ..Filters::default()
-    };
+    let mut effective_filters = filters.clone();
+    effective_filters.strict_revocation = filters.strict_revocation || cfg.trust.strict_revocation;
+    let filters = effective_filters;
     Ok(query_recent(
         &conn,
         &filters,
@@ -198,16 +201,15 @@ pub fn recent(
 pub fn by_session(
     paths: &Paths,
     cfg: &Config,
+    filters: &Filters,
     lookup: &SessionLookup,
 ) -> Result<ResultSet, ApiError> {
     let conn = open_for_query(paths)?;
-    let filters = Filters {
-        strict_revocation: cfg.trust.strict_revocation,
-        ..Filters::default()
-    };
+    let mut effective_filters = filters.clone();
+    effective_filters.strict_revocation = filters.strict_revocation || cfg.trust.strict_revocation;
     Ok(query_by_session(
         &conn,
-        &filters,
+        &effective_filters,
         cfg.trust.unsigned_default,
         lookup,
     )?)

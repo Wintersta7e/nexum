@@ -60,6 +60,6 @@ fn list_after_fresh_init_triggers_materialization_without_readonly_error() {
 #[test]
 fn recent_after_fresh_init_triggers_materialization_without_readonly_error() {
     let (_home, paths, cfg) = fresh_install_with_empty_index();
-    let result = api::recent(&paths, &cfg, 10, None);
+    let result = api::recent(&paths, &cfg, &Filters::default(), 10, None);
     result.expect("recent must succeed");
 }

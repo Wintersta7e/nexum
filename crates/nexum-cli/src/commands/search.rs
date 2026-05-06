@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    query::{Filters, QueryError, SearchOpts},
+    query::{Filters, SearchOpts},
     records::{Confidence, RecordType, Source},
 };
 
@@ -55,13 +55,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     opts.filters = build_filters(args);
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,
-        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            return super::common::handle_index_missing(&path);
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(super::exit_codes::STORE_INTEGRITY);
-        }
+        Err(e) => return super::common::handle_read_verb_error(&e),
     };
     if args.json {
         match serde_json::to_string_pretty(&res) {

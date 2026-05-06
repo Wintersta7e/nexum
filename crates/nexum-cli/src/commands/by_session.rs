@@ -5,13 +5,17 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    query::{QueryError, SessionLookup},
+    query::{Filters, SessionLookup},
 };
 
 #[derive(Args, Debug)]
 pub struct BySessionArgs {
     /// CC session UUID, Codex rollout path (`.jsonl`), or Codex thread id.
     pub needle: String,
+    #[arg(long, default_value_t = false)]
+    pub require_signed: bool,
+    #[arg(long, default_value_t = false)]
+    pub strict_revocation: bool,
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
@@ -32,7 +36,12 @@ pub fn run(args: &BySessionArgs) -> ExitCode {
             thread_id: args.needle.clone(),
         }
     };
-    match api::by_session(&paths, &cfg, &lookup) {
+    let filters = Filters {
+        require_signed: args.require_signed,
+        strict_revocation: args.strict_revocation,
+        ..Filters::default()
+    };
+    match api::by_session(&paths, &cfg, &filters, &lookup) {
         Ok(rs) => {
             if args.json {
                 match serde_json::to_string_pretty(&rs) {
@@ -49,13 +58,7 @@ pub fn run(args: &BySessionArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            super::common::handle_index_missing(&path)
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::STORE_INTEGRITY)
-        }
+        Err(e) => super::common::handle_read_verb_error(&e),
     }
 }
 

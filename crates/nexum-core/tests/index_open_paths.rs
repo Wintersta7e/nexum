@@ -77,7 +77,7 @@ fn recent_against_missing_index_errors_without_creating_db() {
     let cfg = common::test_cfg_local_only();
     assert!(!paths.index_db.exists());
 
-    let result = api::recent(&paths, &cfg, 10, None);
+    let result = api::recent(&paths, &cfg, &Filters::default(), 10, None);
     let err = result.expect_err("recent must error when index is missing");
     assert_index_missing(&err);
     assert!(
@@ -111,7 +111,7 @@ fn by_session_against_missing_index_errors_without_creating_db() {
     let lookup = SessionLookup::CcSession {
         uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
     };
-    let result = api::by_session(&paths, &cfg, &lookup);
+    let result = api::by_session(&paths, &cfg, &Filters::default(), &lookup);
     let err = result.expect_err("by_session must error when index is missing");
     assert_index_missing(&err);
     assert!(

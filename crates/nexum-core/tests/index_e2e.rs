@@ -95,7 +95,7 @@ fn by_session_finds_cc_fixture_session_referenced_record() {
     let lookup = SessionLookup::CcSession {
         uuid: uuid::Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
     };
-    let rs = api::by_session(&paths, &cfg, &lookup).unwrap();
+    let rs = api::by_session(&paths, &cfg, &Filters::default(), &lookup).unwrap();
     assert!(
         !rs.results.is_empty(),
         "expected at least one record referencing the fixture session"

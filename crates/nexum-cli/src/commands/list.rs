@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    query::{Filters, QueryError},
+    query::Filters,
     records::{RecordType, Source},
 };
 
@@ -28,6 +28,8 @@ pub struct ListArgs {
     #[arg(long, default_value_t = false)]
     pub require_signed: bool,
     #[arg(long, default_value_t = false)]
+    pub strict_revocation: bool,
+    #[arg(long, default_value_t = false)]
     pub json: bool,
 }
 
@@ -48,7 +50,7 @@ pub fn run(args: &ListArgs) -> ExitCode {
         since_iso: args.since.clone(),
         min_confidence: None,
         require_signed: args.require_signed,
-        strict_revocation: false,
+        strict_revocation: args.strict_revocation,
         no_unsigned_penalty: false,
     };
 
@@ -72,12 +74,6 @@ pub fn run(args: &ListArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            super::common::handle_index_missing(&path)
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::STORE_INTEGRITY)
-        }
+        Err(e) => super::common::handle_read_verb_error(&e),
     }
 }

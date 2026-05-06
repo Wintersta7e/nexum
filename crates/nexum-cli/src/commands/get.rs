@@ -23,6 +23,8 @@ pub struct GetArgs {
     pub json: bool,
     #[arg(long, default_value_t = false)]
     pub include_unsigned: bool,
+    #[arg(long, default_value_t = false)]
+    pub strict_revocation: bool,
 }
 
 pub fn run(args: &GetArgs) -> ExitCode {
@@ -33,10 +35,7 @@ pub fn run(args: &GetArgs) -> ExitCode {
     let opts = GetOpts {
         include_unsigned: args.include_unsigned,
         trust_policy: cfg.trust.unsigned_default,
-        // `strict_revocation` is populated from cfg by the api facade so the
-        // CLI does not have to re-thread it. Default keeps the construction
-        // exhaustive without leaning on `#[derive(Default)]`'s field defaults.
-        strict_revocation: false,
+        strict_revocation: args.strict_revocation,
     };
     let key = match parse_key(&args.id) {
         Ok(k) => k,
@@ -85,13 +84,7 @@ pub fn run(args: &GetArgs) -> ExitCode {
             }
             ExitCode::from(super::exit_codes::AMBIGUOUS)
         }
-        Err(api::ApiError::Query(QueryError::IndexMissing { path })) => {
-            super::common::handle_index_missing(&path)
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::STORE_INTEGRITY)
-        }
+        Err(e) => super::common::handle_read_verb_error(&e),
     }
 }
 
