@@ -1,0 +1,53 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Off-peak weekly run — catches advisories that landed in the
+    # query database between pushes.
+    - cron: "17 4 * * 0"
+
+# Cancel an in-flight CodeQL run if a newer commit lands on the same
+# ref — saves runner time without losing the latest result.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL Analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        # rust-toolchain.toml at repo root pins channel 1.95.0 + clippy + rustfmt.
+        run: rustup show
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

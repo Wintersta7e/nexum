@@ -11,8 +11,8 @@ version = "0.0.0-dev"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-repository = "https://github.com/REPLACE-ME/nexum"
-authors = ["REPLACE-ME"]
+repository = "https://github.com/Wintersta7e/nexum"
+authors = ["Wintersta7e"]
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+# A push that arrives while a previous run for the same ref is still
+# going cancels the in-flight one — saves runner minutes on rapid
+# pushes without losing the latest result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +20,7 @@ env:
 jobs:
   gate:
     name: Three-command gate (Linux)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
