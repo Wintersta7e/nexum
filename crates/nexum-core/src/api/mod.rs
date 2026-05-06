@@ -266,6 +266,53 @@ pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
     Ok(summaries)
 }
 
+/// One row from the `trust_chain_tampering` table — a forbidden mutation of
+/// `.trust/events.yml` that the materializer detected.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TamperingRow {
+    pub at_commit: String,
+    pub at_topo_pos: u64,
+    pub event_id: String,
+    pub kind: String,
+    pub detected_at: String,
+}
+
+/// Force a materializer rebuild and return any detected tampering rows.
+///
+/// Re-walks `.trust/events.yml` from scratch, ignoring the sentinel cache,
+/// then reads `trust_chain_tampering`. Used by `nexum trust validate-events`
+/// and the orchestration in `nexum index --check`.
+///
+/// # Errors
+///
+/// Returns `ApiError::Query` on rusqlite failure or
+/// `ApiError::Query(QueryError::Trust)` on materializer error.
+pub fn validate_events(paths: &Paths) -> Result<Vec<TamperingRow>, ApiError> {
+    let mut conn = open_or_create(&paths.index_db)?;
+    crate::trust::events_view::rebuild(&mut conn, &paths.notebook_git)
+        .map_err(crate::query::QueryError::Trust)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT at_commit, at_topo_pos, event_id, kind, detected_at \
+             FROM trust_chain_tampering \
+             ORDER BY at_topo_pos ASC",
+        )
+        .map_err(crate::query::QueryError::from)?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(TamperingRow {
+                at_commit: r.get(0)?,
+                at_topo_pos: u64::try_from(r.get::<_, i64>(1)?).unwrap_or(u64::MAX),
+                event_id: r.get(2)?,
+                kind: r.get(3)?,
+                detected_at: r.get(4)?,
+            })
+        })
+        .map_err(crate::query::QueryError::from)?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ApiError::Query(crate::query::QueryError::from(e)))
+}
+
 fn identity_kind_for(project_id: &str) -> &'static str {
     let prefix = project_id.split(':').next().unwrap_or("");
     match prefix {

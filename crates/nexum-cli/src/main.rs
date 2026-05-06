@@ -36,6 +36,11 @@ enum Commands {
     BySession(commands::by_session::BySessionArgs),
     /// Manage the projects registry.
     Project(commands::project::ProjectArgs),
+    /// Trust-events admin (`validate-events` exits 4 on tampering).
+    Trust {
+        #[command(subcommand)]
+        cmd: commands::trust::TrustCommand,
+    },
 }
 
 fn main() -> ExitCode {
@@ -49,5 +54,6 @@ fn main() -> ExitCode {
         Commands::Recent(a) => commands::recent::run(&a),
         Commands::BySession(a) => commands::by_session::run(&a),
         Commands::Project(a) => commands::project::run(&a),
+        Commands::Trust { cmd } => commands::trust::run(&cmd),
     }
 }

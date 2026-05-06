@@ -10,3 +10,4 @@ pub mod list;
 pub mod project;
 pub mod recent;
 pub mod search;
+pub mod trust;
