@@ -8,7 +8,7 @@ decode to:
 - `/tmp/fixture/my-hyphenated/app` (mixed)
 - `/tmp/fixture/my/hyphenated-app` (mixed)
 
-The §5 / §13 caveat (patch4): slug decoding is best-effort fallback only.
+Slug-decoding caveat: the encoded slug is best-effort fallback only.
 Project identity must prefer `git_origin_url` (when readable from the candidate
 path's `.git/`) and the user-registered project name in
 `~/.nexum/config.toml [projects.<name>]`. Tests should expect ambiguous-warn

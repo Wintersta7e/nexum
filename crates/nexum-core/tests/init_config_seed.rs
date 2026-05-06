@@ -1,4 +1,4 @@
-//! Targeted tests asserting every §8 config.toml seed field is populated correctly.
+//! Targeted tests asserting every config.toml seed field is populated correctly.
 
 mod common;
 
@@ -34,7 +34,7 @@ fn config_schema_version_is_one() {
 #[test]
 fn config_paths_section_populated() {
     let (cfg, outcome) = init_and_load_config();
-    // Paths use `~/.nexum` shorthand (not resolved) per §8 seed shape.
+    // Paths use `~/.nexum` shorthand (not resolved) per the seed-config shape.
     assert_eq!(cfg.paths.root, "~/.nexum");
     assert_eq!(cfg.paths.notebook_git, "~/.nexum/notebook.git");
     assert_eq!(cfg.paths.index_db, "~/.nexum/index.db");

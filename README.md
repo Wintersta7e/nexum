@@ -2,7 +2,7 @@
 
 Cross-agent memory for AI coding tools — built so the things you and your agents learn don't get lost between sessions, between agents, or to a tampered local file.
 
-> **Status:** pre-implementation. Next step: the pre-M1 stack-validation spike under `crates/nexum-spike/`.
+> **Status:** pre-implementation. Next step: the stack-validation spike under `crates/nexum-spike/`.
 
 ## What it does for you
 

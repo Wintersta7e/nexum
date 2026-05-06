@@ -34,23 +34,23 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-# Storage / search — pinned versions verified at spike-time (S1, §3.6).
+# Storage / search — pinned versions verified during stack-validation.
 rusqlite = { version = "0.32", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1"
-# Embeddings — pinned at spike-time (S3, S5). `ort` is still pre-1.0 in the 2.x series.
+# Embeddings — `ort` is still pre-1.0 in the 2.x series.
 ort = "=2.0.0-rc.12"
 tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
 fs2 = "0.4"
-# Test utilities — temp dirs for the test harness (Phase 0 +).
+# Test utilities — temp dirs for the test harness.
 tempfile = "3"
 walkdir = "2"
-# Cryptographic hashing for §7 DDL apply path and §13 path-hint hash function.
+# Cryptographic hashing for the index DDL apply path and path-hint hashing.
 sha2 = "0.10"
-# Timestamps for §8 init (config.toml established_at, META.yml init_at).
+# Timestamps for init (config.toml established_at, META.yml init_at).
 chrono = { version = "0.4", features = ["serde"] }
-# MCP framework — pinned at spike-time (S4, §3.6). Macros + server runtime only.
+# MCP framework — macros + server runtime only.
 rmcp = { version = "1", features = ["macros", "server"] }
 # Git.
 git2 = "0.20"
@@ -58,7 +58,7 @@ git2 = "0.20"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # UUIDs for trust event_ids.
 uuid = { version = "1", features = ["v7", "serde"] }
-# SSH key generation for §9 trust spike (S6) and M1 signer wrapper.
+# SSH key generation for the trust spike and the production signer wrapper.
 ssh-key = { version = "0.6", features = ["ed25519", "getrandom"] }
 # Test utilities.
 insta = { version = "1", features = ["yaml"] }

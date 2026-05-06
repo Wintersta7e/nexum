@@ -1,4 +1,4 @@
-//! Integration tests for the §7 index DDL applied to a real `SQLite` connection.
+//! Integration tests for the index DDL applied to a real `SQLite` connection.
 //! Uses `NexumTestHome` to create an isolated temp dir for the database file,
 //! and the sqlite-vec extension is loaded via `auto_extension` before the connection
 //! opens (vec0 is required by the DDL).
@@ -161,8 +161,9 @@ fn delete_in_correct_order_leaves_no_orphans() {
     .expect("insert");
     let rowid = conn.last_insert_rowid();
 
-    // Application-managed: insert into record_embeddings AFTER records (per §7
-    // ordering rule). Use a placeholder embedding; vec0 needs a 1024-dim FLOAT[].
+    // Application-managed: insert into record_embeddings AFTER records (the
+    // schema's required ordering). Use a placeholder embedding; vec0 needs a
+    // 1024-dim FLOAT[].
     let embedding: Vec<u8> = (0..1024).flat_map(|_| 0.0_f32.to_le_bytes()).collect();
     conn.execute(
         "INSERT INTO record_embeddings(record_rowid, embedding) VALUES (?1, ?2)",
@@ -170,7 +171,7 @@ fn delete_in_correct_order_leaves_no_orphans() {
     )
     .expect("insert embedding");
 
-    // Now delete in the §7-mandated order: vec0 first, then records.
+    // Now delete in the schema-mandated order: vec0 first, then records.
     conn.execute(
         "DELETE FROM record_embeddings WHERE record_rowid = ?1",
         rusqlite::params![rowid],

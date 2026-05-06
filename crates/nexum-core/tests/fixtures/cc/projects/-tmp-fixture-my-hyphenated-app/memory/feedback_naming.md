@@ -13,7 +13,7 @@ the slug alone.
 slug-decoding will silently pick one wrong split and propagate it into
 `project_id`, conflating distinct projects.
 
-**How to apply:** the §13 resolution order is `git_origin_url` first, then
+**How to apply:** the resolution order is `git_origin_url` first, then
 registered project names from `config.toml`, then path-based identity from the
 slug. Slug-decoded paths are the LAST fallback. When the slug is ambiguous and
 no higher-priority signal applies, surface a `nexum doctor` warning and let the
