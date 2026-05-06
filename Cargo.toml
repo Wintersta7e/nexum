@@ -46,7 +46,7 @@ fs2 = "0.4"
 tempfile = "3"
 walkdir = "2"
 # Cryptographic hashing for the index DDL apply path and path-hint hashing.
-sha2 = "0.10"
+sha2 = "0.11"
 # Timestamps for init (config.toml established_at, META.yml init_at).
 chrono = { version = "0.4", features = ["serde"] }
 # MCP framework — macros + server runtime only.
