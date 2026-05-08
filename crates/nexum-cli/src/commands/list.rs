@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
+    api::error::ErrorEnvelope,
     query::Filters,
     records::{RecordType, Source},
 };
@@ -54,26 +55,28 @@ pub fn run(args: &ListArgs) -> ExitCode {
         no_unsigned_penalty: false,
     };
 
-    match api::list(&paths, &cfg, &filters, args.limit, args.cursor.as_deref()) {
-        Ok(rs) => {
+    let rs = match api::list(&paths, &cfg, &filters, args.limit, args.cursor.as_deref()) {
+        Ok(r) => r,
+        Err(e) => {
             if args.json {
-                match serde_json::to_string_pretty(&rs) {
-                    Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: serialize: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                for r in &rs.results {
-                    println!("  {}  {}  ({})", r.id, r.title, r.updated);
-                }
-                if let Some(c) = rs.next_cursor {
-                    println!("Next cursor: {c}");
-                }
+                let env: ErrorEnvelope = (&e).into();
+                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
             }
-            ExitCode::SUCCESS
+            return super::common::handle_read_verb_error(&e);
         }
-        Err(e) => super::common::handle_read_verb_error(&e),
+    };
+    if args.json {
+        match serde_json::to_string_pretty(&rs) {
+            Ok(s) => println!("{s}"),
+            Err(e) => return super::json_emit::emit_serialize_failure(&e),
+        }
+    } else {
+        for r in &rs.results {
+            println!("  {}  {}  ({})", r.id, r.title, r.updated);
+        }
+        if let Some(c) = rs.next_cursor {
+            println!("Next cursor: {c}");
+        }
     }
+    ExitCode::SUCCESS
 }
