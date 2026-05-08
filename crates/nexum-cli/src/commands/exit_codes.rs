@@ -43,7 +43,9 @@ pub(crate) const AMBIGUOUS: u8 = 13;
 /// The mapping is the single source of truth for code-to-exit translation;
 /// every `--json`-bearing verb routes through `json_emit::emit_error(env,
 /// for_envelope(env))` so the two channels stay in sync.
-// First call site lands in the next verb-route task.
+// Allow rather than expect: the lint fires in the binary build but not the
+// test build (the test module exercises this function). Drop the allow when
+// the next verb-route task wires the first non-test call site.
 #[allow(dead_code)]
 pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
     use nexum_core::api::error::error_codes as ec;
