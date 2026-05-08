@@ -137,6 +137,18 @@ fn list(paths: &Paths, json: bool) -> ExitCode {
 
 fn resolve_path(path: &Path, json: bool) -> ExitCode {
     if !path.exists() {
+        if json {
+            let env = ErrorEnvelope {
+                error_code: error_codes::USAGE,
+                message: format!("path does not exist: {}", path.display()),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Pass an existing directory path.".into(),
+                }),
+                context: serde_json::json!({ "path": path.to_string_lossy() }),
+            };
+            return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
+        }
         eprintln!("error: path does not exist: {}", path.display());
         return ExitCode::from(super::exit_codes::USAGE);
     }
@@ -166,10 +178,7 @@ fn resolve_path(path: &Path, json: bool) -> ExitCode {
         };
         match serde_json::to_string_pretty(&value) {
             Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("error: serialize: {e}");
-                return ExitCode::FAILURE;
-            }
+            Err(e) => return super::json_emit::emit_serialize_failure(&e),
         }
     } else {
         match resolution {
