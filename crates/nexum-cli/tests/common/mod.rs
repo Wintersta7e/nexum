@@ -7,8 +7,61 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use tempfile::TempDir;
+
 pub fn nexum_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_nexum"))
+}
+
+/// Self-contained nexum home for `--json` error-envelope tests. Owns the
+/// backing temp dir; dropping the value cleans up. The `path()` accessor
+/// returns the value to set as `NEXUM_HOME` on a subprocess.
+pub struct TestHome {
+    _root: TempDir,
+    nexum_home: PathBuf,
+}
+
+impl TestHome {
+    /// Allocate a temp dir but skip `nexum init`. Useful for asserting
+    /// `NOT_INITIALIZED` errors.
+    pub fn uninitialized() -> Self {
+        let root = TempDir::new().expect("tempdir for TestHome");
+        let nexum_home = root.path().join(".nexum");
+        Self {
+            _root: root,
+            nexum_home,
+        }
+    }
+
+    /// Initialize a nexum home (notebook.git + config.toml + signed
+    /// bootstrap) but do NOT run `nexum index`. Useful for asserting
+    /// `NOT_INDEXED` errors with a fully-realized home directory.
+    pub fn initialized_no_index() -> Self {
+        let root = TempDir::new().expect("tempdir for TestHome");
+        let nexum_home = root.path().join(".nexum");
+        let ssh_home = root.path().join("ssh-home");
+        std::fs::create_dir_all(ssh_home.join(".ssh")).expect("mkdir ssh-home/.ssh");
+        let key_path = write_ephemeral_keypair(&ssh_home.join(".ssh"));
+        let out = run_nexum(
+            &nexum_home,
+            &ssh_home,
+            &["init", "--yes", "--ssh-key", key_path.to_str().unwrap()],
+        );
+        assert!(
+            out.status.success(),
+            "TestHome init failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Self {
+            _root: root,
+            nexum_home,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.nexum_home
+    }
 }
 
 /// Generate a fresh ed25519 keypair into `dir/id_ed25519{,.pub}`. Returns

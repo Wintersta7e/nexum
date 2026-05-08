@@ -55,14 +55,26 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     opts.filters = build_filters(args);
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,
-        Err(e) => return super::common::handle_read_verb_error(&e),
+        Err(e) => {
+            if args.json {
+                let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
+                let code = super::exit_codes::for_envelope(&env);
+                return super::json_emit::emit_error(&env, code);
+            }
+            return super::common::handle_read_verb_error(&e);
+        }
     };
     if args.json {
         match serde_json::to_string_pretty(&res) {
             Ok(s) => println!("{s}"),
             Err(e) => {
-                eprintln!("error: serialize: {e}");
-                return ExitCode::FAILURE;
+                let env = nexum_core::api::error::ErrorEnvelope {
+                    error_code: nexum_core::api::error::error_codes::SERIALIZE_FAILED,
+                    message: format!("serialize: {e}"),
+                    remediation: None,
+                    context: serde_json::json!({ "kind": "json", "message": format!("{e}") }),
+                };
+                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
             }
         }
     } else {

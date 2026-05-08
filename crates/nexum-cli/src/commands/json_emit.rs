@@ -13,11 +13,6 @@ use nexum_core::api::error::ErrorEnvelope;
 /// minimal envelope to stderr and return [`ExitCode::FAILURE`]. Agents that
 /// see the canned form know the verb broke before the structured channel
 /// could be used.
-// Allow rather than expect: the lint fires in the binary build but not the
-// test build (the test module exercises this function), so `#[expect]` would
-// be "unfulfilled" in cfg(test). Drop the allow when the next verb-route
-// task wires the first non-test call site.
-#[allow(dead_code)]
 pub(crate) fn emit_error(env: &ErrorEnvelope, exit_code: u8) -> ExitCode {
     if let Ok(s) = serde_json::to_string_pretty(env) {
         println!("{s}");

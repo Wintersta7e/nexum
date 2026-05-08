@@ -1,0 +1,47 @@
+//! End-to-end tests that the CLI's `--json` mode emits a structured
+//! `ErrorEnvelope` on stdout for every read verb that fails. Default mode
+//! (no `--json`) is covered by the older per-verb test files and is not
+//! re-asserted here.
+
+mod common;
+
+use std::process::Command;
+
+use serde_json::Value;
+
+use crate::common::TestHome;
+
+fn run_search_json(home: &TestHome, query: &str) -> (Value, i32) {
+    let out = Command::new(env!("CARGO_BIN_EXE_nexum"))
+        .args(["search", query, "--json"])
+        .env("NEXUM_HOME", home.path())
+        .output()
+        .expect("nexum search --json");
+    let parsed: Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    (parsed, out.status.code().unwrap_or(-1))
+}
+
+#[test]
+fn search_emits_not_indexed_envelope_when_index_missing() {
+    let home = TestHome::initialized_no_index();
+    let (env, code) = run_search_json(&home, "anything");
+    assert_eq!(env["error_code"], "NOT_INDEXED");
+    assert_eq!(code, 10);
+    assert_eq!(env["remediation"]["command"], "nexum index");
+    assert!(env["context"]["path"].as_str().is_some());
+}
+
+#[test]
+fn search_default_mode_still_emits_prose_to_stderr() {
+    let home = TestHome::initialized_no_index();
+    let out = Command::new(env!("CARGO_BIN_EXE_nexum"))
+        .args(["search", "anything"])
+        .env("NEXUM_HOME", home.path())
+        .output()
+        .expect("nexum search");
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("no index database"));
+    assert!(out.stdout.is_empty());
+    assert_eq!(out.status.code().unwrap_or(-1), 10);
+}
