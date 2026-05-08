@@ -28,7 +28,7 @@ pub fn run(cmd: &TrustCommand) -> ExitCode {
 }
 
 fn run_validate_events(args: &ValidateEventsArgs) -> ExitCode {
-    let (paths, _cfg) = match super::common::resolve_runtime() {
+    let (paths, _cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
     };

@@ -97,3 +97,12 @@ fn by_session_emits_not_indexed_envelope() {
     assert_eq!(code, 10);
     assert!(env["context"]["path"].as_str().is_some());
 }
+
+#[test]
+fn index_emits_not_initialized_envelope_when_home_missing() {
+    let home = TestHome::uninitialized();
+    let (env, code) = run_json(&home, &["index", "--json"]);
+    assert_eq!(env["error_code"], "NOT_INITIALIZED");
+    assert_eq!(code, 3);
+    assert!(env["context"]["phase"].as_str().is_some());
+}

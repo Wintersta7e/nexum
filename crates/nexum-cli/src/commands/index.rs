@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::api;
+use nexum_core::{api, api::error::ErrorEnvelope};
 
 // Clap-derived CLI flag struct: each bool is an independent --flag toggle, so
 // the state-machine refactor clippy suggests would obscure the surface.
@@ -29,7 +29,7 @@ pub struct IndexArgs {
 
 /// Run `nexum index`.
 pub fn run(args: &IndexArgs) -> ExitCode {
-    let (paths, cfg) = match super::common::resolve_runtime() {
+    let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -42,15 +42,17 @@ pub fn run(args: &IndexArgs) -> ExitCode {
     } else {
         api::index_run(&paths, &cfg)
     };
+    // `--check` keeps the legacy stderr-prose channel for pre-tampering
+    // errors; the dedicated tampering envelope and the pre-tampering envelope
+    // route ship in their own follow-up tasks. Default mode routes
+    // serialize-failure and indexer errors through the envelope under
+    // `--json`.
     match outcome {
         Ok(o) => {
             if args.json {
                 match serde_json::to_string_pretty(&o) {
                     Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: failed to serialize outcome: {e}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(e) => return super::json_emit::emit_serialize_failure(&e),
                 }
             } else {
                 println!(
@@ -75,7 +77,14 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Err(e) => super::common::handle_read_verb_error(&e),
+        Err(e) => {
+            if args.json && !args.check {
+                let env: ErrorEnvelope = (&e).into();
+                super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
+            } else {
+                super::common::handle_read_verb_error(&e)
+            }
+        }
     }
 }
 

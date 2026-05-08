@@ -65,7 +65,7 @@ fn register(name: &str, path: &Path) -> ExitCode {
         eprintln!("error: not a directory: {}", path.display());
         return ExitCode::from(super::exit_codes::USAGE);
     }
-    let (paths, mut cfg) = match super::common::resolve_runtime() {
+    let (paths, mut cfg) = match super::common::resolve_runtime(false) {
         Ok(v) => v,
         Err(c) => return c,
     };

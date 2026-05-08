@@ -35,7 +35,7 @@ pub struct ListArgs {
 }
 
 pub fn run(args: &ListArgs) -> ExitCode {
-    let (paths, cfg) = match super::common::resolve_runtime() {
+    let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
     };
