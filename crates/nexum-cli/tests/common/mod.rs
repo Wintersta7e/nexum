@@ -106,19 +106,15 @@ impl TestHome {
     /// Re-uses the SSH key planted by `initialized_no_index` and the git
     /// signing config that `nexum init` already wrote to the notebook repo.
     pub fn initialized_with_tampered_events_yml() -> Self {
-        let home = Self::initialized_no_index();
-        let notebook_git = home.path().join("notebook.git");
-        let events_path = notebook_git.join(".trust").join("events.yml");
-        let original = std::fs::read_to_string(&events_path).expect("read events.yml");
-        // Mutate the fingerprint line to a synthetic value while leaving the
-        // event_id intact. Same event_id + different payload trips the
-        // `MutatedPayload` classifier.
-        let mutated = mutate_first_fingerprint(&original);
-        assert_ne!(mutated, original, "fingerprint mutation must change file");
-        std::fs::write(&events_path, mutated).expect("write tampered events.yml");
-        // Stage + signed commit using git config installed by `nexum init`.
-        commit_tamper(&notebook_git, &home.ssh_home);
-        home
+        Self::initialized_with_mutated_events_yml(|events_path| {
+            let original = std::fs::read_to_string(events_path).expect("read events.yml");
+            // Mutate the fingerprint line to a synthetic value while leaving
+            // the event_id intact. Same event_id + different payload trips
+            // the `MutatedPayload` classifier.
+            let mutated = mutate_first_fingerprint(&original);
+            assert_ne!(mutated, original, "fingerprint mutation must change file");
+            std::fs::write(events_path, mutated).expect("write tampered events.yml");
+        })
     }
 
     /// Initialize a nexum home (signed bootstrap commit), then append a
@@ -132,14 +128,25 @@ impl TestHome {
     /// distinct from `initialized_with_tampered_events_yml` which produces a
     /// well-formed-but-mutated payload that yields a tampering row instead.
     pub fn initialized_with_corrupt_events_yml() -> Self {
+        Self::initialized_with_mutated_events_yml(|events_path| {
+            // Write garbage that serde_yaml cannot parse as the EventLog
+            // struct. A bare unbalanced flow-mapping opener is rejected at
+            // the lexer level, so this is robust against future field
+            // additions.
+            std::fs::write(events_path, b"{ this is : not [ valid yaml\n")
+                .expect("write corrupt events.yml");
+        })
+    }
+
+    /// Init a fresh home, hand the `events.yml` path to `mutate`, then
+    /// signed-commit the resulting tree. Shared scaffold for the tampered
+    /// and corrupt-YAML fixtures; future fixtures (e.g. tampered signature,
+    /// tampered `topo_pos`) fold in as one-line wrappers.
+    fn initialized_with_mutated_events_yml(mutate: impl FnOnce(&Path)) -> Self {
         let home = Self::initialized_no_index();
         let notebook_git = home.path().join("notebook.git");
         let events_path = notebook_git.join(".trust").join("events.yml");
-        // Write garbage that serde_yaml cannot parse as the EventLog struct.
-        // A bare unbalanced flow-mapping opener is rejected at the lexer
-        // level, so this is robust against future field additions.
-        std::fs::write(&events_path, b"{ this is : not [ valid yaml\n")
-            .expect("write corrupt events.yml");
+        mutate(&events_path);
         commit_tamper(&notebook_git, &home.ssh_home);
         home
     }

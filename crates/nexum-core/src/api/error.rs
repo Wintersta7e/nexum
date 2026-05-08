@@ -48,6 +48,19 @@ pub struct Remediation {
 /// Once a constant is added here and ships, its string value is part of the
 /// public agent-facing contract — never renamed. Adding new constants is
 /// always allowed.
+///
+/// **Discriminator fields in `context`** (load-bearing convention for agents
+/// pattern-matching on envelope shape):
+/// - `kind` — the `ApiError` variant family (`"trust"`, `"config"`,
+///   `"indexer"`, `"rusqlite"`, `"json"`, `"schema"`, `"adapter"`, `"io"`,
+///   `"migration"`). Set by the `From<&ApiError>` builder.
+/// - `subkind` — the specific variant within a `kind` family (e.g.
+///   `"io"`/`"parse"`/`"config_parse"` under `kind: "trust"`). Set per arm.
+/// - `phase` — used by CLI shim envelopes built BEFORE any `ApiError` could
+///   be constructed (e.g. `commands::common::resolve_runtime` emits
+///   `phase: "paths_resolve" | "pre_check" | "load_config"`). Lives in the
+///   same `context` namespace but identifies the pipeline stage that
+///   failed rather than an inner-error variant.
 pub mod error_codes {
     /// Invalid argument combination (clap parse, per-verb arg validation).
     pub const USAGE: &str = "USAGE";
