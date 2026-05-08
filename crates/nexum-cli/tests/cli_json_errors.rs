@@ -26,3 +26,39 @@ fn search_default_mode_still_emits_prose_to_stderr() {
     assert!(out.stdout.is_empty());
     assert_eq!(out.status.code().unwrap_or(-1), 10);
 }
+
+#[test]
+fn get_emits_not_found_envelope() {
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(&home, &["get", "definitely-does-not-exist", "--json"]);
+    assert_eq!(env["error_code"], "NOT_FOUND");
+    assert_eq!(env["context"]["requested_id"], "definitely-does-not-exist");
+    assert_eq!(code, 11);
+}
+
+#[test]
+fn get_emits_ambiguous_envelope_with_matches() {
+    let home = TestHome::initialized_with_two_records_sharing_id("dup-id");
+    let (env, code) = run_json(&home, &["get", "dup-id", "--json"]);
+    assert_eq!(env["error_code"], "AMBIGUOUS_KEY");
+    assert_eq!(code, 13);
+    let matches = env["context"]["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+}
+
+#[test]
+fn get_emits_hidden_by_policy_envelope_under_hide() {
+    let home = TestHome::initialized_with_unsigned_record_under_hide("hidden-id");
+    let (env, code) = run_json(&home, &["get", "hidden-id", "--json"]);
+    assert_eq!(env["error_code"], "HIDDEN_BY_POLICY");
+    assert_eq!(code, 12);
+    assert!(env["context"]["signature_status"].as_str().is_some());
+}
+
+#[test]
+fn get_emits_not_indexed_envelope_when_index_missing() {
+    let home = TestHome::initialized_no_index();
+    let (env, code) = run_json(&home, &["get", "anything", "--json"]);
+    assert_eq!(env["error_code"], "NOT_INDEXED");
+    assert_eq!(code, 10);
+}

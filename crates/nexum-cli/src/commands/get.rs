@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
+    api::error::{ErrorEnvelope, Remediation, error_codes},
     query::{GetOpts, QueryError},
     records::{GetOutcome, RecordKey},
 };
@@ -46,10 +47,7 @@ pub fn run(args: &GetArgs) -> ExitCode {
             if args.json {
                 match serde_json::to_string_pretty(&r) {
                     Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: serialize: {e}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(e) => return super::json_emit::emit_serialize_failure(&e),
                 }
             } else {
                 println!("{}", r.title);
@@ -62,29 +60,67 @@ pub fn run(args: &GetArgs) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(GetOutcome::NotFound) => {
-            eprintln!("error: no record matches `{}`", args.id);
-            ExitCode::from(super::exit_codes::NOT_FOUND)
+            let env = ErrorEnvelope {
+                error_code: error_codes::NOT_FOUND,
+                message: format!("no record matches `{}`", args.id),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Verify the id is correct, or run `nexum search` \
+                                to find candidate records."
+                        .into(),
+                }),
+                context: serde_json::json!({ "requested_id": args.id }),
+            };
+            if args.json {
+                super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
+            } else {
+                eprintln!("error: {}", env.message);
+                ExitCode::from(super::exit_codes::NOT_FOUND)
+            }
         }
         Ok(GetOutcome::HiddenByPolicy { signature_status }) => {
-            eprintln!(
-                "error: record exists but hidden by trust policy (status: {signature_status}); \
-                 retry with --include-unsigned"
-            );
-            ExitCode::from(super::exit_codes::HIDDEN_BY_POLICY)
-        }
-        Err(api::ApiError::Query(QueryError::Ambiguous { matches })) => {
-            eprintln!(
-                "error: ambiguous record id `{}`; {} candidates match. Re-run with the \
-                 fully-qualified key `<source>:<project_id>:<id>`:",
-                args.id,
-                matches.len()
-            );
-            for m in &matches {
-                eprintln!("  {m}");
+            let env = ErrorEnvelope {
+                error_code: error_codes::HIDDEN_BY_POLICY,
+                message: format!(
+                    "record exists but hidden by trust policy (status: {signature_status})"
+                ),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Retry with `--include-unsigned` to inspect the record \
+                                deliberately."
+                        .into(),
+                }),
+                context: serde_json::json!({
+                    "signature_status": format!("{signature_status}"),
+                }),
+            };
+            if args.json {
+                super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
+            } else {
+                eprintln!("error: {}; retry with --include-unsigned", env.message);
+                ExitCode::from(super::exit_codes::HIDDEN_BY_POLICY)
             }
-            ExitCode::from(super::exit_codes::AMBIGUOUS)
         }
-        Err(e) => super::common::handle_read_verb_error(&e),
+        Err(e) => {
+            if args.json {
+                let env: ErrorEnvelope = (&e).into();
+                super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
+            } else if let api::ApiError::Query(QueryError::Ambiguous { matches }) = &e {
+                // Default mode: keep the legacy ambiguous-with-list rendering.
+                eprintln!(
+                    "error: ambiguous record id `{}`; {} candidates match. Re-run with the \
+                     fully-qualified key `<source>:<project_id>:<id>`:",
+                    args.id,
+                    matches.len()
+                );
+                for m in matches {
+                    eprintln!("  {m}");
+                }
+                ExitCode::from(super::exit_codes::AMBIGUOUS)
+            } else {
+                super::common::handle_read_verb_error(&e)
+            }
+        }
     }
 }
 

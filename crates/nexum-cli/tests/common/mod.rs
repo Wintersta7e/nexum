@@ -64,6 +64,66 @@ impl TestHome {
         }
     }
 
+    /// Initialize a nexum home, seed at least one local YAML record, and
+    /// run `nexum index` so the index database exists. Useful for asserting
+    /// per-record verb errors that require a populated index (e.g. `NOT_FOUND`).
+    pub fn initialized_with_seeded_index() -> Self {
+        let home = Self::initialized_no_index();
+        write_local_yaml(home.path(), "decisions", "seed", "seed body");
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "TestHome seed-index failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        home
+    }
+
+    /// Initialize a nexum home, seed one local YAML record, run
+    /// `nexum index`, then insert a sibling row directly into `index.db`
+    /// that shares the bare `id` but pins a different `project_id`. A
+    /// bare-id lookup against this home returns `AMBIGUOUS_KEY` with two
+    /// candidate matches.
+    ///
+    /// The direct-SQL insertion is necessary because the local adapter
+    /// (and the indexer's per-pass candidate map) keys by bare `id` — two
+    /// YAML files with the same stem on disk silently dedupe down to one
+    /// row at index time. Bypassing the indexer is the smallest path to
+    /// the multi-row state the AMBIGUOUS error path requires.
+    pub fn initialized_with_two_records_sharing_id(id: &str) -> Self {
+        let home = Self::initialized_no_index();
+        write_local_yaml_with_project(home.path(), "decisions", id, "alpha-project", "first");
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "TestHome ambiguous-index failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        insert_sibling_local_row(home.path(), id, "beta-project");
+        home
+    }
+
+    /// Initialize a nexum home, seed a single unsigned local YAML record,
+    /// flip `[trust] unsigned_default = "hide"` in `config.toml`, then run
+    /// `nexum index`. A bare-id lookup for `id` against this home returns
+    /// `HIDDEN_BY_POLICY` because the seed record is unsigned and the
+    /// trust policy now suppresses unsigned reads.
+    pub fn initialized_with_unsigned_record_under_hide(id: &str) -> Self {
+        let home = Self::initialized_no_index();
+        write_local_yaml(home.path(), "decisions", id, "hidden body");
+        set_unsigned_policy_hide(home.path());
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "TestHome hide-policy-index failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        home
+    }
+
     pub fn path(&self) -> &Path {
         &self.nexum_home
     }
@@ -130,6 +190,21 @@ pub fn run_nexum(home: &Path, ssh_home: &Path, args: &[&str]) -> Output {
 /// Write a local-adapter-format YAML record at `home/notebook.git/<sub>/<id>.yml`.
 /// Mirrors the equivalent helper in `nexum-core::tests::common`.
 pub fn write_local_yaml(home: &Path, sub: &str, id: &str, body: &str) -> PathBuf {
+    write_local_yaml_with_project(home, sub, id, "example", body)
+}
+
+/// Variant of `write_local_yaml` that lets the caller pin a specific
+/// `project_id` in the YAML body. The on-disk layout stays
+/// `home/notebook.git/<sub>/<id>.yml` because the local adapter's
+/// `discover()` only walks the top-level type directories — nesting under
+/// a per-project subdir would silently hide the record.
+pub fn write_local_yaml_with_project(
+    home: &Path,
+    sub: &str,
+    id: &str,
+    project_id: &str,
+    body: &str,
+) -> PathBuf {
     let notebook_git = home.join("notebook.git");
     let p = notebook_git.join(sub).join(format!("{id}.yml"));
     if let Some(parent) = p.parent() {
@@ -144,9 +219,48 @@ pub fn write_local_yaml(home: &Path, sub: &str, id: &str, body: &str) -> PathBuf
     std::fs::write(
         &p,
         format!(
-            "schema_version: 1\nid: {id}\nrecord_type: {kind}\ntitle: {id}\nbody: |\n  {body}\nproject_id: example\ntags: []\nagent: manual\ncreated: 2026-04-29T00:00:00Z\nupdated: 2026-04-29T00:00:00Z\nconfidence: high\noutcome: working\n"
+            "schema_version: 1\nid: {id}\nrecord_type: {kind}\ntitle: {id}\nbody: |\n  {body}\nproject_id: {project_id}\ntags: []\nagent: manual\ncreated: 2026-04-29T00:00:00Z\nupdated: 2026-04-29T00:00:00Z\nconfidence: high\noutcome: working\n"
         ),
     )
     .expect("write local yaml");
     p
+}
+
+/// Flip `[trust] unsigned_default = "warn-but-show"` (the seed value) to
+/// `"hide"` in an already-initialized home's `config.toml`. Used to set up
+/// `HIDDEN_BY_POLICY` test fixtures.
+pub fn set_unsigned_policy_hide(home: &Path) {
+    let cfg_path = home.join("config.toml");
+    let raw = std::fs::read_to_string(&cfg_path).expect("read config.toml");
+    let updated = raw.replace(
+        "unsigned_default = \"warn-but-show\"",
+        "unsigned_default = \"hide\"",
+    );
+    assert_ne!(
+        raw, updated,
+        "config.toml did not contain `unsigned_default = \"warn-but-show\"`"
+    );
+    std::fs::write(&cfg_path, updated).expect("write config.toml");
+}
+
+/// Insert a `local`-source record straight into `<home>/index.db` that
+/// shares `id` with an already-indexed row but pins a different
+/// `project_id`. The columns mirror what the indexer would write for a
+/// minimal unsigned local record. Used by
+/// `initialized_with_two_records_sharing_id` because the adapter pipeline
+/// dedupes by bare `id` before reaching the upsert.
+pub fn insert_sibling_local_row(home: &Path, id: &str, project_id: &str) {
+    let db_path = home.join("index.db");
+    let conn = rusqlite::Connection::open(&db_path).expect("open index.db");
+    conn.execute(
+        "INSERT INTO records (id, source, project_id, record_type, title, body, \
+         tags, tags_fts, confidence, outcome, agent, session_refs, files, commits, \
+         created, updated, content_hash, index_hash, crypto_result, indexed_at) \
+         VALUES (?1, 'local', ?2, 'decision', ?1, '', '[]', '', 'high', 'working', \
+         'manual', '[]', '[]', '[]', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', \
+         'sibling-content-hash', 'sibling-index-hash', 'no-signature', \
+         '2026-04-29T00:00:01Z')",
+        rusqlite::params![id, project_id],
+    )
+    .expect("insert sibling local row");
 }
