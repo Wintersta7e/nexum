@@ -1,5 +1,5 @@
 //! Wire-stable error envelope consumed by both the CLI's `--json` mode and
-//! (in a later phase) the MCP server.
+//! (later) the MCP server.
 //!
 //! Agents key on the stable `error_code` to branch behavior; `remediation`
 //! carries a structured action the agent can surface to the user; `context`
@@ -28,7 +28,10 @@ pub struct ErrorEnvelope {
     pub context: serde_json::Value,
 }
 
-/// Structured remediation hint.
+/// Carries an actionable next-step the agent can either execute (`command`)
+/// or relay verbatim to the user (`rationale`). Decoupling the two lets the
+/// agent route a structured remediation through its own UX without parsing
+/// English back out of a free-form message.
 #[derive(Debug, Clone, Serialize)]
 pub struct Remediation {
     /// Concrete shell invocation that resolves the error, when applicable.
