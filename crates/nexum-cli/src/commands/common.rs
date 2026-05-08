@@ -4,6 +4,7 @@ use std::{path::Path, process::ExitCode};
 
 use nexum_core::{
     api::ApiError,
+    api::error::{ErrorEnvelope, Remediation, error_codes},
     config::{io::load as load_config, types::Config},
     paths::Paths,
     query::QueryError,
@@ -16,14 +17,32 @@ use super::exit_codes;
 /// Returns the runtime context shared by every read-side CLI verb (`index`,
 /// `search`, `get`, `list`, `recent`, `by_session`, `project`).
 ///
-/// On `Paths::resolve` failure prints an init-suggestion hint and returns
-/// `ExitCode::from(exit_codes::NOT_INITIALIZED)`. If `session::startup::pre_check`
-/// detects a `.reanchor_pending` sentinel, returns
-/// `ExitCode::from(exit_codes::REANCHOR_PENDING)` (8); other startup errors
-/// map to `STORE_INTEGRITY`. On `load_config` failure prints the underlying
-/// error and returns `NOT_INITIALIZED`.
-pub(crate) fn resolve_runtime() -> Result<(Paths, Config), ExitCode> {
+/// `json` selects the failure rendering channel: `true` emits an
+/// [`ErrorEnvelope`] on stdout via [`super::json_emit::emit_error`] and
+/// returns the matching exit code; `false` keeps the legacy prose-on-stderr
+/// rendering (verbatim from the pre-refactor implementation, preserved so
+/// existing string-compare integration tests stay green).
+///
+/// Exit-code mapping is identical across both channels: `Paths::resolve`
+/// failure -> `NOT_INITIALIZED` (3); a `.reanchor_pending` sentinel ->
+/// `REANCHOR_PENDING` (8); other startup errors -> `STORE_INTEGRITY` (4);
+/// `load_config` failure -> `NOT_INITIALIZED` (3).
+pub(crate) fn resolve_runtime(json: bool) -> Result<(Paths, Config), ExitCode> {
     let paths = Paths::resolve().map_err(|e| {
+        if json {
+            let env = ErrorEnvelope {
+                error_code: error_codes::NOT_INITIALIZED,
+                message: format!("{e}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum init".into()),
+                    rationale: "Initialize a nexum home (notebook.git + config + signing key)."
+                        .into(),
+                }),
+                context: serde_json::json!({ "phase": "paths_resolve" }),
+            };
+            return super::json_emit::emit_error(&env, exit_codes::NOT_INITIALIZED);
+        }
+        // Default-mode prose preserved verbatim from the pre-refactor implementation.
         eprintln!("error: {e}\nDid you run `nexum init`?");
         ExitCode::from(exit_codes::NOT_INITIALIZED)
     })?;
@@ -31,15 +50,52 @@ pub(crate) fn resolve_runtime() -> Result<(Paths, Config), ExitCode> {
         nexum_core::session::startup::StartupError::Trust(
             nexum_core::trust::events::TrustError::ReanchorPending { message },
         ) => {
+            if json {
+                let env = ErrorEnvelope {
+                    error_code: error_codes::REANCHOR_PENDING,
+                    message: message.clone(),
+                    remediation: Some(Remediation {
+                        command: None,
+                        rationale: "Resolve the pending reanchor before continuing. \
+                                    Run `nexum doctor --resolve-pending-reanchor` once \
+                                    that command lands."
+                            .into(),
+                    }),
+                    context: serde_json::json!({ "phase": "pre_check" }),
+                };
+                return super::json_emit::emit_error(&env, exit_codes::REANCHOR_PENDING);
+            }
+            // Default-mode prose preserved verbatim.
             eprintln!("error: {message}");
             ExitCode::from(exit_codes::REANCHOR_PENDING)
         }
         nexum_core::session::startup::StartupError::Trust(other) => {
+            if json {
+                let api_err =
+                    nexum_core::api::ApiError::Query(nexum_core::query::QueryError::Trust(other));
+                let env: ErrorEnvelope = (&api_err).into();
+                return super::json_emit::emit_error(&env, exit_codes::for_envelope(&env));
+            }
             eprintln!("error: {other}");
             ExitCode::from(exit_codes::STORE_INTEGRITY)
         }
     })?;
     let cfg = load_config(&paths.config).map_err(|e| {
+        if json {
+            let env = ErrorEnvelope {
+                error_code: error_codes::NOT_INITIALIZED,
+                message: format!("{e}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum init".into()),
+                    rationale: "Re-running `nexum init` heals a missing or malformed \
+                                config.toml."
+                        .into(),
+                }),
+                context: serde_json::json!({ "phase": "load_config" }),
+            };
+            return super::json_emit::emit_error(&env, exit_codes::NOT_INITIALIZED);
+        }
+        // Default-mode prose preserved verbatim.
         eprintln!("error: {e}");
         ExitCode::from(exit_codes::NOT_INITIALIZED)
     })?;

@@ -46,6 +46,13 @@ your memory files — and your agent will trust whatever's there.
   compromise, and authorized re-anchor with a chain-anchor-lost
   warning all flow through one materialized view that read verbs
   consult per row.
+- **Agent-ready `--json` errors** — every read verb's failure under
+  `--json` emits a wire-stable `ErrorEnvelope` to stdout: stable
+  `error_code` string, structured `remediation` (command +
+  rationale), and a per-variant `context` preserving fields like
+  `path`, `signature_status`, and `matches`. Agents branch on
+  `error_code` and surface remediation directly to users without
+  having to regex prose.
 
 ## Quick start
 
@@ -83,15 +90,18 @@ CC_HOME="$HOME/.claude" ./e2e/run.sh cc         # real cc install
 ## Status
 
 The read path is feature-complete and validated end-to-end against
-real codex + cc data via the Docker harness. Three crates compile
+real codex + cc data via the Docker harness, including the structured
+`--json` error envelope across every read verb. Three crates compile
 clean, gate green at `cargo fmt + check + clippy -D warnings + test`.
 
 Remaining work: the `nexum-mcp` stdio server (placeholder crate
-today), semantic ranking via bge-m3 ONNX (FTS-only today), and the
-admin/recovery commands (key rotation, trust regenerate-files,
-`doctor --resolve-pending-reanchor`). After that: typed extraction
-from past sessions, then a recommendation → decision promotion flow
-when matching commits land in your project repo.
+today; the existing `--json` envelope plugs into rmcp's tool-result
+shape directly), semantic ranking via bge-m3 ONNX (FTS-only today),
+and the admin/recovery commands (key rotation, trust
+regenerate-files, `doctor --resolve-pending-reanchor`). After that:
+typed extraction from past sessions, then a recommendation →
+decision promotion flow when matching commits land in your project
+repo.
 
 ## Layout
 

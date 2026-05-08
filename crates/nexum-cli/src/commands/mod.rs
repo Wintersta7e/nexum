@@ -6,6 +6,7 @@ pub(crate) mod exit_codes;
 pub mod get;
 pub mod index;
 pub mod init;
+pub(crate) mod json_emit;
 pub mod list;
 pub mod project;
 pub mod recent;

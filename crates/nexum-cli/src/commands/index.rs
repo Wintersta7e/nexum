@@ -29,7 +29,7 @@ pub struct IndexArgs {
 
 /// Run `nexum index`.
 pub fn run(args: &IndexArgs) -> ExitCode {
-    let (paths, cfg) = match super::common::resolve_runtime() {
+    let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -42,15 +42,17 @@ pub fn run(args: &IndexArgs) -> ExitCode {
     } else {
         api::index_run(&paths, &cfg)
     };
+    // `--check` keeps the legacy stderr-prose channel for pre-tampering
+    // errors; the dedicated tampering envelope and the pre-tampering envelope
+    // route ship in their own follow-up tasks. Default mode routes
+    // serialize-failure and indexer errors through the envelope under
+    // `--json`.
     match outcome {
         Ok(o) => {
             if args.json {
                 match serde_json::to_string_pretty(&o) {
                     Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: failed to serialize outcome: {e}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(e) => return super::json_emit::emit_serialize_failure(&e),
                 }
             } else {
                 println!(
@@ -75,7 +77,7 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Err(e) => super::common::handle_read_verb_error(&e),
+        Err(e) => super::json_emit::route_api_error(&e, args.json && !args.check),
     }
 }
 
@@ -83,10 +85,16 @@ pub fn run(args: &IndexArgs) -> ExitCode {
 /// The index pass already called `ensure_current` so the materialized view
 /// is fresh; `validate_events_cached` reads `trust_chain_tampering` without
 /// duplicating the rebuild walk.
+///
+/// Under `--json`, the underlying-error arm (when `validate_events_cached`
+/// itself fails before any rows can be returned) routes through the
+/// envelope emitter instead of the prose-on-stderr fallback so agents see
+/// a structured `STORE_INTEGRITY` payload on stdout. Default mode keeps the
+/// stderr prose for parity with the rest of `index --check`.
 fn check_tampering(paths: &nexum_core::paths::Paths, json: bool) -> ExitCode {
     let rows = match api::validate_events_cached(paths) {
         Ok(r) => r,
-        Err(e) => return super::common::handle_read_verb_error(&e),
+        Err(e) => return super::json_emit::route_api_error(&e, json),
     };
     super::trust::render_tampering(&rows, json)
 }

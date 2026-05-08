@@ -28,13 +28,13 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
-toml = "0.8"
+toml = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 # Storage / search — pinned versions verified during stack-validation.
-rusqlite = { version = "0.32", features = ["backup", "bundled", "vtab"] }
+rusqlite = { version = "0.39", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1"
 # Embeddings — `ort` is still pre-1.0 in the 2.x series.
 ort = "=2.0.0-rc.12"
@@ -46,7 +46,7 @@ fs2 = "0.4"
 tempfile = "3"
 walkdir = "2"
 # Cryptographic hashing for the index DDL apply path and path-hint hashing.
-sha2 = "0.10"
+sha2 = "0.11"
 # Timestamps for init (config.toml established_at, META.yml init_at).
 chrono = { version = "0.4", features = ["serde"] }
 # MCP framework — macros + server runtime only.

@@ -21,7 +21,7 @@ pub struct BySessionArgs {
 }
 
 pub fn run(args: &BySessionArgs) -> ExitCode {
-    let (paths, cfg) = match super::common::resolve_runtime() {
+    let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -41,25 +41,21 @@ pub fn run(args: &BySessionArgs) -> ExitCode {
         strict_revocation: args.strict_revocation,
         ..Filters::default()
     };
-    match api::by_session(&paths, &cfg, &filters, &lookup) {
-        Ok(rs) => {
-            if args.json {
-                match serde_json::to_string_pretty(&rs) {
-                    Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: serialize: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                for r in &rs.results {
-                    println!("  {}  {}", r.id, r.title);
-                }
-            }
-            ExitCode::SUCCESS
+    let rs = match api::by_session(&paths, &cfg, &filters, &lookup) {
+        Ok(r) => r,
+        Err(e) => return super::json_emit::route_api_error(&e, args.json),
+    };
+    if args.json {
+        match serde_json::to_string_pretty(&rs) {
+            Ok(s) => println!("{s}"),
+            Err(e) => return super::json_emit::emit_serialize_failure(&e),
         }
-        Err(e) => super::common::handle_read_verb_error(&e),
+    } else {
+        for r in &rs.results {
+            println!("  {}  {}", r.id, r.title);
+        }
     }
+    ExitCode::SUCCESS
 }
 
 /// Case-insensitive `.jsonl` suffix check. Treats Windows-style mixed-case

@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Args, Subcommand};
 use nexum_core::{
     api,
+    api::error::{ErrorEnvelope, Remediation, error_codes},
     config::io::save as save_config,
     paths::Paths,
     project::{ProjectInput, ProjectResolution, resolve::resolve as resolve_project},
@@ -46,6 +47,22 @@ pub fn run(args: &ProjectArgs) -> ExitCode {
             let paths = match Paths::resolve() {
                 Ok(p) => p,
                 Err(e) => {
+                    if *json {
+                        let env = ErrorEnvelope {
+                            error_code: error_codes::NOT_INITIALIZED,
+                            message: format!("{e}"),
+                            remediation: Some(Remediation {
+                                command: Some("nexum init".into()),
+                                rationale: "Initialize a nexum home before listing projects."
+                                    .into(),
+                            }),
+                            context: serde_json::json!({ "phase": "paths_resolve" }),
+                        };
+                        return super::json_emit::emit_error(
+                            &env,
+                            super::exit_codes::for_envelope(&env),
+                        );
+                    }
                     eprintln!("error: {e}\nDid you run `nexum init`?");
                     return ExitCode::from(super::exit_codes::NOT_INITIALIZED);
                 }
@@ -65,7 +82,7 @@ fn register(name: &str, path: &Path) -> ExitCode {
         eprintln!("error: not a directory: {}", path.display());
         return ExitCode::from(super::exit_codes::USAGE);
     }
-    let (paths, mut cfg) = match super::common::resolve_runtime() {
+    let (paths, mut cfg) = match super::common::resolve_runtime(false) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -90,10 +107,7 @@ fn list(paths: &Paths, json: bool) -> ExitCode {
             if json {
                 match serde_json::to_string_pretty(&summaries) {
                     Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: serialize: {e}");
-                        return ExitCode::FAILURE;
-                    }
+                    Err(e) => return super::json_emit::emit_serialize_failure(&e),
                 }
             } else {
                 println!(
@@ -110,14 +124,31 @@ fn list(paths: &Paths, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::from(super::exit_codes::STORE_INTEGRITY)
+            if json {
+                let env: ErrorEnvelope = (&e).into();
+                super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
+            } else {
+                eprintln!("error: {e}");
+                ExitCode::from(super::exit_codes::STORE_INTEGRITY)
+            }
         }
     }
 }
 
 fn resolve_path(path: &Path, json: bool) -> ExitCode {
     if !path.exists() {
+        if json {
+            let env = ErrorEnvelope {
+                error_code: error_codes::USAGE,
+                message: format!("path does not exist: {}", path.display()),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Pass an existing directory path.".into(),
+                }),
+                context: serde_json::json!({ "path": path.to_string_lossy() }),
+            };
+            return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
+        }
         eprintln!("error: path does not exist: {}", path.display());
         return ExitCode::from(super::exit_codes::USAGE);
     }
@@ -147,10 +178,7 @@ fn resolve_path(path: &Path, json: bool) -> ExitCode {
         };
         match serde_json::to_string_pretty(&value) {
             Ok(s) => println!("{s}"),
-            Err(e) => {
-                eprintln!("error: serialize: {e}");
-                return ExitCode::FAILURE;
-            }
+            Err(e) => return super::json_emit::emit_serialize_failure(&e),
         }
     } else {
         match resolution {

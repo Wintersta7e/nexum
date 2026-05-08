@@ -34,7 +34,7 @@ pub struct ListArgs {
 }
 
 pub fn run(args: &ListArgs) -> ExitCode {
-    let (paths, cfg) = match super::common::resolve_runtime() {
+    let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -54,26 +54,22 @@ pub fn run(args: &ListArgs) -> ExitCode {
         no_unsigned_penalty: false,
     };
 
-    match api::list(&paths, &cfg, &filters, args.limit, args.cursor.as_deref()) {
-        Ok(rs) => {
-            if args.json {
-                match serde_json::to_string_pretty(&rs) {
-                    Ok(s) => println!("{s}"),
-                    Err(e) => {
-                        eprintln!("error: serialize: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
-            } else {
-                for r in &rs.results {
-                    println!("  {}  {}  ({})", r.id, r.title, r.updated);
-                }
-                if let Some(c) = rs.next_cursor {
-                    println!("Next cursor: {c}");
-                }
-            }
-            ExitCode::SUCCESS
+    let rs = match api::list(&paths, &cfg, &filters, args.limit, args.cursor.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return super::json_emit::route_api_error(&e, args.json),
+    };
+    if args.json {
+        match serde_json::to_string_pretty(&rs) {
+            Ok(s) => println!("{s}"),
+            Err(e) => return super::json_emit::emit_serialize_failure(&e),
         }
-        Err(e) => super::common::handle_read_verb_error(&e),
+    } else {
+        for r in &rs.results {
+            println!("  {}  {}  ({})", r.id, r.title, r.updated);
+        }
+        if let Some(c) = rs.next_cursor {
+            println!("Next cursor: {c}");
+        }
     }
+    ExitCode::SUCCESS
 }
