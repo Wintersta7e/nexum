@@ -121,6 +121,29 @@ impl TestHome {
         home
     }
 
+    /// Initialize a nexum home (signed bootstrap commit), then append a
+    /// second signed revision of `.trust/events.yml` whose contents are
+    /// invalid YAML. The materializer's `serde_yaml::from_str` call against
+    /// that revision raises `TrustError::Parse`, which routes through
+    /// `From<&ApiError> for ErrorEnvelope` to a `STORE_INTEGRITY` envelope
+    /// with `context.kind = "trust"` and `context.path` populated.
+    ///
+    /// Used to exercise the underlying-error arm of `trust validate-events`,
+    /// distinct from `initialized_with_tampered_events_yml` which produces a
+    /// well-formed-but-mutated payload that yields a tampering row instead.
+    pub fn initialized_with_corrupt_events_yml() -> Self {
+        let home = Self::initialized_no_index();
+        let notebook_git = home.path().join("notebook.git");
+        let events_path = notebook_git.join(".trust").join("events.yml");
+        // Write garbage that serde_yaml cannot parse as the EventLog struct.
+        // A bare unbalanced flow-mapping opener is rejected at the lexer
+        // level, so this is robust against future field additions.
+        std::fs::write(&events_path, b"{ this is : not [ valid yaml\n")
+            .expect("write corrupt events.yml");
+        commit_tamper(&notebook_git, &home.ssh_home);
+        home
+    }
+
     /// Initialize a nexum home, seed one local YAML record, run
     /// `nexum index`, then insert a sibling row directly into `index.db`
     /// that shares the bare `id` but pins a different `project_id`. A

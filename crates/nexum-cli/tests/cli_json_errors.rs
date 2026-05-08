@@ -123,6 +123,19 @@ fn trust_validate_events_emits_tampering_envelope_when_detected() {
 }
 
 #[test]
+fn trust_validate_events_emits_envelope_on_underlying_error() {
+    let home = TestHome::initialized_with_corrupt_events_yml();
+    let out = home.run(&["trust", "validate-events", "--json"]);
+    let env: Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    assert_eq!(env["error_code"], "STORE_INTEGRITY");
+    assert_eq!(out.status.code().unwrap_or(-1), 4);
+    assert_eq!(env["context"]["kind"], "trust");
+    // TrustError::Parse preserves the events.yml path in context.
+    assert!(env["context"]["path"].as_str().is_some());
+}
+
+#[test]
 fn trust_validate_events_emits_empty_array_when_clean() {
     let home = TestHome::initialized_clean();
     let out = home.run(&["trust", "validate-events", "--json"]);
