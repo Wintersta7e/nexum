@@ -67,15 +67,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     if args.json {
         match serde_json::to_string_pretty(&res) {
             Ok(s) => println!("{s}"),
-            Err(e) => {
-                let env = nexum_core::api::error::ErrorEnvelope {
-                    error_code: nexum_core::api::error::error_codes::SERIALIZE_FAILED,
-                    message: format!("serialize: {e}"),
-                    remediation: None,
-                    context: serde_json::json!({ "kind": "json", "message": format!("{e}") }),
-                };
-                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
-            }
+            Err(e) => return super::json_emit::emit_serialize_failure(&e),
         }
     } else {
         for r in &res.results {

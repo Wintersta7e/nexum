@@ -21,6 +21,9 @@
 //!   policy (suggest retrying with `--include-unsigned`).
 //! - `13` ([`AMBIGUOUS`]): bare id matched multiple records.
 
+/// Generic failure (mirrors `ExitCode::FAILURE`); surfaces from the
+/// `for_envelope` wildcard arm and from `SERIALIZE_FAILED`.
+pub(crate) const FAILURE: u8 = 1;
 pub(crate) const USAGE: u8 = 2;
 pub(crate) const NOT_INITIALIZED: u8 = 3;
 pub(crate) const STORE_INTEGRITY: u8 = 4;
@@ -56,10 +59,9 @@ pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
         ec::NOT_FOUND => NOT_FOUND,
         ec::HIDDEN_BY_POLICY => HIDDEN_BY_POLICY,
         ec::AMBIGUOUS_KEY => AMBIGUOUS,
-        // SERIALIZE_FAILED falls through to generic FAILURE (1). Any future
-        // error_code lands here too until the mapping is updated; the stable
-        // envelope_code on the wire remains accurate.
-        _ => 1,
+        // SERIALIZE_FAILED + any future unmapped code routes to generic
+        // FAILURE; the stable envelope_code on the wire stays accurate.
+        _ => FAILURE,
     }
 }
 

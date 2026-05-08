@@ -14,11 +14,13 @@ pub fn nexum_bin() -> PathBuf {
 }
 
 /// Self-contained nexum home for `--json` error-envelope tests. Owns the
-/// backing temp dir; dropping the value cleans up. The `path()` accessor
-/// returns the value to set as `NEXUM_HOME` on a subprocess.
+/// backing temp dir; dropping the value cleans up. Tracks both `nexum_home`
+/// (the value to set as `NEXUM_HOME`) and `ssh_home` (used as `HOME` so the
+/// SSH-key probe and git config lookups land inside the temp dir).
 pub struct TestHome {
     _root: TempDir,
     nexum_home: PathBuf,
+    ssh_home: PathBuf,
 }
 
 impl TestHome {
@@ -27,9 +29,11 @@ impl TestHome {
     pub fn uninitialized() -> Self {
         let root = TempDir::new().expect("tempdir for TestHome");
         let nexum_home = root.path().join(".nexum");
+        let ssh_home = root.path().join("ssh-home");
         Self {
             _root: root,
             nexum_home,
+            ssh_home,
         }
     }
 
@@ -56,12 +60,32 @@ impl TestHome {
         Self {
             _root: root,
             nexum_home,
+            ssh_home,
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.nexum_home
     }
+
+    /// Spawn `nexum` with the per-test `NEXUM_HOME` / `HOME` / git-identity
+    /// env vars wired from this home. Routes through the canonical
+    /// `run_nexum` so every spawn picks up the CI-portable git identity
+    /// (see `feedback_ci_runners_need_git_identity`). Use this rather than
+    /// open-coding `Command::new(...).env("NEXUM_HOME", ...)`.
+    pub fn run(&self, args: &[&str]) -> Output {
+        run_nexum(&self.nexum_home, &self.ssh_home, args)
+    }
+}
+
+/// Run a `--json`-bearing `nexum` invocation against `home` and parse its
+/// stdout as an `ErrorEnvelope`. Returns the parsed envelope plus the
+/// process exit code.
+pub fn run_json(home: &TestHome, args: &[&str]) -> (serde_json::Value, i32) {
+    let out = home.run(args);
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    (parsed, out.status.code().unwrap_or(-1))
 }
 
 /// Generate a fresh ed25519 keypair into `dir/id_ed25519{,.pub}`. Returns

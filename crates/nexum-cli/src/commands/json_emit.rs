@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use nexum_core::api::error::ErrorEnvelope;
+use nexum_core::api::error::{ErrorEnvelope, error_codes};
 
 /// Emit an envelope to stdout (pretty JSON), return the matching [`ExitCode`].
 ///
@@ -23,6 +23,20 @@ pub(crate) fn emit_error(env: &ErrorEnvelope, exit_code: u8) -> ExitCode {
         );
         ExitCode::FAILURE
     }
+}
+
+/// Build and emit a `SERIALIZE_FAILED` envelope for a verb whose success
+/// response failed to serialize. Centralizes the per-verb boilerplate so
+/// every `--json` arm collapses to one call.
+pub(crate) fn emit_serialize_failure(e: &serde_json::Error) -> ExitCode {
+    let env = ErrorEnvelope {
+        error_code: error_codes::SERIALIZE_FAILED,
+        message: format!("serialize: {e}"),
+        remediation: None,
+        context: serde_json::json!({ "kind": "json" }),
+    };
+    let code = super::exit_codes::for_envelope(&env);
+    emit_error(&env, code)
 }
 
 #[cfg(test)]
