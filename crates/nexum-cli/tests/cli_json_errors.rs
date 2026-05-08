@@ -136,6 +136,16 @@ fn trust_validate_events_emits_envelope_on_underlying_error() {
 }
 
 #[test]
+fn project_list_emits_envelope_on_error() {
+    let home = TestHome::initialized_no_index();
+    let (env, code) = run_json(&home, &["project", "list", "--json"]);
+    assert_eq!(env["error_code"], "NOT_INDEXED");
+    assert_eq!(code, 10);
+    assert_eq!(env["remediation"]["command"], "nexum index");
+    assert!(env["context"]["path"].as_str().is_some());
+}
+
+#[test]
 fn trust_validate_events_emits_empty_array_when_clean() {
     let home = TestHome::initialized_clean();
     let out = home.run(&["trust", "validate-events", "--json"]);
