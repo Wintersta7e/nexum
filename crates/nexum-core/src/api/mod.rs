@@ -2,6 +2,8 @@
 //! the agreed surface table; each opens its own `SQLite` connection — pooling
 //! lands in a later milestone.
 
+pub mod error;
+
 use crate::{
     config::types::Config,
     indexer::{
