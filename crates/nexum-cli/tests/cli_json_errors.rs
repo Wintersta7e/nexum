@@ -81,3 +81,19 @@ fn recent_emits_not_indexed_envelope() {
     assert_eq!(code, 10);
     assert!(env["context"]["path"].as_str().is_some());
 }
+
+#[test]
+fn by_session_emits_not_indexed_envelope() {
+    let home = TestHome::initialized_no_index();
+    let (env, code) = run_json(
+        &home,
+        &[
+            "by-session",
+            "00000000-0000-0000-0000-000000000000",
+            "--json",
+        ],
+    );
+    assert_eq!(env["error_code"], "NOT_INDEXED");
+    assert_eq!(code, 10);
+    assert!(env["context"]["path"].as_str().is_some());
+}
