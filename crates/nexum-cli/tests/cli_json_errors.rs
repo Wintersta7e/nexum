@@ -104,5 +104,5 @@ fn index_emits_not_initialized_envelope_when_home_missing() {
     let (env, code) = run_json(&home, &["index", "--json"]);
     assert_eq!(env["error_code"], "NOT_INITIALIZED");
     assert_eq!(code, 3);
-    assert!(env["context"]["phase"].as_str().is_some());
+    assert_eq!(env["context"]["phase"], "load_config");
 }
