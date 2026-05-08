@@ -80,6 +80,47 @@ impl TestHome {
         home
     }
 
+    /// Initialize a nexum home (signed bootstrap commit) and run `nexum
+    /// index` once so the index database and trust-events view both exist.
+    /// Used by tests that exercise the post-index tampering check on a
+    /// known-clean chain.
+    pub fn initialized_clean() -> Self {
+        let home = Self::initialized_no_index();
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "TestHome initialized_clean index failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        home
+    }
+
+    /// Initialize a nexum home (signed bootstrap commit), then append a
+    /// second signed revision of `.trust/events.yml` that mutates the
+    /// bootstrap event's `fingerprint` payload while keeping the same
+    /// `event_id`. The materializer classifies that diff as `MutatedPayload`
+    /// and writes a row to `trust_chain_tampering`. Used for asserting the
+    /// `TAMPERING_DETECTED` envelope shape.
+    ///
+    /// Re-uses the SSH key planted by `initialized_no_index` and the git
+    /// signing config that `nexum init` already wrote to the notebook repo.
+    pub fn initialized_with_tampered_events_yml() -> Self {
+        let home = Self::initialized_no_index();
+        let notebook_git = home.path().join("notebook.git");
+        let events_path = notebook_git.join(".trust").join("events.yml");
+        let original = std::fs::read_to_string(&events_path).expect("read events.yml");
+        // Mutate the fingerprint line to a synthetic value while leaving the
+        // event_id intact. Same event_id + different payload trips the
+        // `MutatedPayload` classifier.
+        let mutated = mutate_first_fingerprint(&original);
+        assert_ne!(mutated, original, "fingerprint mutation must change file");
+        std::fs::write(&events_path, mutated).expect("write tampered events.yml");
+        // Stage + signed commit using git config installed by `nexum init`.
+        commit_tamper(&notebook_git, &home.ssh_home);
+        home
+    }
+
     /// Initialize a nexum home, seed one local YAML record, run
     /// `nexum index`, then insert a sibling row directly into `index.db`
     /// that shares the bare `id` but pins a different `project_id`. A
@@ -247,6 +288,71 @@ pub fn set_unsigned_policy_hide(home: &Path) {
     );
     let serialized = toml::to_string(&doc).expect("serialize config.toml");
     std::fs::write(&cfg_path, serialized).expect("write config.toml");
+}
+
+/// Replace the first `fingerprint:` line in an `events.yml` payload with a
+/// synthetic value. Operates on the raw text to keep the rest of the YAML
+/// formatting (`event_id`, `public_key`, `reason`) byte-for-byte identical,
+/// so the diff classifier sees only the payload mutation.
+fn mutate_first_fingerprint(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut replaced = false;
+    for line in raw.lines() {
+        if !replaced && line.trim_start().starts_with("fingerprint:") {
+            let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push_str(&leading);
+            out.push_str("fingerprint: \"SHA256:tampered\"");
+            out.push('\n');
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    assert!(replaced, "events.yml had no fingerprint: line to mutate");
+    out
+}
+
+/// Stage `.trust/events.yml` and create a second signed commit on top of
+/// the bootstrap. Runs git via subprocess so the SSH signing pipeline (set
+/// up by `nexum init` in the same repo) drives the commit. Inherits
+/// `HOME` / `XDG_CONFIG_HOME` from `ssh_home` so git's config lookups stay
+/// inside the test's tempdir tree.
+fn commit_tamper(notebook_git: &Path, ssh_home: &Path) {
+    let xdg = ssh_home.join(".config");
+    run_git_in(notebook_git, ssh_home, &xdg, &["add", ".trust/events.yml"]);
+    run_git_in(
+        notebook_git,
+        ssh_home,
+        &xdg,
+        &["commit", "-S", "-m", "trust: tamper test fixture"],
+    );
+}
+
+/// Run a git subprocess inside `notebook_git` with `HOME` and
+/// `XDG_CONFIG_HOME` redirected so the developer's real `~/.gitconfig` does
+/// not bleed into the test. The four `GIT_*` env vars override identity for
+/// CI runners that ship without a global gitconfig (see
+/// `feedback_ci_runners_need_git_identity`).
+fn run_git_in(notebook_git: &Path, home: &Path, xdg_config_home: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(notebook_git)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", xdg_config_home)
+        .env("GIT_AUTHOR_NAME", "nexum-test")
+        .env("GIT_AUTHOR_EMAIL", "nexum-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "nexum-test")
+        .env("GIT_COMMITTER_EMAIL", "nexum-test@example.invalid")
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} failed to spawn: {e}"));
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Insert a `local`-source record straight into `<home>/index.db` that

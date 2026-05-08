@@ -6,6 +6,7 @@
 mod common;
 
 use crate::common::{TestHome, run_json};
+use serde_json::Value;
 
 #[test]
 fn search_emits_not_indexed_envelope_when_index_missing() {
@@ -105,4 +106,30 @@ fn index_emits_not_initialized_envelope_when_home_missing() {
     assert_eq!(env["error_code"], "NOT_INITIALIZED");
     assert_eq!(code, 3);
     assert_eq!(env["context"]["phase"], "load_config");
+}
+
+#[test]
+fn trust_validate_events_emits_tampering_envelope_when_detected() {
+    let home = TestHome::initialized_with_tampered_events_yml();
+    let out = home.run(&["trust", "validate-events", "--json"]);
+    let env: Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    assert_eq!(env["error_code"], "TAMPERING_DETECTED");
+    assert_eq!(out.status.code().unwrap_or(-1), 4);
+    let events = env["context"]["events"]
+        .as_array()
+        .expect("context.events array");
+    assert!(!events.is_empty(), "at least one tampering row expected");
+}
+
+#[test]
+fn trust_validate_events_emits_empty_array_when_clean() {
+    let home = TestHome::initialized_clean();
+    let out = home.run(&["trust", "validate-events", "--json"]);
+    // Clean case keeps the existing array-shape success output for back-compat
+    // with agents that already key on `exit 0 + [] on stdout = clean`.
+    let v: Value = serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON");
+    assert!(v.is_array());
+    assert_eq!(v.as_array().unwrap().len(), 0);
+    assert_eq!(out.status.code().unwrap_or(-1), 0);
 }

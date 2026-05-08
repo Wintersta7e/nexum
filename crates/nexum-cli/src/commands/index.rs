@@ -92,10 +92,22 @@ pub fn run(args: &IndexArgs) -> ExitCode {
 /// The index pass already called `ensure_current` so the materialized view
 /// is fresh; `validate_events_cached` reads `trust_chain_tampering` without
 /// duplicating the rebuild walk.
+///
+/// Under `--json`, the underlying-error arm (when `validate_events_cached`
+/// itself fails before any rows can be returned) routes through the
+/// envelope emitter instead of the prose-on-stderr fallback so agents see
+/// a structured `STORE_INTEGRITY` payload on stdout. Default mode keeps the
+/// stderr prose for parity with the rest of `index --check`.
 fn check_tampering(paths: &nexum_core::paths::Paths, json: bool) -> ExitCode {
     let rows = match api::validate_events_cached(paths) {
         Ok(r) => r,
-        Err(e) => return super::common::handle_read_verb_error(&e),
+        Err(e) => {
+            if json {
+                let env: ErrorEnvelope = (&e).into();
+                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
+            }
+            return super::common::handle_read_verb_error(&e);
+        }
     };
     super::trust::render_tampering(&rows, json)
 }
