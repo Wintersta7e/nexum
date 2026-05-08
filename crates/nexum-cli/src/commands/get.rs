@@ -91,7 +91,7 @@ pub fn run(args: &GetArgs) -> ExitCode {
                         .into(),
                 }),
                 context: serde_json::json!({
-                    "signature_status": format!("{signature_status}"),
+                    "signature_status": signature_status.to_string(),
                 }),
             };
             if args.json {
