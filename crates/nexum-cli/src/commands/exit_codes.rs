@@ -32,10 +32,70 @@ pub(crate) const MIGRATION_REQUIRED: u8 = 6;
 #[allow(dead_code)]
 pub(crate) const CONCURRENT: u8 = 7;
 pub(crate) const REANCHOR_PENDING: u8 = 8;
-// Reserved slot wired up by future trust-schema gate; see module docs.
-#[allow(dead_code)]
 pub(crate) const TRUST_SCHEMA_UNSUPPORTED: u8 = 9;
 pub(crate) const NOT_INDEXED: u8 = 10;
 pub(crate) const NOT_FOUND: u8 = 11;
 pub(crate) const HIDDEN_BY_POLICY: u8 = 12;
 pub(crate) const AMBIGUOUS: u8 = 13;
+
+/// Map an `ErrorEnvelope`'s `error_code` to the matching CLI exit code.
+///
+/// The mapping is the single source of truth for code-to-exit translation;
+/// every `--json`-bearing verb routes through `json_emit::emit_error(env,
+/// for_envelope(env))` so the two channels stay in sync.
+// First call site lands in the next verb-route task.
+#[allow(dead_code)]
+pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
+    use nexum_core::api::error::error_codes as ec;
+    match env.error_code {
+        ec::USAGE => USAGE,
+        ec::NOT_INITIALIZED => NOT_INITIALIZED,
+        ec::STORE_INTEGRITY | ec::INVALID_FILTER | ec::TAMPERING_DETECTED => STORE_INTEGRITY,
+        ec::MIGRATION_REQUIRED => MIGRATION_REQUIRED,
+        ec::REANCHOR_PENDING => REANCHOR_PENDING,
+        ec::TRUST_SCHEMA_UNSUPPORTED => TRUST_SCHEMA_UNSUPPORTED,
+        ec::NOT_INDEXED => NOT_INDEXED,
+        ec::NOT_FOUND => NOT_FOUND,
+        ec::HIDDEN_BY_POLICY => HIDDEN_BY_POLICY,
+        ec::AMBIGUOUS_KEY => AMBIGUOUS,
+        // SERIALIZE_FAILED falls through to generic FAILURE (1). Any future
+        // error_code lands here too until the mapping is updated; the stable
+        // envelope_code on the wire remains accurate.
+        _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nexum_core::api::error::{ErrorEnvelope, error_codes};
+
+    fn env(code: &'static str) -> ErrorEnvelope {
+        ErrorEnvelope {
+            error_code: code,
+            message: "test".into(),
+            remediation: None,
+            context: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn migration_required_routes_to_six() {
+        assert_eq!(for_envelope(&env(error_codes::MIGRATION_REQUIRED)), 6);
+    }
+
+    #[test]
+    fn not_indexed_routes_to_ten() {
+        assert_eq!(for_envelope(&env(error_codes::NOT_INDEXED)), 10);
+    }
+
+    #[test]
+    fn ambiguous_key_routes_to_thirteen() {
+        assert_eq!(for_envelope(&env(error_codes::AMBIGUOUS_KEY)), 13);
+    }
+
+    #[test]
+    fn tampering_detected_routes_to_store_integrity() {
+        assert_eq!(for_envelope(&env(error_codes::TAMPERING_DETECTED)), 4);
+    }
+}
