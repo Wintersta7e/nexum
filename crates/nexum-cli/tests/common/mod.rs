@@ -226,21 +226,27 @@ pub fn write_local_yaml_with_project(
     p
 }
 
-/// Flip `[trust] unsigned_default = "warn-but-show"` (the seed value) to
-/// `"hide"` in an already-initialized home's `config.toml`. Used to set up
-/// `HIDDEN_BY_POLICY` test fixtures.
+/// Flip `[trust] unsigned_default` to `"hide"` in an already-initialized
+/// home's `config.toml`. Used to set up `HIDDEN_BY_POLICY` test fixtures.
+///
+/// Uses a structural toml parse + serialize so the edit survives any
+/// future change in the seed config's whitespace, quoting, or key order
+/// without falling through a brittle string-replace.
 pub fn set_unsigned_policy_hide(home: &Path) {
     let cfg_path = home.join("config.toml");
     let raw = std::fs::read_to_string(&cfg_path).expect("read config.toml");
-    let updated = raw.replace(
-        "unsigned_default = \"warn-but-show\"",
-        "unsigned_default = \"hide\"",
+    let mut doc: toml::Value = toml::from_str(&raw).expect("parse config.toml");
+    let trust = doc
+        .as_table_mut()
+        .and_then(|t| t.get_mut("trust"))
+        .and_then(|v| v.as_table_mut())
+        .expect("config.toml missing [trust] table");
+    trust.insert(
+        "unsigned_default".into(),
+        toml::Value::String("hide".into()),
     );
-    assert_ne!(
-        raw, updated,
-        "config.toml did not contain `unsigned_default = \"warn-but-show\"`"
-    );
-    std::fs::write(&cfg_path, updated).expect("write config.toml");
+    let serialized = toml::to_string(&doc).expect("serialize config.toml");
+    std::fs::write(&cfg_path, serialized).expect("write config.toml");
 }
 
 /// Insert a `local`-source record straight into `<home>/index.db` that
@@ -248,7 +254,14 @@ pub fn set_unsigned_policy_hide(home: &Path) {
 /// `project_id`. The columns mirror what the indexer would write for a
 /// minimal unsigned local record. Used by
 /// `initialized_with_two_records_sharing_id` because the adapter pipeline
-/// dedupes by bare `id` before reaching the upsert.
+/// dedupes by bare `id` before reaching the upsert (the dedup happens in
+/// `crates/nexum-core/src/indexer/run.rs`'s per-pass candidate map; the
+/// long-form discussion lives in the TODO at the top of that file).
+///
+/// Schema-drift guard: if a future migration adds a NOT-NULL column
+/// without a default, this insert will fail with an opaque rusqlite error
+/// — that's the signal to extend the column list below to match
+/// `crates/nexum-core/src/index/schema.sql`.
 pub fn insert_sibling_local_row(home: &Path, id: &str, project_id: &str) {
     let db_path = home.join("index.db");
     let conn = rusqlite::Connection::open(&db_path).expect("open index.db");
