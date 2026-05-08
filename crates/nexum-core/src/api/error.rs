@@ -103,7 +103,7 @@ fn migration_required_envelope(v_disk: u32, v_code: u32) -> ErrorEnvelope {
             command: Some("nexum migrate".into()),
             rationale: "Upgrade the on-disk index.db schema to match the binary.".into(),
         }),
-        context: serde_json::json!({ "v_disk": v_disk, "v_code": v_code }),
+        context: serde_json::json!({ "kind": "migration", "v_disk": v_disk, "v_code": v_code }),
     }
 }
 
@@ -161,23 +161,42 @@ fn invalid_filter_envelope(detail: &str) -> ErrorEnvelope {
     }
 }
 
+/// Build a `STORE_INTEGRITY` envelope for variants that own a path + a source
+/// error. `message` is the verbatim Display rendering of the source variant
+/// (constructed once and reused as both the envelope's `message` and the
+/// `context.message` field, so the two channels never drift).
+fn path_envelope_str(
+    kind: &'static str,
+    subkind: &'static str,
+    path: &str,
+    message: String,
+) -> ErrorEnvelope {
+    let context = serde_json::json!({
+        "kind": kind,
+        "subkind": subkind,
+        "path": path,
+        "message": &message,
+    });
+    ErrorEnvelope {
+        error_code: error_codes::STORE_INTEGRITY,
+        message,
+        remediation: None,
+        context,
+    }
+}
+
 // ───── IndexerError variant dispatch ────────────────────────────────────────
 
 fn indexer_envelope(err: &crate::indexer::IndexerError) -> ErrorEnvelope {
     use crate::indexer::IndexerError;
     match err {
         IndexerError::Trust(t) => trust_envelope(t),
-        IndexerError::Io { path, source } => ErrorEnvelope {
-            error_code: error_codes::STORE_INTEGRITY,
-            message: format!("io error at {}: {source}", path.display()),
-            remediation: None,
-            context: serde_json::json!({
-                "kind": "indexer",
-                "subkind": "io",
-                "path": path.to_string_lossy(),
-                "message": format!("{source}"),
-            }),
-        },
+        IndexerError::Io { path, source } => path_envelope_str(
+            "indexer",
+            "io",
+            &path.to_string_lossy(),
+            format!("io error at {}: {source}", path.display()),
+        ),
         IndexerError::Rusqlite(e) => store_integrity_foreign("rusqlite", e),
         IndexerError::Schema(e) => store_integrity_foreign("schema", e),
         IndexerError::Adapter(e) => store_integrity_foreign("adapter", e),
@@ -205,28 +224,18 @@ fn config_envelope(err: &crate::config::ConfigError) -> ErrorEnvelope {
                 "path": path,
             }),
         },
-        ConfigError::Io { path, source } => ErrorEnvelope {
-            error_code: error_codes::STORE_INTEGRITY,
-            message: format!("config I/O error at {path}: {source}"),
-            remediation: None,
-            context: serde_json::json!({
-                "kind": "config",
-                "subkind": "io",
-                "path": path,
-                "message": format!("{source}"),
-            }),
-        },
-        ConfigError::Parse { path, source } => ErrorEnvelope {
-            error_code: error_codes::STORE_INTEGRITY,
-            message: format!("config parse error in {path}: {source}"),
-            remediation: None,
-            context: serde_json::json!({
-                "kind": "config",
-                "subkind": "parse",
-                "path": path,
-                "message": format!("{source}"),
-            }),
-        },
+        ConfigError::Io { path, source } => path_envelope_str(
+            "config",
+            "io",
+            path,
+            format!("config I/O error at {path}: {source}"),
+        ),
+        ConfigError::Parse { path, source } => path_envelope_str(
+            "config",
+            "parse",
+            path,
+            format!("config parse error in {path}: {source}"),
+        ),
         ConfigError::Serialize(e) => ErrorEnvelope {
             error_code: error_codes::STORE_INTEGRITY,
             message: format!("config serialize error: {e}"),
@@ -242,10 +251,6 @@ fn config_envelope(err: &crate::config::ConfigError) -> ErrorEnvelope {
 
 // ───── TrustError variant dispatch ──────────────────────────────────────────
 
-// Length is intrinsic to per-variant coverage: 11 TrustError variants, each
-// with a hand-tuned envelope. Splitting per-variant into helpers would add
-// ceremony without aiding readability — the match is the documentation.
-#[allow(clippy::too_many_lines)]
 fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
     use crate::trust::events::TrustError;
     match err {
@@ -259,28 +264,18 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
             }),
             context: serde_json::json!({ "message": message }),
         },
-        TrustError::Io { path, source } => ErrorEnvelope {
-            error_code: error_codes::STORE_INTEGRITY,
-            message: format!("trust I/O error at {path}: {source}"),
-            remediation: None,
-            context: serde_json::json!({
-                "kind": "trust",
-                "subkind": "io",
-                "path": path,
-                "message": format!("{source}"),
-            }),
-        },
-        TrustError::Parse { path, source } => ErrorEnvelope {
-            error_code: error_codes::STORE_INTEGRITY,
-            message: format!("trust YAML parse error in {path}: {source}"),
-            remediation: None,
-            context: serde_json::json!({
-                "kind": "trust",
-                "subkind": "parse",
-                "path": path,
-                "message": format!("{source}"),
-            }),
-        },
+        TrustError::Io { path, source } => path_envelope_str(
+            "trust",
+            "io",
+            path,
+            format!("trust I/O error at {path}: {source}"),
+        ),
+        TrustError::Parse { path, source } => path_envelope_str(
+            "trust",
+            "parse",
+            path,
+            format!("trust YAML parse error in {path}: {source}"),
+        ),
         TrustError::Serialize(e) => ErrorEnvelope {
             error_code: error_codes::STORE_INTEGRITY,
             message: format!("trust YAML serialize error: {e}"),
@@ -291,17 +286,12 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
                 "message": format!("{e}"),
             }),
         },
-        TrustError::ConfigParse { path, source } => ErrorEnvelope {
-            error_code: error_codes::STORE_INTEGRITY,
-            message: format!("config.toml parse error in {path}: {source}"),
-            remediation: None,
-            context: serde_json::json!({
-                "kind": "trust",
-                "subkind": "config_parse",
-                "path": path,
-                "message": format!("{source}"),
-            }),
-        },
+        TrustError::ConfigParse { path, source } => path_envelope_str(
+            "trust",
+            "config_parse",
+            path,
+            format!("config.toml parse error in {path}: {source}"),
+        ),
         TrustError::BootstrapPinMissing => ErrorEnvelope {
             error_code: error_codes::STORE_INTEGRITY,
             message: "bootstrap pin missing from config.toml".into(),
@@ -366,12 +356,14 @@ fn trust_schema_unsupported_envelope(found: u32) -> ErrorEnvelope {
     }
 }
 
-fn store_integrity_foreign<E: std::fmt::Display>(kind: &'static str, e: E) -> ErrorEnvelope {
+fn store_integrity_foreign(kind: &'static str, e: &dyn std::fmt::Display) -> ErrorEnvelope {
+    let inner = e.to_string();
+    let context = serde_json::json!({ "kind": kind, "message": &inner });
     ErrorEnvelope {
         error_code: error_codes::STORE_INTEGRITY,
-        message: format!("{kind} error: {e}"),
+        message: format!("{kind} error: {inner}"),
         remediation: None,
-        context: serde_json::json!({ "kind": kind, "message": format!("{e}") }),
+        context,
     }
 }
 
