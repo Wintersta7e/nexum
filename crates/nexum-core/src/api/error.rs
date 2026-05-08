@@ -172,7 +172,8 @@ fn indexer_envelope(err: &crate::indexer::IndexerError) -> ErrorEnvelope {
             message: format!("io error at {}: {source}", path.display()),
             remediation: None,
             context: serde_json::json!({
-                "kind": "io",
+                "kind": "indexer",
+                "subkind": "io",
                 "path": path.to_string_lossy(),
                 "message": format!("{source}"),
             }),
@@ -627,7 +628,8 @@ mod tests {
         });
         let env: ErrorEnvelope = (&err).into();
         assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
-        assert_eq!(env.context["kind"], "io");
+        assert_eq!(env.context["kind"], "indexer");
+        assert_eq!(env.context["subkind"], "io");
         assert_eq!(env.context["path"], "/tmp/nx/notebook.git");
     }
 
@@ -692,13 +694,8 @@ mod tests {
         assert_eq!(env.context["path"], "/home/user/.nexum/config.toml");
     }
 
-    #[test]
-    fn from_config_serialize_routes() {
-        // toml::ser::Error is hard to synthesize directly; build via toml_edit
-        // by attempting to serialize an unsupported value. If the synth path
-        // changes, fall back to constructing a known-failing toml::Value.
-        // Skipping the synth here — the variant arm is covered by the pattern
-        // match in indexer_envelope's Trust(...) test path symmetry.
-        let _ = ConfigError::Serialize; // unused; kept for exhaustiveness check
-    }
+    // ConfigError::Serialize wraps a toml::ser::Error which is hard to
+    // synthesize cleanly (toml's serializer is permissive). Coverage for
+    // this variant is provided by the exhaustive match in `config_envelope`
+    // — adding the variant forces a compile error if it is ever forgotten.
 }
