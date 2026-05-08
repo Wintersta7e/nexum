@@ -175,6 +175,60 @@ fn search_emits_reanchor_pending_envelope_under_json() {
 }
 
 #[test]
+fn search_emits_trust_schema_unsupported_envelope() {
+    // The materializer walks every `.trust/events.yml` revision; the
+    // second commit declares `schema_version: 99`, which the binary does
+    // not understand. The first read verb after the second commit
+    // triggers the rebuild and surfaces `TrustSchemaUnsupported` as a
+    // structured envelope on stdout.
+    let home = TestHome::initialized_with_future_trust_schema();
+    let out = home.run(&["search", "anything", "--json"]);
+    let env: Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    assert_eq!(env["error_code"], "TRUST_SCHEMA_UNSUPPORTED");
+    assert_eq!(out.status.code().unwrap_or(-1), 9);
+    assert!(env["context"]["schema_version"].is_number());
+}
+
+#[test]
+fn recent_emits_invalid_filter_envelope_for_unknown_source() {
+    // `nexum recent --source <s>` validates `s` via
+    // `Source::try_from_user_str` and lifts an unknown value to
+    // `QueryError::InvalidFilter`. (Plan-source drift: the original
+    // task draft proposed `search --since=<bad-iso>`, but `since_iso`
+    // is passed verbatim into the SQL `>=` comparison and is not
+    // validated; `recent --source` is the reachable trigger.)
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(&home, &["recent", "--source", "not-a-source", "--json"]);
+    assert_eq!(env["error_code"], "INVALID_FILTER");
+    assert_eq!(code, 4);
+    assert_eq!(env["context"]["detail"], "unknown source: not-a-source");
+}
+
+#[test]
+fn search_emits_store_integrity_envelope_on_corrupt_index() {
+    // Truncate `index.db` to a few non-magic bytes so any SQL issued
+    // through the connection fails with "file is not a database". The
+    // first SQL the read pipeline issues is a `count(*)` from `meta`
+    // inside `events_view::ensure_current`, so the rusqlite error is
+    // wrapped as `TrustError::Sqlite` and routes through
+    // `trust_envelope` to a `STORE_INTEGRITY` envelope with
+    // `context.kind = "trust"` / `subkind = "sqlite"`. The wire shape
+    // (error_code + exit code) is identical to the `kind = "rusqlite"`
+    // arm covered by the unit tests in `error.rs`; this test asserts
+    // the e2e path through the read pipeline.
+    let home = TestHome::initialized_with_corrupt_index_db();
+    let out = home.run(&["search", "anything", "--json"]);
+    let env: Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    assert_eq!(env["error_code"], "STORE_INTEGRITY");
+    assert_eq!(out.status.code().unwrap_or(-1), 4);
+    assert_eq!(env["context"]["kind"], "trust");
+    assert_eq!(env["context"]["subkind"], "sqlite");
+    assert!(env["context"]["message"].as_str().is_some());
+}
+
+#[test]
 fn trust_validate_events_emits_empty_array_when_clean() {
     let home = TestHome::initialized_clean();
     let out = home.run(&["trust", "validate-events", "--json"]);

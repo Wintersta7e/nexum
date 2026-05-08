@@ -151,6 +151,60 @@ impl TestHome {
         home
     }
 
+    pub fn initialized_with_future_trust_schema() -> Self {
+        // Read verbs short-circuit to `NOT_INDEXED` if `index.db` is
+        // absent; build it first so the next read traverses past the
+        // existence check into `ensure_current`, which is where the
+        // schema-version mismatch surfaces.
+        let home = Self::initialized_no_index();
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "TestHome future-trust-schema seed-index failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let notebook_git = home.path().join("notebook.git");
+        let events_path = notebook_git.join(".trust").join("events.yml");
+        let original = std::fs::read_to_string(&events_path).expect("read events.yml");
+        let mutated = mutate_schema_version(&original, 99);
+        assert_ne!(
+            mutated, original,
+            "schema_version mutation must change file"
+        );
+        std::fs::write(&events_path, mutated).expect("write future-schema events.yml");
+        commit_tamper(&notebook_git, &home.ssh_home);
+        home
+    }
+
+    /// Initialize a nexum home and run `nexum index` so `index.db` exists
+    /// and is fully populated, then overwrite it with a few non-magic
+    /// bytes so the `SQLite` header is no longer recognizable. The next
+    /// read verb opens the path (existence check passes), then the first
+    /// SQL issued by `events_view::ensure_current` fails with "file is
+    /// not a database". That `rusqlite::Error` is wrapped as
+    /// `TrustError::Sqlite` and routes through `trust_envelope` to a
+    /// `STORE_INTEGRITY` envelope with `context.kind = "trust"` /
+    /// `subkind = "sqlite"`. Used by the corrupt-index e2e test.
+    pub fn initialized_with_corrupt_index_db() -> Self {
+        let home = Self::initialized_no_index();
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "TestHome corrupt-index seed failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let db_path = home.path().join("index.db");
+        // Replace the contents with a few bytes that don't match the
+        // `SQLite` header magic ("SQLite format 3\0"). The file still
+        // exists, so the CLI's `path.exists()` precheck passes; the
+        // first SQL on the connection then fails with "file is not a
+        // database".
+        std::fs::write(&db_path, b"not-a-db").expect("truncate index.db to garbage");
+        home
+    }
+
     /// Initialize a nexum home, seed one local YAML record, run
     /// `nexum index`, then insert a sibling row directly into `index.db`
     /// that shares the bare `id` but pins a different `project_id`. A
@@ -362,6 +416,28 @@ fn mutate_first_fingerprint(raw: &str) -> String {
         }
     }
     assert!(replaced, "events.yml had no fingerprint: line to mutate");
+    out
+}
+
+fn mutate_schema_version(raw: &str, new_version: u32) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(raw.len());
+    let mut replaced = false;
+    for line in raw.lines() {
+        if !replaced && line.trim_start().starts_with("schema_version:") {
+            let leading: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            out.push_str(&leading);
+            // `write!` into a String is infallible; the unit return is
+            // discarded explicitly to satisfy `clippy::format_push_string`.
+            let _ = write!(out, "schema_version: {new_version}");
+            out.push('\n');
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    assert!(replaced, "events.yml had no schema_version: line to mutate");
     out
 }
 
