@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use nexum_core::{api, api::error::ErrorEnvelope};
+use nexum_core::api;
 
 // Clap-derived CLI flag struct: each bool is an independent --flag toggle, so
 // the state-machine refactor clippy suggests would obscure the surface.
@@ -94,13 +94,7 @@ pub fn run(args: &IndexArgs) -> ExitCode {
 fn check_tampering(paths: &nexum_core::paths::Paths, json: bool) -> ExitCode {
     let rows = match api::validate_events_cached(paths) {
         Ok(r) => r,
-        Err(e) => {
-            if json {
-                let env: ErrorEnvelope = (&e).into();
-                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
-            }
-            return super::common::handle_read_verb_error(&e);
-        }
+        Err(e) => return super::json_emit::route_api_error(&e, json),
     };
     super::trust::render_tampering(&rows, json)
 }
