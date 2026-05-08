@@ -158,6 +158,23 @@ fn project_resolve_emits_usage_envelope_for_missing_path() {
 }
 
 #[test]
+fn search_emits_reanchor_pending_envelope_under_json() {
+    let home = TestHome::initialized_with_reanchor_pending_sentinel();
+    let out = home.run(&["search", "anything", "--json"]);
+    let env: Value =
+        serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
+    assert_eq!(env["error_code"], "REANCHOR_PENDING");
+    assert_eq!(out.status.code().unwrap_or(-1), 8);
+    assert!(
+        env["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("reanchor")
+    );
+}
+
+#[test]
 fn trust_validate_events_emits_empty_array_when_clean() {
     let home = TestHome::initialized_clean();
     let out = home.run(&["trust", "validate-events", "--json"]);

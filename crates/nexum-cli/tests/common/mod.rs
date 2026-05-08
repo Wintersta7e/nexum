@@ -176,6 +176,28 @@ impl TestHome {
         home
     }
 
+    /// Initialize a nexum home and plant a non-empty `.reanchor_pending`
+    /// sentinel under the home directory. Any verb that runs through
+    /// `resolve_runtime` will trip `session::startup::pre_check` and surface
+    /// `StartupError::Trust(ReanchorPending)`. Used to assert that the
+    /// `--json` path routes that variant through the `REANCHOR_PENDING`
+    /// envelope on stdout.
+    pub fn initialized_with_reanchor_pending_sentinel() -> Self {
+        let home = Self::initialized_no_index();
+        std::fs::write(
+            home.path().join(".reanchor_pending"),
+            r#"{
+                "case": "A",
+                "old_pin_fp": "SHA256:abc",
+                "new_pin_fp": "SHA256:def",
+                "started_at": "2026-05-04T12:00:00Z",
+                "phase_completed": "init"
+            }"#,
+        )
+        .expect("write .reanchor_pending sentinel");
+        home
+    }
+
     /// Initialize a nexum home, seed a single unsigned local YAML record,
     /// flip `[trust] unsigned_default = "hide"` in `config.toml`, then run
     /// `nexum index`. A bare-id lookup for `id` against this home returns
