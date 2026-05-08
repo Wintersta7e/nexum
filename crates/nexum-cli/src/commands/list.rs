@@ -5,7 +5,6 @@ use std::process::ExitCode;
 use clap::Args;
 use nexum_core::{
     api,
-    api::error::ErrorEnvelope,
     query::Filters,
     records::{RecordType, Source},
 };
@@ -57,13 +56,7 @@ pub fn run(args: &ListArgs) -> ExitCode {
 
     let rs = match api::list(&paths, &cfg, &filters, args.limit, args.cursor.as_deref()) {
         Ok(r) => r,
-        Err(e) => {
-            if args.json {
-                let env: ErrorEnvelope = (&e).into();
-                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
-            }
-            return super::common::handle_read_verb_error(&e);
-        }
+        Err(e) => return super::json_emit::route_api_error(&e, args.json),
     };
     if args.json {
         match serde_json::to_string_pretty(&rs) {

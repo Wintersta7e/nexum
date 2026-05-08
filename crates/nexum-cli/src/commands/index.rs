@@ -77,14 +77,7 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Err(e) => {
-            if args.json && !args.check {
-                let env: ErrorEnvelope = (&e).into();
-                super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
-            } else {
-                super::common::handle_read_verb_error(&e)
-            }
-        }
+        Err(e) => super::json_emit::route_api_error(&e, args.json && !args.check),
     }
 }
 

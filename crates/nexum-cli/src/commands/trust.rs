@@ -34,13 +34,7 @@ fn run_validate_events(args: &ValidateEventsArgs) -> ExitCode {
     };
     let rows = match api::validate_events(&paths) {
         Ok(r) => r,
-        Err(e) => {
-            if args.json {
-                let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
-                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
-            }
-            return super::common::handle_read_verb_error(&e);
-        }
+        Err(e) => return super::json_emit::route_api_error(&e, args.json),
     };
     render_tampering(&rows, args.json)
 }

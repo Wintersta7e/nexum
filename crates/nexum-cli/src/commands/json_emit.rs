@@ -4,6 +4,7 @@
 
 use std::process::ExitCode;
 
+use nexum_core::api::ApiError;
 use nexum_core::api::error::{ErrorEnvelope, error_codes};
 
 /// Emit an envelope to stdout (pretty JSON), return the matching [`ExitCode`].
@@ -22,6 +23,23 @@ pub(crate) fn emit_error(env: &ErrorEnvelope, exit_code: u8) -> ExitCode {
             r#"{{"error_code":"SERIALIZE_FAILED","message":"failed to serialize error envelope","context":{{}}}}"#
         );
         ExitCode::FAILURE
+    }
+}
+
+/// Route an [`ApiError`] through the appropriate channel for a read verb.
+///
+/// When `json` is true, derives the [`ErrorEnvelope`] via `From<&ApiError>`,
+/// looks up the matching exit code, and emits the structured payload on
+/// stdout. Otherwise, falls back to the prose-on-stderr handler used by the
+/// default-mode CLI surface. Centralizes the duplicated `if json { ... } else
+/// { ... }` shape across read-verb error arms.
+pub(crate) fn route_api_error(err: &ApiError, json: bool) -> ExitCode {
+    if json {
+        let env: ErrorEnvelope = err.into();
+        let code = super::exit_codes::for_envelope(&env);
+        emit_error(&env, code)
+    } else {
+        super::common::handle_read_verb_error(err)
     }
 }
 

@@ -55,14 +55,7 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     opts.filters = build_filters(args);
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,
-        Err(e) => {
-            if args.json {
-                let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
-                let code = super::exit_codes::for_envelope(&env);
-                return super::json_emit::emit_error(&env, code);
-            }
-            return super::common::handle_read_verb_error(&e);
-        }
+        Err(e) => return super::json_emit::route_api_error(&e, args.json),
     };
     if args.json {
         match serde_json::to_string_pretty(&res) {
