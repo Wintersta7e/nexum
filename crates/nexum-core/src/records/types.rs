@@ -471,8 +471,15 @@ impl std::fmt::Display for TrustPolicy {
 /// guidance instead of a generic "not found" message.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GetOutcome {
-    /// Record present and visible under current trust policy.
-    Found(Box<UnifiedRecord>),
+    /// Record present and visible under current trust policy. Carries the
+    /// shared `_meta` envelope alongside the record so the `get` success
+    /// contract matches the listing verbs' `ResultSet { results, _meta }`
+    /// shape — the CLI / MCP layers serialize `{ record, _meta }` straight
+    /// from this variant rather than synthesizing the envelope.
+    Found {
+        record: Box<UnifiedRecord>,
+        meta: crate::query::Meta,
+    },
     /// No record matches the requested id.
     NotFound,
     /// Record exists but is hidden by the current trust policy. The
@@ -803,12 +810,15 @@ mod tests {
     #[test]
     fn get_outcome_variants_match_intent() {
         let r = sample_record();
-        let found = GetOutcome::Found(Box::new(r.clone()));
+        let found = GetOutcome::Found {
+            record: Box::new(r.clone()),
+            meta: crate::query::Meta::default(),
+        };
         let not_found = GetOutcome::NotFound;
         let hidden = GetOutcome::HiddenByPolicy {
             signature_status: SignatureStatus::Unsigned,
         };
-        assert!(matches!(found, GetOutcome::Found(_)));
+        assert!(matches!(found, GetOutcome::Found { .. }));
         assert!(matches!(not_found, GetOutcome::NotFound));
         assert!(matches!(
             hidden,

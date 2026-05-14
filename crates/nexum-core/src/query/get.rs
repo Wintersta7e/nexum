@@ -15,6 +15,7 @@ use crate::records::{
     RecordType, SessionRef, Source, TrustPolicy, UnifiedRecord,
 };
 
+use super::meta::build_meta_listing;
 use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::QueryError;
 use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
@@ -51,7 +52,8 @@ impl Default for GetOpts {
 /// Fetch the full `UnifiedRecord` for `key`.
 ///
 /// Returns:
-/// - `Ok(GetOutcome::Found(r))` — record found and visible.
+/// - `Ok(GetOutcome::Found { record, meta })` — record found and visible;
+///   `meta` is the shared `_meta` envelope built over the same connection.
 /// - `Ok(GetOutcome::NotFound)` — no record matches the key.
 /// - `Ok(GetOutcome::HiddenByPolicy { signature_status })` — exactly one
 ///   record matches but is suppressed by `trust_policy = Hide` with
@@ -94,9 +96,16 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     // `include_unsigned` is the per-call escape hatch for agents that
     // need to inspect a record regardless of trust state. When set, we
     // bypass the centralized policy filter and surface the full
-    // projection.
+    // projection. `_meta` still ships — the success contract is uniform —
+    // but with the hide-bucket counters at their `build_meta_listing`
+    // defaults since no policy filtering ran.
     if opts.include_unsigned {
-        return build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)));
+        let meta = build_meta_listing(conn, opts.trust_policy)?;
+        let record = build_record(raw, crypto_result, projected)?;
+        return Ok(GetOutcome::Found {
+            record: Box::new(record),
+            meta,
+        });
     }
 
     // Route the single row through the same warn/hide/strict policy
@@ -108,9 +117,18 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     };
     let signature_status = projected.signature_status;
     let outcome = apply_policy(vec![(raw, projected)], policy_opts, |row| &row.1);
+    // Build the `_meta` envelope and fold in the policy outcome's bucket
+    // counts + transparency tallies — the same `build_meta_listing` +
+    // `apply_policy_outcome` sequence every listing verb runs.
+    let mut meta = build_meta_listing(conn, opts.trust_policy)?;
+    meta.apply_policy_outcome(&outcome);
     match outcome.visible.into_iter().next() {
         Some((raw, projected)) => {
-            build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))
+            let record = build_record(raw, crypto_result, projected)?;
+            Ok(GetOutcome::Found {
+                record: Box::new(record),
+                meta,
+            })
         }
         None => Ok(GetOutcome::HiddenByPolicy { signature_status }),
     }
@@ -339,7 +357,7 @@ mod tests {
             },
         )
         .unwrap();
-        let GetOutcome::Found(r) = res else {
+        let GetOutcome::Found { record: r, .. } = res else {
             panic!("expected Found, got {res:?}");
         };
         assert_eq!(r.id, "alpha");
@@ -362,7 +380,7 @@ mod tests {
             },
         )
         .unwrap();
-        let GetOutcome::Found(r) = res else {
+        let GetOutcome::Found { record: r, .. } = res else {
             panic!("expected Found, got {res:?}");
         };
         // The seeded chain keeps the bootstrap key trusted at head, so a
@@ -385,7 +403,7 @@ mod tests {
             },
         )
         .unwrap();
-        let GetOutcome::Found(r) = res else {
+        let GetOutcome::Found { record: r, .. } = res else {
             panic!("expected Found, got {res:?}");
         };
         // An unsigned record has no basis — the projection returns `None`
@@ -416,7 +434,7 @@ mod tests {
         };
         assert!(matches!(
             get(&conn, &RecordKey::bare("u"), &hide_override).unwrap(),
-            GetOutcome::Found(_)
+            GetOutcome::Found { .. }
         ));
     }
 
@@ -434,7 +452,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(res, GetOutcome::Found(_)));
+        assert!(matches!(res, GetOutcome::Found { .. }));
     }
 
     #[test]
@@ -464,6 +482,60 @@ mod tests {
             id: "shared".into(),
         };
         let outcome = get(&conn, &key, &GetOpts::default()).unwrap();
-        assert!(matches!(outcome, GetOutcome::Found(_)));
+        assert!(matches!(outcome, GetOutcome::Found { .. }));
+    }
+
+    #[test]
+    fn get_found_carries_populated_meta() {
+        let (_dir, conn) = open();
+        insert(&conn, "alpha", true);
+        let res = get(
+            &conn,
+            &RecordKey::bare("alpha"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record, meta } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert_eq!(record.id, "alpha");
+        // `_meta` is built over the same connection: source_counts reflects
+        // the one seeded row, trust_policy mirrors the GetOpts policy.
+        assert_eq!(meta.source_counts.local, 1);
+        assert_eq!(meta.trust_policy, TrustPolicy::WarnButShow);
+        // The single verified row was visible — no rows hidden.
+        assert_eq!(meta.hidden_unsigned, 0);
+        assert_eq!(meta.hidden_invalid, 0);
+        assert_eq!(meta.hidden_compromised, 0);
+        // trust_summary counts the one returned (verified) row.
+        assert_eq!(meta.trust_summary.verified, 1);
+    }
+
+    #[test]
+    fn get_found_via_include_unsigned_carries_meta() {
+        // The escape-hatch path bypasses the policy filter; it must still
+        // produce a populated `meta` so the success contract is uniform.
+        let (_dir, conn) = open();
+        insert(&conn, "u", false);
+        let res = get(
+            &conn,
+            &RecordKey::bare("u"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::Hide,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record, meta } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert_eq!(record.id, "u");
+        assert_eq!(meta.source_counts.local, 1);
+        assert_eq!(meta.trust_policy, TrustPolicy::Hide);
     }
 }
