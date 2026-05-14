@@ -23,4 +23,19 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# rmcp dependency added when MCP server scaffolding lands.
+rmcp = { workspace = true }
+
+[dev-dependencies]
+# `client` + `transport-child-process` drive the in-process duplex test
+# harness and the child-process stdio smoke test. `tokio`'s `test-util`
+# feature provides `tokio::io::duplex`.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+
+[features]
+# Off by default until the MCP server skeleton exists. Until then the
+# tool-catalog test (`tests/tool_list.rs`) is excluded from the build so
+# the workspace `cargo test --all-targets` gate stays green. The skeleton
+# task removes this gate and turns the test on.
+server-skeleton = []

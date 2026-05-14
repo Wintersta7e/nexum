@@ -49,8 +49,8 @@ walkdir = "2"
 sha2 = "0.11"
 # Timestamps for init (config.toml established_at, META.yml init_at).
 chrono = { version = "0.4", features = ["serde"] }
-# MCP framework — macros + server runtime only.
-rmcp = { version = "1", features = ["macros", "server"] }
+# MCP framework — macros + server runtime + stdio transport.
+rmcp = { version = "1", features = ["macros", "server", "transport-io"] }
 # Git.
 git2 = "0.20"
 # HTTP / API client.
