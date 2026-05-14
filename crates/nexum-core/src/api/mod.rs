@@ -225,16 +225,42 @@ pub struct ProjectSummary {
     pub identity_kind: String,
     pub record_count: u32,
     pub signed_record_count: u32,
+    /// Filesystem path of the project root, recorded only for
+    /// `name:`-identity (registered) projects via `nexum project register`.
+    /// `None` for `git:` / `cc-slug:` / `codex-cwd:` / path identities — those
+    /// carry no stored path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
-/// Distinct project ids in the index with their record / signed-record counts.
+/// `list_projects` response: the per-project summaries plus the shared
+/// `_meta` envelope. The `_meta` block is part of the core contract — the
+/// CLI and MCP layers serialize this struct rather than synthesizing the
+/// envelope themselves.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectListing {
+    pub results: Vec<ProjectSummary>,
+    #[serde(rename = "_meta")]
+    pub meta: crate::query::Meta,
+}
+
+/// Distinct project ids in the index with their record / signed-record
+/// counts, plus the shared `_meta` envelope.
+///
 /// `identity_kind` is derived from the prefix of `project_id`
-/// (`git:` / `name:` / `cc-slug:` / `codex-cwd:` / other).
+/// (`git:` / `name:` / `cc-slug:` / `codex-cwd:` / other). `path` is
+/// resolved from `cfg.projects` (the `[projects.<name>]` table written by
+/// `nexum project register`) for `name:`-identity ids and is `None`
+/// otherwise — only registered projects carry a stored filesystem path.
+///
+/// `meta` is built via the shared `build_meta_listing` helper over the same
+/// connection so `_meta.source_counts` aggregates the whole index and
+/// `_meta.trust_policy` reflects `cfg.trust.unsigned_default`.
 ///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite failure.
-pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
+pub fn list_projects(paths: &Paths, cfg: &Config) -> Result<ProjectListing, ApiError> {
     let conn = open_existing(&paths.index_db)?;
     let mut stmt = conn
         .prepare(
@@ -254,18 +280,37 @@ pub fn list_projects(paths: &Paths) -> Result<Vec<ProjectSummary>, ApiError> {
             ))
         })
         .map_err(crate::query::QueryError::from)?;
-    let summaries: Vec<ProjectSummary> = rows
+    let results: Vec<ProjectSummary> = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::query::QueryError::from)?
         .into_iter()
         .map(|(pid, count, signed)| ProjectSummary {
             identity_kind: identity_kind_for(&pid).to_owned(),
+            path: project_path_for(&pid, cfg),
             project_id: pid,
             record_count: u32::try_from(count).unwrap_or(u32::MAX),
             signed_record_count: u32::try_from(signed).unwrap_or(u32::MAX),
         })
         .collect();
-    Ok(summaries)
+    let meta = crate::query::meta::build_meta_listing(&conn, cfg.trust.unsigned_default)?;
+    Ok(ProjectListing { results, meta })
+}
+
+/// Resolve the filesystem path for a `project_id` from `cfg.projects`.
+///
+/// Only `name:`-identity ids carry a registered path: the id `name:<name>`
+/// maps to `cfg.projects["<name>"]["path"]`, the `[projects.<name>]` table
+/// `nexum project register` writes. Every other identity kind (`git:`,
+/// `cc-slug:`, `codex-cwd:`, path) returns `None` — the `records` table
+/// has no path column and those identities are derived, not registered.
+fn project_path_for(project_id: &str, cfg: &Config) -> Option<String> {
+    let name = project_id.strip_prefix("name:")?;
+    cfg.projects
+        .get(name)?
+        .as_table()?
+        .get("path")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// One row from the `trust_chain_tampering` table — a forbidden mutation of
@@ -384,22 +429,93 @@ mod tests {
             [],
         )
         .unwrap();
-        // Connection drops here; list_projects re-opens.
         drop(conn);
-        let summaries = list_projects(&paths).unwrap();
-        assert_eq!(summaries.len(), 2);
-        let abc = summaries
+        let cfg = Config::seed();
+        let listing = list_projects(&paths, &cfg).unwrap();
+        assert_eq!(listing.results.len(), 2);
+        let abc = listing
+            .results
             .iter()
             .find(|s| s.project_id == "git:abc")
             .unwrap();
         assert_eq!(abc.record_count, 2);
         assert_eq!(abc.signed_record_count, 1);
         assert_eq!(abc.identity_kind, "git");
-        let projx = summaries
+        // No registered path for a git: identity.
+        assert_eq!(abc.path, None);
+        let projx = listing
+            .results
             .iter()
             .find(|s| s.project_id == "name:projx")
             .unwrap();
         assert_eq!(projx.record_count, 1);
         assert_eq!(projx.identity_kind, "registered");
+        // projx is not registered in `cfg.projects`, so still None.
+        assert_eq!(projx.path, None);
+        // `_meta` is part of the core contract: source_counts aggregates the
+        // whole index and trust_policy reflects the passed config.
+        assert_eq!(listing.meta.source_counts.local, 3);
+        assert_eq!(listing.meta.trust_policy, cfg.trust.unsigned_default);
+    }
+
+    #[test]
+    fn list_projects_resolves_path_for_registered_name_identity() {
+        let (_dir, paths) = paths_with_temp_home();
+        let conn = open_or_create(&paths.index_db).unwrap();
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
+             ('a','local','name:projx','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','good','2026-04-29T00:01:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        // Mirror what `nexum project register` writes: [projects.projx] path = "...".
+        let mut cfg = Config::seed();
+        let mut entry = toml::Table::new();
+        entry.insert(
+            "path".into(),
+            toml::Value::String("/home/u/code/projx".into()),
+        );
+        cfg.projects
+            .insert("projx".into(), toml::Value::Table(entry));
+        let listing = list_projects(&paths, &cfg).unwrap();
+        let projx = listing
+            .results
+            .iter()
+            .find(|s| s.project_id == "name:projx")
+            .unwrap();
+        assert_eq!(projx.identity_kind, "registered");
+        assert_eq!(projx.path.as_deref(), Some("/home/u/code/projx"));
+    }
+
+    #[test]
+    fn list_projects_path_none_for_unregistered_and_non_name_identities() {
+        let (_dir, paths) = paths_with_temp_home();
+        let conn = open_or_create(&paths.index_db).unwrap();
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
+             ('a','local','git:abc','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','good','2026-04-29T00:01:00Z'), \
+             ('b','local','name:gone','decision','t','b','[]','','manual','[]','[]','[]','medium','working', \
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','good','2026-04-29T00:01:00Z')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        // `cfg.projects` registers a *different* name, so `name:gone` stays unresolved.
+        let mut cfg = Config::seed();
+        let mut entry = toml::Table::new();
+        entry.insert("path".into(), toml::Value::String("/elsewhere".into()));
+        cfg.projects
+            .insert("other".into(), toml::Value::Table(entry));
+        let listing = list_projects(&paths, &cfg).unwrap();
+        for s in &listing.results {
+            assert_eq!(s.path, None, "path must be None for {}", s.project_id);
+        }
     }
 }
