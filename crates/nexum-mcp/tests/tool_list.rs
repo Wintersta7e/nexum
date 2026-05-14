@@ -3,10 +3,8 @@
 //! tools, each with read-only annotations and a description within the
 //! token budget.
 //!
-//! This test is RED until the server skeleton lands `NexumServer` and the
-//! six `#[tool]` handlers. It compiles against the public surface of
-//! `nexum_mcp` (`NexumServer::tool_router()`), which the `#[tool_router]`
-//! macro generates.
+//! The suite exercises `NexumServer::tool_router()` — the tool registry
+//! the `#[tool_router]` macro generates on the server type.
 
 use nexum_mcp::NexumServer;
 
@@ -20,10 +18,11 @@ const EXPECTED_TOOLS: [&str; 6] = [
     "list_projects",
 ];
 
-/// Coarse token estimate: MCP tool descriptions are billed per token, and
-/// the budget is <=80 tokens each. A whitespace-split word count
-/// overestimates slightly versus a real BPE tokenizer, so passing this
-/// bound is a safe proxy for the real budget.
+/// Coarse token estimate: a whitespace-split word count. A real BPE
+/// tokenizer emits more tokens than this (it splits punctuation and
+/// subwords further), so this is a loose lower bound — it catches a
+/// description that has obviously ballooned, not one marginally over the
+/// 80-token budget.
 fn approx_tokens(s: &str) -> usize {
     s.split_whitespace().count()
 }
