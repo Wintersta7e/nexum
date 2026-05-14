@@ -86,11 +86,13 @@ impl NexumServer {
         &self,
         Parameters(params): Parameters<RecentParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // Unavailable runtime → the startup envelope, as a structured error.
-        // `Ready` → dispatch into the synchronous core verb on the blocking
-        // pool: every core call runs inside `spawn_blocking`, never on a
-        // runtime worker.
+        // The core call runs inside `spawn_blocking` — never on a runtime
+        // worker — because the `nexum_core::api` verbs are synchronous and
+        // do blocking SQLite I/O.
         let (paths, cfg) = match self.runtime() {
+            // Cloning `Paths` + `Config` per call is cheap next to the SQLite
+            // open + query the core verb then runs; if profiling ever shows
+            // otherwise, hold them as `Arc` inside `RuntimeState::Ready`.
             RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
             RuntimeState::Unavailable(envelope) => {
                 return Ok(unavailable_result(envelope));
@@ -103,7 +105,7 @@ impl NexumServer {
             ..Filters::default()
         };
         let limit = params.limit;
-        let source = params.source.clone();
+        let source = params.source;
 
         let result = tokio::task::spawn_blocking(move || {
             nexum_core::api::recent(&paths, &cfg, &filters, limit, source.as_deref())
@@ -111,14 +113,15 @@ impl NexumServer {
         .await;
 
         match result {
-            Ok(Ok(result_set)) => Ok(CallToolResult::structured(
-                serde_json::to_value(&result_set).map_err(|e| {
+            Ok(Ok(result_set)) => {
+                let value = serde_json::to_value(&result_set).map_err(|e| {
                     rmcp::ErrorData::internal_error(
                         format!("failed to serialize recent result: {e}"),
                         None,
                     )
-                })?,
-            )),
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
             Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
             Err(join_err) => Err(rmcp::ErrorData::internal_error(
                 format!("recent task panicked: {join_err}"),
@@ -234,16 +237,24 @@ pub fn run() -> ExitCode {
 // handlers. The agent gets the same `error_code` + `remediation` the CLI's
 // `--json` path emits, so one trust contract spans both surfaces.
 
+/// Render an [`ErrorEnvelope`] as a structured tool error. The
+/// `unwrap_or_else` degrades to a minimal object rather than panicking
+/// inside an async handler if the (flat, derived-`Serialize`) envelope
+/// somehow fails to serialize.
+fn envelope_to_result(envelope: &ErrorEnvelope) -> CallToolResult {
+    CallToolResult::structured_error(
+        serde_json::to_value(envelope)
+            .unwrap_or_else(|_| serde_json::json!({ "error_code": envelope.error_code })),
+    )
+}
+
 /// The startup envelope as a structured tool error. Used by every handler's
 /// `RuntimeState::Unavailable` arm: the server resolved no nexum home, so the
 /// call cannot be answered, but the process is alive and the agent gets
 /// actionable remediation (`NOT_INITIALIZED` + `nexum init`) rather than a
 /// dropped connection.
 pub(crate) fn unavailable_result(envelope: &ErrorEnvelope) -> CallToolResult {
-    CallToolResult::structured_error(
-        serde_json::to_value(envelope)
-            .unwrap_or_else(|_| serde_json::json!({ "error_code": envelope.error_code })),
-    )
+    envelope_to_result(envelope)
 }
 
 /// Any `ApiError` raised by a `nexum_core::api` verb as a structured tool
@@ -252,8 +263,5 @@ pub(crate) fn unavailable_result(envelope: &ErrorEnvelope) -> CallToolResult {
 /// `error_code`, same `remediation`, same `context` discriminators.
 pub(crate) fn api_error_result(err: &nexum_core::api::ApiError) -> CallToolResult {
     let envelope: ErrorEnvelope = err.into();
-    CallToolResult::structured_error(
-        serde_json::to_value(&envelope)
-            .unwrap_or_else(|_| serde_json::json!({ "error_code": envelope.error_code })),
-    )
+    envelope_to_result(&envelope)
 }

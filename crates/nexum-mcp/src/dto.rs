@@ -6,6 +6,11 @@
 //! `nexum-mcp` (not `nexum-core`) so the core crate never takes a
 //! `schemars` dependency just for transport schemas.
 //!
+//! `schemars` is a direct dependency — the `#[derive(JsonSchema)]` macro
+//! expands to a bare `schemars` path — and its major version must stay
+//! aligned with the `schemars` `rmcp` re-exports, or the generated schema
+//! and what `rmcp`'s `#[tool]` macro expects will drift.
+//!
 //! `RecentParams` lands first; the other tools' params follow with their
 //! handlers.
 
@@ -33,4 +38,22 @@ pub struct RecentParams {
 
 fn default_recent_limit() -> u32 {
     10
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RecentParams;
+
+    #[test]
+    fn empty_object_deserializes_to_documented_defaults() {
+        // An MCP `recent` call with no arguments must produce the defaults
+        // the field docs advertise — `JsonSchema` defaults are advisory, so
+        // the `#[serde(default)]` attributes are what apply at deserialize
+        // time.
+        let params: RecentParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(params.limit, 10);
+        assert_eq!(params.source, None);
+        assert!(!params.require_signed);
+        assert!(!params.strict_revocation);
+    }
 }
