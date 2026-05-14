@@ -117,9 +117,8 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     };
     let signature_status = projected.signature_status;
     let outcome = apply_policy(vec![(raw, projected)], policy_opts, |row| &row.1);
-    // Build the `_meta` envelope and fold in the policy outcome's bucket
-    // counts + transparency tallies — the same `build_meta_listing` +
-    // `apply_policy_outcome` sequence every listing verb runs.
+    // `build_meta_listing` + `apply_policy_outcome`: the same `_meta`
+    // sequence the listing verbs run.
     let mut meta = build_meta_listing(conn, opts.trust_policy)?;
     meta.apply_policy_outcome(&outcome);
     match outcome.visible.into_iter().next() {
@@ -537,5 +536,11 @@ mod tests {
         assert_eq!(record.id, "u");
         assert_eq!(meta.source_counts.local, 1);
         assert_eq!(meta.trust_policy, TrustPolicy::Hide);
+        // The escape-hatch path skips `apply_policy_outcome`, so the
+        // hide-bucket counters and trust tallies stay at their defaults.
+        assert_eq!(meta.hidden_unsigned, 0);
+        assert_eq!(meta.hidden_invalid, 0);
+        assert_eq!(meta.hidden_compromised, 0);
+        assert_eq!(meta.trust_summary.verified, 0);
     }
 }

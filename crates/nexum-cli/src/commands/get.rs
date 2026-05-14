@@ -45,11 +45,9 @@ pub fn run(args: &GetArgs) -> ExitCode {
     match api::get(&paths, &cfg, &key, &opts) {
         Ok(GetOutcome::Found { record: r, meta }) => {
             if args.json {
-                // `get --json` success emits `{ record, _meta }` — the
-                // record nested under `record`, the shared envelope under
-                // `_meta`. The CLI names the field `_meta` explicitly here
-                // because an enum variant's fields cannot carry a
-                // struct-level serde rename.
+                // The `_meta` key is named explicitly: an enum variant's
+                // fields cannot carry a struct-level serde rename the way
+                // `ResultSet` / `ProjectListing` do.
                 let payload = serde_json::json!({ "record": &r, "_meta": &meta });
                 match serde_json::to_string_pretty(&payload) {
                     Ok(s) => println!("{s}"),
