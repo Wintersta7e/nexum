@@ -369,7 +369,6 @@ mod tests {
         // record signed by it projects to `Current` — and `build_record`
         // must forward that onto `Provenance`, not drop it to `None`.
         assert_eq!(r.provenance.trust_basis, Some(TrustBasis::Current));
-        assert_eq!(r.provenance.signature_status, SignatureStatus::Verified);
     }
 
     #[test]

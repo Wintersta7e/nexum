@@ -856,6 +856,8 @@ mod tests {
                 signer_fingerprint: None,
                 crypto_result: CryptoResult::Good,
                 relevant_trust_events_commit: None,
+                // Fixture only — production never pairs a Verified status
+                // with a None basis; no test derives trust_basis from here.
                 trust_basis: None,
                 warnings: Vec::new(),
             },

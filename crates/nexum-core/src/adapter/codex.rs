@@ -591,8 +591,6 @@ fn build_record(
             signer_fingerprint: None,
             crypto_result: CryptoResult::NoSignature,
             relevant_trust_events_commit: None,
-            // Adapters do not run the read-time verifier projection; the
-            // basis is derived on read in `query::get`.
             trust_basis: None,
             warnings: Vec::new(),
         },
