@@ -8,6 +8,7 @@ use nexum_core::{
     api,
     api::error::{ErrorEnvelope, Remediation, error_codes},
     config::io::save as save_config,
+    config::types::Config,
     paths::Paths,
     project::{ProjectInput, ProjectResolution, resolve::resolve as resolve_project},
 };
@@ -82,13 +83,10 @@ fn register(name: &str, path: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn list(paths: &Paths, cfg: &nexum_core::config::types::Config, json: bool) -> ExitCode {
+fn list(paths: &Paths, cfg: &Config, json: bool) -> ExitCode {
     match api::list_projects(paths, cfg) {
         Ok(listing) => {
             if json {
-                // `ProjectListing` serializes as `{ results, _meta }` — the
-                // `_meta` envelope is part of the core contract, not
-                // synthesized here.
                 match serde_json::to_string_pretty(&listing) {
                     Ok(s) => println!("{s}"),
                     Err(e) => return super::json_emit::emit_serialize_failure(&e),
