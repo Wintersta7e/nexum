@@ -1,4 +1,4 @@
-#![cfg(feature = "server-skeleton")]
+#![cfg(feature = "full-tool-catalog")]
 //! Tool-catalog conformance: the server exposes exactly the six read-only
 //! tools, each with read-only annotations and a description within the
 //! token budget.
@@ -30,7 +30,8 @@ fn approx_tokens(s: &str) -> usize {
 #[test]
 fn server_exposes_exactly_the_six_read_tools() {
     let router = NexumServer::tool_router();
-    let mut names: Vec<&str> = router.list_all().iter().map(|t| t.name.as_ref()).collect();
+    let tools = router.list_all();
+    let mut names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
     names.sort_unstable();
     let mut expected = EXPECTED_TOOLS;
     expected.sort_unstable();
