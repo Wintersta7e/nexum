@@ -245,6 +245,7 @@ fn build_record(
             signer_fingerprint: raw.signer_fingerprint,
             crypto_result,
             relevant_trust_events_commit: raw.relevant_trust_events_commit,
+            trust_basis: projected.trust_basis,
             warnings: projected.warnings,
         },
         extras,
@@ -343,6 +344,55 @@ mod tests {
         };
         assert_eq!(r.id, "alpha");
         assert_eq!(r.provenance.signature_status, SignatureStatus::Verified);
+    }
+
+    #[test]
+    fn get_signed_record_carries_trust_basis() {
+        use crate::records::TrustBasis;
+
+        let (_dir, conn) = open();
+        insert(&conn, "alpha", true);
+        let res = get(
+            &conn,
+            &RecordKey::bare("alpha"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found(r) = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        // The seeded chain keeps the bootstrap key trusted at head, so a
+        // record signed by it projects to `Current` — and `build_record`
+        // must forward that onto `Provenance`, not drop it to `None`.
+        assert_eq!(r.provenance.trust_basis, Some(TrustBasis::Current));
+        assert_eq!(r.provenance.signature_status, SignatureStatus::Verified);
+    }
+
+    #[test]
+    fn get_unsigned_record_has_no_trust_basis() {
+        let (_dir, conn) = open();
+        insert(&conn, "u", false);
+        let res = get(
+            &conn,
+            &RecordKey::bare("u"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found(r) = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        // An unsigned record has no basis — the projection returns `None`
+        // and `build_record` forwards it unchanged.
+        assert_eq!(r.provenance.trust_basis, None);
+        assert_eq!(r.provenance.signature_status, SignatureStatus::Unsigned);
     }
 
     #[test]

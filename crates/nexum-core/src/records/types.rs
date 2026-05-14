@@ -680,8 +680,8 @@ pub enum FileEvidenceKind {
 /// population logic (trust events, rotation states, distinguishing `Invalid`
 /// from `Unsigned`) lands with future verifier work.
 ///
-/// `signature_status` and `warnings` are derived on read by the verifier
-/// projection — they are NOT cached as columns.
+/// `signature_status`, `trust_basis`, and `warnings` are derived on read by
+/// the verifier projection — they are NOT cached as columns.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     pub source: Source,
@@ -712,6 +712,14 @@ pub struct Provenance {
     /// records leave NULL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relevant_trust_events_commit: Option<String>,
+    /// Final trust-state interpretation, derived on read by the verifier
+    /// projection. `Some(..)` for records that carry a signature trusted
+    /// at some point in the chain; `None` for unsigned records and for
+    /// adapter-built records (cc-native / codex-native) that never run the
+    /// projection. Not a cached column — populated by `query::get`'s
+    /// `build_record` from the `ProjectedTrust` projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_basis: Option<TrustBasis>,
     /// Read-time-populated warning codes per the warning taxonomy. Empty
     /// for fully verified records. Persisted as empty vec; the read-time
     /// projection populates on its way out to API consumers.
@@ -848,6 +856,7 @@ mod tests {
                 signer_fingerprint: None,
                 crypto_result: CryptoResult::Good,
                 relevant_trust_events_commit: None,
+                trust_basis: None,
                 warnings: Vec::new(),
             },
             extras: HashMap::new(),
@@ -862,6 +871,59 @@ mod tests {
         let json = serde_json::to_string(&r).expect("serialize");
         let back: UnifiedRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(r, back);
+    }
+
+    #[test]
+    fn provenance_round_trips_with_and_without_trust_basis() {
+        // `None` basis — the unsigned / adapter case — must omit the key on
+        // the wire (skip_serializing_if) and still round-trip.
+        let none_basis = Provenance {
+            source: Source::CcNative,
+            signature_status: SignatureStatus::Unsigned,
+            extractor: None,
+            digest_hash: None,
+            record_commit_sha: None,
+            signer_fingerprint: None,
+            crypto_result: CryptoResult::NoSignature,
+            relevant_trust_events_commit: None,
+            trust_basis: None,
+            warnings: vec!["unsigned".into()],
+        };
+        let json = serde_json::to_string(&none_basis).unwrap();
+        assert!(
+            !json.contains("trust_basis"),
+            "None basis must omit the key: {json}"
+        );
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(none_basis, back);
+
+        // `Some(..)` basis — the verified-record case — round-trips and
+        // serializes kebab-case.
+        let some_basis = Provenance {
+            source: Source::Local,
+            signature_status: SignatureStatus::Verified,
+            extractor: None,
+            digest_hash: None,
+            record_commit_sha: Some("abc123".into()),
+            signer_fingerprint: Some("SHA256:fp".into()),
+            crypto_result: CryptoResult::Good,
+            relevant_trust_events_commit: Some("def456".into()),
+            trust_basis: Some(TrustBasis::RotatedHistorical),
+            warnings: vec!["signer-key-rotated".into()],
+        };
+        let json = serde_json::to_string(&some_basis).unwrap();
+        assert!(
+            json.contains("\"trust_basis\":\"rotated-historical\""),
+            "Some basis must serialize kebab-case: {json}"
+        );
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(some_basis, back);
+
+        // Backward compatibility: JSON written before the field existed
+        // (no `trust_basis` key) still deserializes, with `None`.
+        let legacy = r#"{"source":"local","signature_status":"verified","crypto_result":"good"}"#;
+        let parsed: Provenance = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.trust_basis, None);
     }
 
     #[test]
