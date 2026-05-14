@@ -3,11 +3,7 @@
 use std::{path::Path, process::ExitCode};
 
 use nexum_core::{
-    api::ApiError,
-    api::error::{ErrorEnvelope, Remediation, error_codes},
-    config::{io::load as load_config, types::Config},
-    paths::Paths,
-    query::QueryError,
+    api::ApiError, api::error::error_codes, config::types::Config, paths::Paths, query::QueryError,
     trust::events::TrustError,
 };
 
@@ -17,89 +13,35 @@ use super::exit_codes;
 /// Returns the runtime context shared by every read-side CLI verb (`index`,
 /// `search`, `get`, `list`, `recent`, `by_session`, `project`).
 ///
-/// `json` selects the failure rendering channel: `true` emits an
-/// [`ErrorEnvelope`] on stdout via [`super::json_emit::emit_error`] and
-/// returns the matching exit code; `false` keeps the legacy prose-on-stderr
-/// rendering (verbatim from the pre-refactor implementation, preserved so
-/// existing string-compare integration tests stay green).
+/// Thin `ExitCode` adapter over [`nexum_core::session::resolve_runtime`],
+/// which owns the resolution sequence and produces the wire-stable
+/// [`ErrorEnvelope`]. This fn only decides *how* the CLI surfaces a failure:
 ///
-/// Exit-code mapping is identical across both channels: `Paths::resolve`
-/// failure -> `NOT_INITIALIZED` (3); a `.reanchor_pending` sentinel ->
-/// `REANCHOR_PENDING` (8); other startup errors -> `STORE_INTEGRITY` (4);
-/// `load_config` failure -> `NOT_INITIALIZED` (3).
+/// `json` selects the failure rendering channel: `true` emits the
+/// [`ErrorEnvelope`] on stdout via [`super::json_emit::emit_error`] and
+/// returns the matching exit code; `false` renders the envelope's `message`
+/// as prose on stderr (with the legacy `init` hint appended for the
+/// `NOT_INITIALIZED` case so existing string-compare integration tests stay
+/// green).
+///
+/// Exit-code mapping is `super::exit_codes::for_envelope` over the envelope
+/// the core helper returns — identical across both channels.
 pub(crate) fn resolve_runtime(json: bool) -> Result<(Paths, Config), ExitCode> {
-    let paths = Paths::resolve().map_err(|e| {
+    nexum_core::session::resolve_runtime().map_err(|env| {
+        let code = exit_codes::for_envelope(&env);
         if json {
-            let env = ErrorEnvelope {
-                error_code: error_codes::NOT_INITIALIZED,
-                message: format!("{e}"),
-                remediation: Some(Remediation {
-                    command: Some("nexum init".into()),
-                    rationale: "Initialize a nexum home (notebook.git + config + signing key)."
-                        .into(),
-                }),
-                context: serde_json::json!({ "phase": "paths_resolve" }),
-            };
-            return super::json_emit::emit_error(&env, exit_codes::NOT_INITIALIZED);
+            return super::json_emit::emit_error(&env, code);
         }
-        // Default-mode prose preserved verbatim from the pre-refactor implementation.
-        eprintln!("error: {e}\nDid you run `nexum init`?");
-        ExitCode::from(exit_codes::NOT_INITIALIZED)
-    })?;
-    nexum_core::session::startup::pre_check(&paths.home).map_err(|e| match e {
-        nexum_core::session::startup::StartupError::Trust(
-            nexum_core::trust::events::TrustError::ReanchorPending { message },
-        ) => {
-            if json {
-                let env = ErrorEnvelope {
-                    error_code: error_codes::REANCHOR_PENDING,
-                    message: message.clone(),
-                    remediation: Some(Remediation {
-                        command: None,
-                        rationale: "Resolve the pending reanchor before continuing. \
-                                    Run `nexum doctor --resolve-pending-reanchor` once \
-                                    that command lands."
-                            .into(),
-                    }),
-                    context: serde_json::json!({ "phase": "pre_check" }),
-                };
-                return super::json_emit::emit_error(&env, exit_codes::REANCHOR_PENDING);
-            }
-            // Default-mode prose preserved verbatim.
-            eprintln!("error: {message}");
-            ExitCode::from(exit_codes::REANCHOR_PENDING)
+        // Default-mode prose: render the envelope's message on stderr. The
+        // `NOT_INITIALIZED` case appends the legacy "Did you run `nexum
+        // init`?" hint that pre-refactor string-compare tests expect.
+        if env.error_code == error_codes::NOT_INITIALIZED {
+            eprintln!("error: {}\nDid you run `nexum init`?", env.message);
+        } else {
+            eprintln!("error: {}", env.message);
         }
-        nexum_core::session::startup::StartupError::Trust(other) => {
-            if json {
-                let api_err =
-                    nexum_core::api::ApiError::Query(nexum_core::query::QueryError::Trust(other));
-                let env: ErrorEnvelope = (&api_err).into();
-                return super::json_emit::emit_error(&env, exit_codes::for_envelope(&env));
-            }
-            eprintln!("error: {other}");
-            ExitCode::from(exit_codes::STORE_INTEGRITY)
-        }
-    })?;
-    let cfg = load_config(&paths.config).map_err(|e| {
-        if json {
-            let env = ErrorEnvelope {
-                error_code: error_codes::NOT_INITIALIZED,
-                message: format!("{e}"),
-                remediation: Some(Remediation {
-                    command: Some("nexum init".into()),
-                    rationale: "Re-running `nexum init` heals a missing or malformed \
-                                config.toml."
-                        .into(),
-                }),
-                context: serde_json::json!({ "phase": "load_config" }),
-            };
-            return super::json_emit::emit_error(&env, exit_codes::NOT_INITIALIZED);
-        }
-        // Default-mode prose preserved verbatim.
-        eprintln!("error: {e}");
-        ExitCode::from(exit_codes::NOT_INITIALIZED)
-    })?;
-    Ok((paths, cfg))
+        ExitCode::from(code)
+    })
 }
 
 /// Print the "no index database" error and return the appropriate exit code.
