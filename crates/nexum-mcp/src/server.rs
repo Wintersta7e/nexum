@@ -19,9 +19,9 @@ use rmcp::{ServerHandler, ServiceExt, tool_handler, tool_router};
 /// which an agent would see as "server crashed", not as actionable remediation.
 #[derive(Debug)]
 // The `Ready` variant (resolved `Paths` + `Config`) is much larger than
-// `Unavailable`, but the enum only ever lives behind the `Arc` in
-// `NexumServer`: it is built once at startup and never moved by value, so
-// the size delta costs nothing per clone.
+// `Unavailable`, but the enum is built once at startup, moved by value
+// exactly once (into the `Arc` in `NexumServer::new`), and only ever read
+// through that `Arc` thereafter — the size delta is immaterial.
 #[allow(clippy::large_enum_variant)]
 pub enum RuntimeState {
     /// `Paths` + `Config` resolved cleanly. The index DB may still be absent —
@@ -37,8 +37,7 @@ pub enum RuntimeState {
 /// cheap.
 #[derive(Clone)]
 pub struct NexumServer {
-    // Read by the tool handlers (via `runtime()`), which land with the
-    // per-tool tasks; unused while the router is still empty.
+    // Unused until the first tool handler reads it via `runtime()`.
     #[allow(dead_code)]
     runtime: Arc<RuntimeState>,
     tool_router: ToolRouter<NexumServer>,
@@ -75,7 +74,10 @@ impl ServerHandler for NexumServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
-            .with_server_info(Implementation::new("nexum-mcp", nexum_core::version()))
+            .with_server_info(Implementation::new(
+                env!("CARGO_PKG_NAME"),
+                nexum_core::version(),
+            ))
             .with_instructions(
                 "nexum exposes a read-only memory index over six tools: \
                  search, get, list, recent, by_session, list_projects. \
@@ -121,9 +123,9 @@ pub fn run() -> ExitCode {
     };
 
     runtime.block_on(async {
-        // Resolve the nexum home ONCE. A failure here is not fatal: it
-        // becomes `Unavailable`, and the server still completes the MCP
-        // handshake so the agent gets a structured error per tool call.
+        // A failed resolution is not fatal — it becomes `Unavailable` so
+        // the server still serves and every tool call returns a structured
+        // error rather than the process having crashed.
         let state = match nexum_core::session::resolve_runtime() {
             Ok((paths, cfg)) => {
                 tracing::info!(home = %paths.home.display(), "runtime resolved");
