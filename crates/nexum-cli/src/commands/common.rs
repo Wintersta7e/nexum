@@ -32,9 +32,8 @@ pub(crate) fn resolve_runtime(json: bool) -> Result<(Paths, Config), ExitCode> {
         if json {
             return super::json_emit::emit_error(&env, code);
         }
-        // Default-mode prose: render the envelope's message on stderr. The
-        // `NOT_INITIALIZED` case appends the legacy "Did you run `nexum
-        // init`?" hint that pre-refactor string-compare tests expect.
+        // `NOT_INITIALIZED` gets the legacy `nexum init` hint appended —
+        // pre-refactor string-compare tests assert this exact prose.
         if env.error_code == error_codes::NOT_INITIALIZED {
             eprintln!("error: {}\nDid you run `nexum init`?", env.message);
         } else {

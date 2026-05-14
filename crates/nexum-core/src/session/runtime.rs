@@ -60,8 +60,9 @@ pub fn resolve_runtime() -> Result<(Paths, Config), ErrorEnvelope> {
 /// [`Paths`]. Returns the same envelope shapes as [`resolve_runtime`] for
 /// the `pre_check` and `load_config` failure points.
 ///
-/// Separated from [`resolve_runtime`] so tests can supply a controlled
-/// [`Paths`] without mutating process-global environment variables.
+/// Split from [`resolve_runtime`] so callers can supply a `Paths` directly
+/// instead of resolving it from the process environment — the unit tests
+/// rely on this to run hermetically.
 fn resolve_from(paths: Paths) -> Result<(Paths, Config), ErrorEnvelope> {
     pre_check(&paths.home).map_err(|e| match e {
         StartupError::Trust(TrustError::ReanchorPending { message }) => ErrorEnvelope {
