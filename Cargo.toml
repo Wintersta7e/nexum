@@ -51,6 +51,10 @@ sha2 = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 # MCP framework — macros + server runtime + stdio transport.
 rmcp = { version = "1", features = ["macros", "server", "transport-io"] }
+# JSON Schema derive for the MCP tool input DTOs. `rmcp` re-exports the
+# trait, but the `#[derive(JsonSchema)]` macro expands to a bare `schemars`
+# crate path, so the crate must also be a direct dependency.
+schemars = "1"
 # Git.
 git2 = "0.20"
 # HTTP / API client.

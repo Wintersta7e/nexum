@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+mod dto;
 mod server;
 
 pub use server::{NexumServer, RuntimeState, run};

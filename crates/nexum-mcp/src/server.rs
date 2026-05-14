@@ -6,9 +6,15 @@ use std::sync::Arc;
 use nexum_core::api::error::ErrorEnvelope;
 use nexum_core::config::types::Config;
 use nexum_core::paths::Paths;
+use nexum_core::query::Filters;
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
-use rmcp::{ServerHandler, ServiceExt, tool_handler, tool_router};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+};
+use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+
+use crate::dto::RecentParams;
 
 /// Resolved-once runtime context for the server process.
 ///
@@ -37,8 +43,6 @@ pub enum RuntimeState {
 /// cheap.
 #[derive(Clone)]
 pub struct NexumServer {
-    // Unused until the first tool handler reads it via `runtime()`.
-    #[allow(dead_code)]
     runtime: Arc<RuntimeState>,
     tool_router: ToolRouter<NexumServer>,
 }
@@ -55,18 +59,73 @@ impl NexumServer {
 
     /// Borrow the runtime state. Tool handlers match on this to either
     /// dispatch into `nexum_core::api` (`Ready`) or short-circuit to the
-    /// startup envelope (`Unavailable`). Unused until the first handler lands.
-    #[allow(dead_code)]
+    /// startup envelope (`Unavailable`).
     pub(crate) fn runtime(&self) -> &RuntimeState {
         &self.runtime
     }
 
-    // The six `#[tool]` handlers land with the per-tool tasks; the router
-    // is empty for now so the skeleton compiles and serves. Each handler
-    // will have the shape:
-    //   #[tool(description = "...")]    // read-only annotations, concise text
-    //   async fn verb(&self, Parameters(params): Parameters<VerbParams>)
-    //       -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> { ... }
+    /// Most-recently-updated records, newest first.
+    ///
+    /// Read-only. Each row carries the trust contract (`signature_status`,
+    /// `trust_basis`, warnings). Filter by source adapter with `source`;
+    /// `require_signed` drops unverified rows.
+    #[tool(
+        description = "List the most recently updated memory records, newest \
+                       first. Read-only. Each row includes trust fields \
+                       (signature_status, trust_basis, warnings). Optional \
+                       `source` filters to one adapter; `require_signed` \
+                       returns only verified records.",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn recent(
+        &self,
+        Parameters(params): Parameters<RecentParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Unavailable runtime → the startup envelope, as a structured error.
+        // `Ready` → dispatch into the synchronous core verb on the blocking
+        // pool: every core call runs inside `spawn_blocking`, never on a
+        // runtime worker.
+        let (paths, cfg) = match self.runtime() {
+            RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
+            RuntimeState::Unavailable(envelope) => {
+                return Ok(unavailable_result(envelope));
+            }
+        };
+
+        let filters = Filters {
+            require_signed: params.require_signed,
+            strict_revocation: params.strict_revocation,
+            ..Filters::default()
+        };
+        let limit = params.limit;
+        let source = params.source.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            nexum_core::api::recent(&paths, &cfg, &filters, limit, source.as_deref())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(result_set)) => Ok(CallToolResult::structured(
+                serde_json::to_value(&result_set).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to serialize recent result: {e}"),
+                        None,
+                    )
+                })?,
+            )),
+            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("recent task panicked: {join_err}"),
+                None,
+            )),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -164,4 +223,37 @@ pub fn run() -> ExitCode {
             }
         }
     })
+}
+
+// ───── Domain-error channel ────────────────────────────────────────────────
+//
+// Domain errors — including a server with no resolved nexum home — travel as
+// `CallToolResult { is_error: true }` carrying the wire-stable `ErrorEnvelope`,
+// NOT as `rmcp::ErrorData`. `ErrorData` is reserved for protocol-level failures
+// (a malformed call: bad JSON, bad arity, unparseable key) — see the per-tool
+// handlers. The agent gets the same `error_code` + `remediation` the CLI's
+// `--json` path emits, so one trust contract spans both surfaces.
+
+/// The startup envelope as a structured tool error. Used by every handler's
+/// `RuntimeState::Unavailable` arm: the server resolved no nexum home, so the
+/// call cannot be answered, but the process is alive and the agent gets
+/// actionable remediation (`NOT_INITIALIZED` + `nexum init`) rather than a
+/// dropped connection.
+pub(crate) fn unavailable_result(envelope: &ErrorEnvelope) -> CallToolResult {
+    CallToolResult::structured_error(
+        serde_json::to_value(envelope)
+            .unwrap_or_else(|_| serde_json::json!({ "error_code": envelope.error_code })),
+    )
+}
+
+/// Any `ApiError` raised by a `nexum_core::api` verb as a structured tool
+/// error. Reuses the existing `From<&ApiError> for ErrorEnvelope` builder so
+/// the MCP surface emits exactly the CLI `--json` envelope — same stable
+/// `error_code`, same `remediation`, same `context` discriminators.
+pub(crate) fn api_error_result(err: &nexum_core::api::ApiError) -> CallToolResult {
+    let envelope: ErrorEnvelope = err.into();
+    CallToolResult::structured_error(
+        serde_json::to_value(&envelope)
+            .unwrap_or_else(|_| serde_json::json!({ "error_code": envelope.error_code })),
+    )
 }

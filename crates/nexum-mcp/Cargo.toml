@@ -28,6 +28,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmcp = { workspace = true }
+schemars = { workspace = true }
 
 [dev-dependencies]
 # `client` + `transport-child-process` drive the in-process duplex test
