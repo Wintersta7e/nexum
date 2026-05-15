@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
 
-use super::policy::{PolicyOpts, apply as apply_policy};
+use super::policy::{apply as apply_policy, PolicyOpts};
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
 use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
@@ -27,6 +27,15 @@ pub struct SearchOpts {
     /// configured `[trust] ranking_penalty` so a single value drives both
     /// presentation and ranking.
     pub unsigned_ranking_penalty: f64,
+    /// Candidate-pool size for the semantic (vector) branch. The facade
+    /// populates this from `cfg.embed.top_k_semantic`; the default mirrors the
+    /// config default so unit-level callers get the same shape without wiring
+    /// a `Config`.
+    pub top_k_semantic: u32,
+    /// Candidate-pool size for the FTS branch. The facade populates this from
+    /// `cfg.embed.top_k_fts`; the default mirrors the config default so the
+    /// branches stay in lockstep.
+    pub top_k_fts: u32,
 }
 
 impl SearchOpts {
@@ -40,6 +49,8 @@ impl SearchOpts {
             embed_pool_saturated: false,
             saturation_wait_ms: 0,
             unsigned_ranking_penalty: 0.7,
+            top_k_semantic: 100,
+            top_k_fts: 100,
         }
     }
 }
@@ -130,10 +141,11 @@ fn fetch_and_project(
 ) -> Result<Vec<(FtsRow, ProjectedTrust)>, QueryError> {
     let (filter_sql, filter_params) = build_filter_sql(&opts.filters);
 
-    // Cap on FTS candidates fed into RRF. 100 is enough for top-K=5 even
-    // after aggressive filter pushdown; raise this if filtered queries
-    // start under-returning on real corpora.
-    let fts_limit: u32 = 100;
+    // Cap on FTS candidates fed into RRF. The facade populates
+    // `opts.top_k_fts` from `cfg.embed.top_k_fts`; the field default keeps
+    // unit callers at the historical 100. Raise via config if filtered
+    // queries start under-returning on real corpora.
+    let fts_limit: u32 = opts.top_k_fts;
 
     // FTS query with filter pushdown. ?1 = MATCH query; ?2 = limit;
     // ?3..= filter params. The SELECT also pulls the per-record
@@ -319,6 +331,72 @@ pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::type
     (clauses.join(" "), params)
 }
 
+/// Run the sqlite-vec k-NN query against `record_embeddings`, narrowed by the
+/// same metadata filter the FTS branch already pushes down. Returns
+/// `(record_rowid, l2_distance)` ordered nearest-first, up to `top_k`
+/// candidates.
+///
+/// The query vector binds as raw little-endian f32 bytes wrapped by the
+/// `vec_f32(?)` SQL function — the canonical sqlite-vec 0.1 shape. The filter
+/// IN-subquery scopes to `records`, so the qualified `records.<col>` clauses
+/// emitted by `build_filter_sql` resolve directly inside it.
+///
+/// # Errors
+/// `QueryError::Rusqlite` on any rusqlite error;
+/// `QueryError::InvalidFilter` if the query vector has the wrong dimension.
+// Transitional: the RRF-fusion site that consumes this helper lands in the
+// next task; tests exercise it directly so the dead-code lint fires until
+// then. Remove this allow when the hybrid scoring wire-up arrives.
+#[allow(dead_code)]
+pub(crate) fn fetch_semantic_candidates(
+    conn: &Connection,
+    filters: &Filters,
+    query_vector: &[f32],
+    top_k: u32,
+) -> Result<Vec<(i64, f32)>, QueryError> {
+    if query_vector.len() != crate::embed::EMBED_DIM {
+        return Err(QueryError::InvalidFilter {
+            detail: format!(
+                "query_vector has {} dims; expected {}",
+                query_vector.len(),
+                crate::embed::EMBED_DIM
+            ),
+        });
+    }
+
+    let (filter_sql, filter_params) = build_filter_sql(filters);
+
+    let sql = if filter_sql.is_empty() {
+        "SELECT record_rowid, distance \
+           FROM record_embeddings \
+          WHERE embedding MATCH vec_f32(?1) AND k = ?2"
+            .to_string()
+    } else {
+        format!(
+            "SELECT record_rowid, distance \
+               FROM record_embeddings \
+              WHERE record_rowid IN (SELECT rowid FROM records WHERE 1=1 {filter_sql}) \
+                AND embedding MATCH vec_f32(?1) \
+                AND k = ?2"
+        )
+    };
+
+    let blob = crate::embed::f32_slice_to_le_bytes(query_vector);
+    let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(2 + filter_params.len());
+    params.push(rusqlite::types::Value::Blob(blob));
+    params.push(rusqlite::types::Value::Integer(i64::from(top_k)));
+    for p in filter_params {
+        params.push(p);
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(QueryError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +516,103 @@ mod tests {
         let res = search(&conn, &SearchOpts::new("concurrency")).unwrap();
         assert!(!res.meta.policy_warnings.is_empty());
         assert_eq!(res.meta.trust_summary.unsigned, 1);
+    }
+
+    fn mostly_ones() -> Vec<f32> {
+        let mut v = vec![0.0_f32; crate::embed::EMBED_DIM];
+        for slot in v.iter_mut().take(64) {
+            *slot = 1.0;
+        }
+        v
+    }
+
+    fn mostly_zeros() -> Vec<f32> {
+        let mut v = vec![0.0_f32; crate::embed::EMBED_DIM];
+        v[0] = 0.001;
+        v
+    }
+
+    fn insert_record_with_vector(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        vec: &[f32],
+        project_id: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, confidence, outcome, created, updated, content_hash, index_hash, \
+             crypto_result, indexed_at) VALUES \
+             (?1, 'local', ?2, 'decision', ?3, '', '[]', '', 'manual', 'medium', 'working', \
+              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', 'no-signature', \
+              '2026-04-29T00:00:00Z')",
+            rusqlite::params![id, project_id, title],
+        )
+        .unwrap();
+        let rowid: i64 = conn
+            .query_row(
+                "SELECT rowid FROM records WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let blob = crate::embed::f32_slice_to_le_bytes(vec);
+        conn.execute(
+            "INSERT INTO record_embeddings (record_rowid, embedding) VALUES (?1, vec_f32(?2))",
+            rusqlite::params![rowid, blob.as_slice()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn semantic_branch_orders_by_distance() {
+        let (_dir, conn) = open_test_db();
+        insert_record_with_vector(&conn, "a", "title-a", &mostly_ones(), "p");
+        insert_record_with_vector(&conn, "b", "title-b", &mostly_zeros(), "p");
+
+        let query_vec = mostly_ones();
+        let filters = Filters::default();
+        let candidates =
+            fetch_semantic_candidates(&conn, &filters, &query_vec, 10).expect("semantic query");
+        assert_eq!(candidates.len(), 2);
+
+        let ids: Vec<String> = candidates
+            .iter()
+            .map(|(rowid, _)| {
+                conn.query_row(
+                    "SELECT id FROM records WHERE rowid = ?1",
+                    rusqlite::params![rowid],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(ids[0], "a");
+        assert_eq!(ids[1], "b");
+    }
+
+    #[test]
+    fn semantic_branch_honors_filter_pushdown() {
+        let (_dir, conn) = open_test_db();
+        insert_record_with_vector(&conn, "p1-a", "title-a", &mostly_ones(), "p");
+        insert_record_with_vector(&conn, "p2-a", "title-a", &mostly_ones(), "p2");
+
+        let query_vec = mostly_ones();
+        let filters = Filters {
+            project_id: Some("p2".into()),
+            ..Default::default()
+        };
+        let candidates =
+            fetch_semantic_candidates(&conn, &filters, &query_vec, 10).expect("semantic query");
+        assert_eq!(candidates.len(), 1);
+        let rowid = candidates[0].0;
+        let pid: String = conn
+            .query_row(
+                "SELECT project_id FROM records WHERE rowid = ?1",
+                rusqlite::params![rowid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid, "p2");
     }
 }
