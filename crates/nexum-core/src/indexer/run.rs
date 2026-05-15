@@ -577,14 +577,7 @@ where
         } else {
             None
         };
-        upsert(
-            tx,
-            source,
-            &record,
-            &new_index_hash,
-            embedding.as_deref(),
-            content_changed,
-        )?;
+        upsert(tx, source, &record, &new_index_hash, embedding.as_deref())?;
         per_source.upserts += 1;
         outcome.upserts += 1;
         reset_miss_for_id(tx, source, id)?;
@@ -695,7 +688,6 @@ fn upsert(
     r: &UnifiedRecord,
     index_hash: &str,
     embedding: Option<&[f32]>,
-    content_changed: bool,
 ) -> Result<(), IndexerError> {
     let row = UpsertRow::from_record(r);
 
@@ -705,13 +697,19 @@ fn upsert(
     // then re-INSERT the embedding when present). The records UPDATE /
     // INSERT statements fire the FTS triggers.
     //
-    // When `content_changed` is false, the embed input (title + summary +
-    // body) is identical to what we already stored — the upstream caller
-    // skipped recomputing the vector and passed `embedding = None`. In
-    // that case the existing `record_embeddings` row is already correct,
-    // so we leave it in place rather than deleting and re-inserting an
-    // identical vector. Only a content change invalidates the stored
-    // embedding.
+    // Embedding replacement is gated on `embedding.is_some()`. The cases:
+    //   1. `content_changed = false` → caller skipped the recompute and the
+    //      existing vec0 row is already correct; leave it in place.
+    //   2. `content_changed = true && embedding = None` → either embeddings
+    //      are disabled (embedder was None) or the live embed call returned
+    //      Err. In the disabled case there is nothing to replace anyway. In
+    //      the failed-embed case we keep the prior (now-stale-but-present)
+    //      vector rather than stripping it; a re-index after the transient
+    //      failure clears will refresh it. Stale > missing — the row still
+    //      answers k-NN; a missing row drops the record from the semantic
+    //      branch entirely until another content edit re-triggers embed.
+    //   3. `content_changed = true && embedding = Some(_)` → DELETE the old
+    //      row before re-INSERT, per the vec0 ordering rule.
     let existing_rowid: Option<i64> = tx
         .query_row(
             "SELECT rowid FROM records WHERE source = ?1 AND project_id = ?2 AND id = ?3",
@@ -721,15 +719,15 @@ fn upsert(
         .optional()?;
 
     if let Some(rid) = existing_rowid {
-        if content_changed {
+        if let Some(vec) = embedding {
             tx.execute(
                 "DELETE FROM record_embeddings WHERE record_rowid = ?1",
                 params![rid],
             )?;
-        }
-        update_record(tx, r, index_hash, &row, rid)?;
-        if let Some(vec) = embedding {
+            update_record(tx, r, index_hash, &row, rid)?;
             insert_embedding(tx, rid, vec)?;
+        } else {
+            update_record(tx, r, index_hash, &row, rid)?;
         }
     } else {
         insert_record(tx, source, r, index_hash, &row)?;

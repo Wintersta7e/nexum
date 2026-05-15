@@ -19,6 +19,6 @@ pub use list::list;
 pub use recent::recent;
 pub use search::{SearchOpts, search};
 pub use types::{
-    Cursor, Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary, QueryError,
-    ResultSet, SearchResult,
+    Cursor, EmbedStatus, Filters, Meta, MetaSourceCounts, MetaTrustBasisSummary, MetaTrustSummary,
+    QueryError, ResultSet, SearchResult,
 };

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
 
 use super::policy::{PolicyOpts, apply as apply_policy};
-use super::types::{Filters, QueryError, ResultSet, SearchResult};
+use super::types::{EmbedStatus, Filters, QueryError, ResultSet, SearchResult};
 use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
 /// `search` options. Compose via `SearchOpts::new(query)` and fluent setters,
@@ -21,6 +21,11 @@ pub struct SearchOpts {
     /// once an embedder is wired. Currently always `false`.
     pub embed_pool_saturated: bool,
     pub saturation_wait_ms: u32,
+    /// Per-query disposition of the semantic ranking branch. Filled by the
+    /// api facade (`build_query_vector`); the search verb passes it through
+    /// to `_meta.embed_status` unchanged. Defaults to `Disabled` so unit
+    /// callers that don't go through the facade get the FTS-only shape.
+    pub embed_status: EmbedStatus,
     /// Multiplicative penalty applied to unsigned rows after RRF (and before
     /// the top-K cut). Defaults to `0.7` — match the historical hardcode that
     /// motivated this knob. The CLI/MCP facade overrides this with the
@@ -60,6 +65,7 @@ impl SearchOpts {
             top_k_semantic: 100,
             top_k_fts: 100,
             query_vector: None,
+            embed_status: EmbedStatus::Disabled,
         }
     }
 }
@@ -68,6 +74,13 @@ impl SearchOpts {
 /// 60; the value is intentionally not exposed as a knob — it makes the two
 /// branch contributions comparable without giving either a runaway tail.
 const K_RRF: f64 = 60.0;
+
+/// Scored fts-projected row triple used inside the scoring pipeline. The
+/// triple shape is unavoidable (the row, the projected trust state, and
+/// the fused score travel together through the post-policy step); the
+/// alias keeps the per-function return types under the strict-clippy
+/// `type-complexity` threshold.
+type ScoredRow = (FtsRow, ProjectedTrust, f64);
 
 /// Hybrid ranked search.
 ///
@@ -87,11 +100,11 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     // came back from FTS instead of re-hydrating it row-by-row.
     let fts_projected = fetch_and_project(conn, opts)?;
 
-    let scored: Vec<(FtsRow, ProjectedTrust, f64)> =
+    let (scored, vector_candidates): (Vec<ScoredRow>, u32) =
         if let Some(query_vector) = opts.query_vector.as_deref() {
             score_hybrid(conn, opts, fts_projected, query_vector)?
         } else {
-            score_fts_only(opts, fts_projected)
+            (score_fts_only(opts, fts_projected), 0)
         };
 
     // Centralized warn/hide/strict policy filter. The closure plucks the
@@ -123,6 +136,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
         opts.trust_policy,
         opts.embed_pool_saturated,
         opts.saturation_wait_ms,
+        opts.embed_status,
+        vector_candidates,
     )?;
     meta.apply_policy_outcome(&outcome);
 
@@ -140,8 +155,8 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
 fn score_fts_only(
     opts: &SearchOpts,
     projected_rows: Vec<(FtsRow, ProjectedTrust)>,
-) -> Vec<(FtsRow, ProjectedTrust, f64)> {
-    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
+) -> Vec<ScoredRow> {
+    let mut scored: Vec<ScoredRow> = projected_rows
         .into_iter()
         .enumerate()
         .map(|(idx, (r, p))| {
@@ -170,7 +185,7 @@ fn score_hybrid(
     opts: &SearchOpts,
     fts_projected: Vec<(FtsRow, ProjectedTrust)>,
     query_vector: &[f32],
-) -> Result<Vec<(FtsRow, ProjectedTrust, f64)>, QueryError> {
+) -> Result<(Vec<ScoredRow>, u32), QueryError> {
     let fts_ranked: Vec<(i64, f64)> = fts_projected
         .iter()
         .map(|(row, _)| (row.rowid, 0.0))
@@ -180,6 +195,7 @@ fn score_hybrid(
             .into_iter()
             .map(|(rowid, distance)| (rowid, f64::from(distance)))
             .collect();
+    let vector_candidates = u32::try_from(vec_ranked.len()).unwrap_or(u32::MAX);
 
     let fused = rrf_fuse(&vec_ranked, &fts_ranked, K_RRF);
 
@@ -208,7 +224,7 @@ fn score_hybrid(
             .map(|(r, p)| (r.rowid, (r, p)))
             .collect();
 
-    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = Vec::with_capacity(fused.len());
+    let mut scored: Vec<ScoredRow> = Vec::with_capacity(fused.len());
     for (rowid, fused_score) in fused {
         let (row, projected) = if let Some(pair) = fts_by_rowid.remove(&rowid) {
             pair
@@ -228,7 +244,7 @@ fn score_hybrid(
         scored.push((row, projected, score));
     }
     scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(scored)
+    Ok((scored, vector_candidates))
 }
 
 /// Convenience: a row is "verified" when its projected signature status is

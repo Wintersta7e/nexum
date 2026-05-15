@@ -13,7 +13,7 @@ use crate::{
     },
     paths::Paths,
     query::{
-        Filters, GetOpts, ResultSet, SearchOpts, SessionLookup,
+        EmbedStatus, Filters, GetOpts, ResultSet, SearchOpts, SessionLookup,
         by_session::by_session as query_by_session, get::get as query_get,
         list::list as query_list, recent::recent as query_recent, search::search as query_search,
     },
@@ -98,7 +98,7 @@ fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
 /// on materializer rebuild failure, routed through `QueryError::Trust`).
 pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
     let conn = open_for_query(paths)?;
-    let (query_vector, embed_pool_saturated) = build_query_vector(cfg, &opts.query);
+    let (query_vector, embed_status) = build_query_vector(cfg, &opts.query);
     let mut effective_opts = opts.clone();
     effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
     // Stricter prevails: per-call flag wins if set, config default applies
@@ -108,54 +108,65 @@ pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSe
     effective_opts.query_vector = query_vector;
     effective_opts.top_k_semantic = cfg.embed.top_k_semantic;
     effective_opts.top_k_fts = cfg.embed.top_k_fts;
-    // Wanted-but-didn't-get-it signal. `or` so an explicit caller flag still
-    // wins, and the field surfaces through `build_meta_search` into the
-    // response envelope.
-    effective_opts.embed_pool_saturated = opts.embed_pool_saturated || embed_pool_saturated;
+    effective_opts.embed_status = embed_status;
+    // Wanted-but-didn't-get-it signal. The bool is kept for back-compat so
+    // existing JSON consumers see the same shape; `embed_status` carries the
+    // richer per-variant signal. The bool fires for every degraded variant
+    // (Saturated / ModelMissing / EmbedFailed) — matching the pre-split
+    // semantics — and stays false for Ok and Disabled. `or` so an explicit
+    // caller flag still wins.
+    let degraded = matches!(
+        embed_status,
+        EmbedStatus::Saturated | EmbedStatus::ModelMissing | EmbedStatus::EmbedFailed,
+    );
+    effective_opts.embed_pool_saturated = opts.embed_pool_saturated || degraded;
     Ok(query_search(&conn, &effective_opts)?)
 }
 
 /// Build the per-query embedding for the facade-side search verb.
 ///
-/// Returns `(query_vector, embed_pool_saturated)` where the bool means
-/// "the caller asked for semantic ranking but we couldn't deliver it".
+/// Returns `(query_vector, embed_status)`. The status enum drives the
+/// `_meta.embed_status` channel so agents can distinguish transient
+/// saturation from an uninstalled model from a runtime embed failure
+/// instead of branching on a single overloaded boolean.
 ///
-/// - `cfg.embed.enabled == false` → `(None, false)`: no embedder
-///   constructed, the FTS-only path runs unchanged.
-/// - `cfg.embed.enabled == true` but `try_load_from_config` returned
-///   `Ok(None)` (model not installed) → `(None, true)`: degrade silently,
-///   surface the wanted-but-missing signal through `meta`.
-/// - `try_load_from_config` errored → log warn, return `(None, true)`.
+/// - `cfg.embed.enabled == false` → `(None, Disabled)`: no embedder
+///   constructed; the FTS-only path runs unchanged.
+/// - `cfg.embed.enabled == true` but the cached load returned
+///   `Ok(None)` (model not installed) → `(None, ModelMissing)`.
+/// - Cached load errored → log warn, return `(None, EmbedFailed)`.
 /// - Load succeeded but `Embedder::embed` errored → log warn, return
-///   `(None, true)`.
-/// - Load + embed both succeeded → `(Some(vec), false)`.
+///   `(None, EmbedFailed)`.
+/// - Load + embed both succeeded → `(Some(vec), Ok)`.
 ///
 /// Logs go to stderr via `tracing` so MCP stdio framing stays clean.
-fn build_query_vector(cfg: &Config, query: &str) -> (Option<Vec<f32>>, bool) {
+/// The load path is cached process-wide; see
+/// [`crate::embed::try_load_from_config_cached`] for the cache invariants.
+fn build_query_vector(cfg: &Config, query: &str) -> (Option<Vec<f32>>, EmbedStatus) {
     if !cfg.embed.enabled {
-        return (None, false);
+        return (None, EmbedStatus::Disabled);
     }
-    let embedder = match crate::embed::try_load_from_config(cfg) {
+    let embedder = match crate::embed::try_load_from_config_cached(cfg) {
         Ok(Some(e)) => e,
-        Ok(None) => return (None, true),
+        Ok(None) => return (None, EmbedStatus::ModelMissing),
         Err(err) => {
             tracing::warn!(
                 target: "nexum::embed",
                 ?err,
                 "failed to load embedder for query; degrading to FTS-only",
             );
-            return (None, true);
+            return (None, EmbedStatus::EmbedFailed);
         }
     };
     match embedder.embed(query) {
-        Ok(v) => (Some(v), false),
+        Ok(v) => (Some(v), EmbedStatus::Ok),
         Err(err) => {
             tracing::warn!(
                 target: "nexum::embed",
                 ?err,
                 "failed to embed query text; degrading to FTS-only",
             );
-            (None, true)
+            (None, EmbedStatus::EmbedFailed)
         }
     }
 }

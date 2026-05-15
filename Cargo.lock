@@ -1567,6 +1567,7 @@ dependencies = [
  "ssh-key",
  "tempfile",
  "toml",
+ "tracing-subscriber",
  "uuid",
 ]
 
