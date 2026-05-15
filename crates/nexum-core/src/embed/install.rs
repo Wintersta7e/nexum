@@ -14,6 +14,7 @@ use super::embedder::Embedder;
 use super::manifest::{BGE_M3_FILES, ManifestEntry};
 use super::reporter::Reporter;
 use super::types::{EMBED_DIM, EmbedError};
+use crate::config::Config;
 
 /// Coalesce byte-progress callbacks to one per ~64 KiB of read body
 /// (matching the `Reporter::bytes` doc contract). Without debouncing the
@@ -47,6 +48,19 @@ pub fn download_bge_m3(
     model_base_url: &str,
     reporter: &mut dyn Reporter,
 ) -> Result<InstallReport, EmbedError> {
+    download_with_manifest(models_dir, model_base_url, BGE_M3_FILES, reporter)
+}
+
+/// Manifest-parameterized variant of [`download_bge_m3`]. The public
+/// entry point delegates to this with the pinned `BGE_M3_FILES`;
+/// integration tests pass a smaller fixture manifest so a stub HTTP
+/// server can serve tiny payloads with matching SHA256s.
+fn download_with_manifest(
+    models_dir: &Path,
+    model_base_url: &str,
+    manifest: &[ManifestEntry],
+    reporter: &mut dyn Reporter,
+) -> Result<InstallReport, EmbedError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
@@ -55,12 +69,18 @@ pub fn download_bge_m3(
             path: models_dir.to_owned(),
             source: e,
         })?;
-    runtime.block_on(download_async(models_dir, model_base_url, reporter))
+    runtime.block_on(download_async(
+        models_dir,
+        model_base_url,
+        manifest,
+        reporter,
+    ))
 }
 
 async fn download_async(
     models_dir: &Path,
     model_base_url: &str,
+    manifest: &[ManifestEntry],
     reporter: &mut dyn Reporter,
 ) -> Result<InstallReport, EmbedError> {
     let bge_dir = models_dir.join("bge-m3");
@@ -80,7 +100,9 @@ async fn download_async(
         })?;
 
     let mut downloaded: u64 = 0;
-    for entry in BGE_M3_FILES {
+    let mut total_bytes: u64 = 0;
+    for entry in manifest {
+        total_bytes += entry.size;
         let url = format!("{base}/{}", entry.name);
         let dest = bge_dir.join(entry.name);
         reporter.progress(&format!(
@@ -94,7 +116,7 @@ async fn download_async(
 
     Ok(InstallReport {
         downloaded,
-        total_bytes: super::manifest::bge_m3_total_bytes(),
+        total_bytes,
         smoke_test_ms: 0,
     })
 }
@@ -198,6 +220,61 @@ pub fn verify_and_smoke(
         reporter,
         default_redownload(model_base_url),
     )
+}
+
+/// One-shot install: download → verify → smoke-test. Returns the
+/// updated [`Config`] with `embed.enabled = true` and
+/// `embed.model_path` set; the caller writes the config back to disk.
+///
+/// # Errors
+///
+/// Any `EmbedError` raised by the download, verify, or smoke legs.
+pub fn install_bge_m3(
+    models_dir: &Path,
+    cfg: &Config,
+    reporter: &mut dyn Reporter,
+) -> Result<(InstallReport, Config), EmbedError> {
+    install_bge_m3_with(models_dir, cfg, reporter, BGE_M3_FILES, false)
+}
+
+/// Test-friendly variant of [`install_bge_m3`]. Accepts an explicit
+/// manifest slice (so integration tests can stub small fixture files
+/// with matching SHA256s) and a `skip_smoke` toggle (so tests do not
+/// need a real ONNX export on disk). Production callers always go
+/// through [`install_bge_m3`].
+///
+/// # Errors
+///
+/// Same as [`install_bge_m3`].
+#[doc(hidden)]
+pub fn install_bge_m3_with(
+    models_dir: &Path,
+    cfg: &Config,
+    reporter: &mut dyn Reporter,
+    manifest: &[ManifestEntry],
+    skip_smoke: bool,
+) -> Result<(InstallReport, Config), EmbedError> {
+    reporter.progress("starting bge-m3 install");
+    let mut report =
+        download_with_manifest(models_dir, &cfg.embed.model_base_url, manifest, reporter)?;
+    reporter.progress("download complete; verifying hashes");
+    verify_manifest(
+        models_dir,
+        manifest,
+        reporter,
+        default_redownload(&cfg.embed.model_base_url),
+    )?;
+    if skip_smoke {
+        reporter.progress("smoke test skipped");
+    } else {
+        run_smoke(models_dir, &mut report, reporter)?;
+    }
+
+    let model_path = models_dir.join("bge-m3").join("model.onnx");
+    let mut next = cfg.clone();
+    next.embed.enabled = true;
+    next.embed.model_path = model_path.to_string_lossy().into_owned();
+    Ok((report, next))
 }
 
 /// Test-friendly variant of [`verify_and_smoke`] that accepts a manifest

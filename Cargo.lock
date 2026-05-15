@@ -1563,6 +1563,7 @@ dependencies = [
  "nexum-core",
  "rusqlite",
  "serde_json",
+ "sha2 0.11.0",
  "ssh-key",
  "tempfile",
  "toml",

@@ -7,5 +7,5 @@
 pub mod io;
 pub mod types;
 
-pub use io::{ConfigError, load, write_seed};
+pub use io::{ConfigError, load, save, write_seed};
 pub use types::Config;
