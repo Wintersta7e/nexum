@@ -26,7 +26,7 @@ use crate::{
         local::LocalAdapter,
     },
     config::types::Config,
-    embed::{EmbedError, Embedder},
+    embed::{Embedder, f32_slice_to_le_bytes},
     index::tag_normalization::normalize_tags_for_fts,
     indexer::{
         db::IndexerError,
@@ -266,30 +266,10 @@ fn run_inner(
 /// Construct the per-pass `Embedder`. Returns `Ok(None)` when embeddings are
 /// disabled in config, or when the configured model isn't installed yet — the
 /// indexer logs a warning and proceeds without writing to `record_embeddings`.
-/// Any other load failure surfaces as `IndexerError::Embed`.
+/// Any other load failure surfaces as `IndexerError::Embed` via the `#[from]`
+/// conversion on `IndexerError`.
 fn build_embedder_for_pass(cfg: &Config) -> Result<Option<Embedder>, IndexerError> {
-    if !cfg.embed.enabled {
-        return Ok(None);
-    }
-    let model_path = std::path::Path::new(&cfg.embed.model_path);
-    let model_dir = model_path.parent().ok_or_else(|| {
-        IndexerError::Config(format!(
-            "embed.model_path '{}' is not under a directory",
-            cfg.embed.model_path
-        ))
-    })?;
-    match Embedder::load(model_dir) {
-        Ok(e) => Ok(Some(e)),
-        Err(EmbedError::ModelNotInstalled { reason }) => {
-            warn!(
-                target: "nexum::indexer",
-                %reason,
-                "embed.enabled=true but model not installed; indexing without embeddings",
-            );
-            Ok(None)
-        }
-        Err(other) => Err(IndexerError::Embed(other)),
-    }
+    Ok(crate::embed::try_load_from_config(cfg)?)
 }
 
 fn build_cc_adapter(cfg: &Config) -> CcAdapter {
@@ -568,31 +548,43 @@ where
             reset_miss_for_id(tx, source, id)?;
             continue;
         }
-        // Compute the dense embedding before opening the upsert SQL block.
-        // Embedding failure is non-fatal: log at warn and persist the record
-        // without a vec0 row — FTS still indexes it, and a later
+        // Compute the dense embedding before opening the upsert SQL block —
+        // but only when `content_hash` (title + summary + body) actually
+        // changed. A tag- or status-only edit bumps `index_hash` without
+        // touching the embed input, so the previously-stored vector is
+        // byte-identical to what we'd recompute; recomputing wastes CPU/GPU
+        // inference. Embedding failure is non-fatal: log at warn and persist
+        // the record without a vec0 row — FTS still indexes it, and a later
         // re-embedding pass can fill in the gap.
-        let embedding: Option<Vec<f32>> = embedder.and_then(|e| {
-            let input = format!(
-                "{}\n{}\n{}",
-                record.title,
-                record.summary.as_deref().unwrap_or(""),
-                record.body
-            );
-            match e.embed(&input) {
-                Ok(v) => Some(v),
-                Err(err) => {
-                    warn!(
-                        target: "nexum::indexer",
-                        ?err,
-                        ?id,
-                        "embed failed; persisting record without vector",
-                    );
-                    None
+        let content_changed = cached_hashes
+            .is_none_or(|(cached_content, _)| cached_content != candidate_content_hash);
+        let embedding: Option<Vec<f32>> = if content_changed {
+            embedder.and_then(|e| {
+                let input = record.embed_input();
+                match e.embed(&input) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        warn!(
+                            target: "nexum::indexer",
+                            ?err,
+                            ?id,
+                            "embed failed; persisting record without vector",
+                        );
+                        None
+                    }
                 }
-            }
-        });
-        upsert(tx, source, &record, &new_index_hash, embedding.as_deref())?;
+            })
+        } else {
+            None
+        };
+        upsert(
+            tx,
+            source,
+            &record,
+            &new_index_hash,
+            embedding.as_deref(),
+            content_changed,
+        )?;
         per_source.upserts += 1;
         outcome.upserts += 1;
         reset_miss_for_id(tx, source, id)?;
@@ -703,6 +695,7 @@ fn upsert(
     r: &UnifiedRecord,
     index_hash: &str,
     embedding: Option<&[f32]>,
+    content_changed: bool,
 ) -> Result<(), IndexerError> {
     let row = UpsertRow::from_record(r);
 
@@ -711,6 +704,14 @@ fn upsert(
     // UPDATE path (DELETE the embedding row first, then UPDATE the record,
     // then re-INSERT the embedding when present). The records UPDATE /
     // INSERT statements fire the FTS triggers.
+    //
+    // When `content_changed` is false, the embed input (title + summary +
+    // body) is identical to what we already stored — the upstream caller
+    // skipped recomputing the vector and passed `embedding = None`. In
+    // that case the existing `record_embeddings` row is already correct,
+    // so we leave it in place rather than deleting and re-inserting an
+    // identical vector. Only a content change invalidates the stored
+    // embedding.
     let existing_rowid: Option<i64> = tx
         .query_row(
             "SELECT rowid FROM records WHERE source = ?1 AND project_id = ?2 AND id = ?3",
@@ -720,10 +721,12 @@ fn upsert(
         .optional()?;
 
     if let Some(rid) = existing_rowid {
-        tx.execute(
-            "DELETE FROM record_embeddings WHERE record_rowid = ?1",
-            params![rid],
-        )?;
+        if content_changed {
+            tx.execute(
+                "DELETE FROM record_embeddings WHERE record_rowid = ?1",
+                params![rid],
+            )?;
+        }
         update_record(tx, r, index_hash, &row, rid)?;
         if let Some(vec) = embedding {
             insert_embedding(tx, rid, vec)?;
@@ -752,7 +755,7 @@ fn insert_embedding(
     record_rowid: i64,
     embedding: &[f32],
 ) -> Result<(), IndexerError> {
-    let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let bytes = f32_slice_to_le_bytes(embedding);
     tx.execute(
         "INSERT INTO record_embeddings (record_rowid, embedding) VALUES (?1, vec_f32(?2))",
         params![record_rowid, bytes.as_slice()],

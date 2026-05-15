@@ -39,6 +39,39 @@ fn embed_disabled_keeps_vec0_empty() {
 }
 
 #[test]
+fn embed_disabled_with_unchanged_content_skips_recompute() {
+    // Embed disabled: the indexer never computes embeddings, so a
+    // tag-only edit on the second pass must remain a no-op on the
+    // `record_embeddings` table (which stays empty). This mirrors the
+    // `embed_disabled_keeps_vec0_empty` test but adds a content-unchanged
+    // upsert step (overwriting the YAML with identical content_hash for
+    // the same id) to assert the skip path is correctness-preserving
+    // even when nothing changed.
+    let home = NexumTestHome::new().unwrap();
+    let paths = home.paths();
+    let nb = home.path().join("notebook.git");
+    std::fs::create_dir_all(&nb).unwrap();
+    write_local_yaml(&nb, "decisions", "rec0", "body 0");
+
+    let cfg = test_cfg_local_only();
+    assert!(!cfg.embed.enabled);
+
+    let mut conn = open_or_create(&paths.index_db).unwrap();
+    let first = indexer_run(&mut conn, &cfg, &paths).unwrap();
+    assert_eq!(first.upserts, 1);
+
+    // Re-run with the same on-disk content: the dual-hash skip elides the
+    // upsert entirely, and record_embeddings remains empty.
+    let second = indexer_run(&mut conn, &cfg, &paths).unwrap();
+    assert_eq!(second.upserts, 0, "unchanged content_hash skips upsert");
+
+    let vec_count: i64 = conn
+        .query_row("SELECT count(*) FROM record_embeddings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(vec_count, 0);
+}
+
+#[test]
 #[ignore = "requires bge-m3 model installed; gated by NEXUM_E2E_EMBED env"]
 fn each_upserted_record_has_a_vec0_row() {
     if std::env::var_os("NEXUM_E2E_EMBED").is_none() {

@@ -767,6 +767,22 @@ pub struct UnifiedRecord {
     pub content_hash: ContentHash,
 }
 
+impl UnifiedRecord {
+    /// The text used as input to the embedding model: title, then summary
+    /// (empty if absent), then body, joined with newlines. This is the
+    /// published embedding input format; any re-embed path must call this
+    /// to stay consistent with index-time embeddings.
+    #[must_use]
+    pub fn embed_input(&self) -> String {
+        format!(
+            "{}\n{}\n{}",
+            self.title,
+            self.summary.as_deref().unwrap_or(""),
+            self.body
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
