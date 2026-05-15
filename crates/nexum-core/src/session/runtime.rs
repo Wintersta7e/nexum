@@ -12,6 +12,8 @@
 //! or a printed message: exit codes and stdout are CLI concerns, and the
 //! MCP server must keep stdout clean for the JSON-RPC stream.
 
+use std::path::Path;
+
 use crate::api::error::{ErrorEnvelope, Remediation, error_codes};
 use crate::config::io::load as load_config;
 use crate::config::types::Config;
@@ -56,13 +58,29 @@ pub fn resolve_runtime() -> Result<(Paths, Config), ErrorEnvelope> {
     resolve_from(paths)
 }
 
-/// Run the pre-check + load-config sequence against an already-resolved
-/// [`Paths`]. Returns the same envelope shapes as [`resolve_runtime`] for
-/// the `pre_check` and `load_config` failure points.
+/// Run the pre-check + load-config sequence against an explicit nexum home.
 ///
-/// Split from [`resolve_runtime`] so callers can supply a `Paths` directly
-/// instead of resolving it from the process environment — the unit tests
-/// rely on this to run hermetically.
+/// Like [`resolve_runtime`] but skips `Paths::resolve` — the caller supplies
+/// the home root directly. Useful where the process-global `NEXUM_HOME`
+/// env var is the wrong lever: integration test harnesses and embedded
+/// entry points that already know which home to use without env mutation.
+///
+/// Returns the same envelope shapes as [`resolve_runtime`] for the
+/// `pre_check` and `load_config` failure points. Cannot produce a
+/// `paths_resolve` envelope — that branch is unreachable without the
+/// `Paths::resolve` step.
+///
+/// # Errors
+///
+/// Returns an [`ErrorEnvelope`] for a `pre_check` or `load_config` failure.
+pub fn resolve_runtime_for(home: &Path) -> Result<(Paths, Config), ErrorEnvelope> {
+    resolve_from(Paths::with_home(home.to_path_buf()))
+}
+
+/// Shared implementation: run the pre-check + load-config sequence against
+/// an already-built [`Paths`]. Used by [`resolve_runtime`] (which resolves
+/// the home from the process environment) and [`resolve_runtime_for`]
+/// (which takes the home as an argument).
 fn resolve_from(paths: Paths) -> Result<(Paths, Config), ErrorEnvelope> {
     pre_check(&paths.home).map_err(|e| match e {
         StartupError::Trust(TrustError::ReanchorPending { message }) => ErrorEnvelope {
@@ -109,11 +127,9 @@ mod tests {
     fn missing_config_yields_not_initialized_with_load_config_phase() {
         // A bare temp dir as the nexum home: pre_check succeeds (no
         // .reanchor_pending sentinel), load_config fails because config.toml
-        // does not exist. Uses resolve_from directly to avoid mutating the
-        // process-global environment (nexum-core denies unsafe_code).
+        // does not exist.
         let dir = TempDir::new().unwrap();
-        let paths = Paths::with_home(dir.path().to_path_buf());
-        let env = resolve_from(paths).unwrap_err();
+        let env = resolve_runtime_for(dir.path()).unwrap_err();
         assert_eq!(env.error_code, error_codes::NOT_INITIALIZED);
         assert_eq!(env.context["phase"], "load_config");
         let r = env.remediation.unwrap();
@@ -135,8 +151,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let paths = Paths::with_home(dir.path().to_path_buf());
-        let env = resolve_from(paths).unwrap_err();
+        let env = resolve_runtime_for(dir.path()).unwrap_err();
         assert_eq!(env.error_code, error_codes::REANCHOR_PENDING);
         assert_eq!(env.context["phase"], "pre_check");
     }

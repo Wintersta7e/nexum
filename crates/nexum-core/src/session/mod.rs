@@ -8,5 +8,5 @@
 pub mod runtime;
 pub mod startup;
 
-pub use runtime::resolve_runtime;
+pub use runtime::{resolve_runtime, resolve_runtime_for};
 pub use startup::{StartupError, pre_check};

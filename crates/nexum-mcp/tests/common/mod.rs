@@ -355,7 +355,7 @@ impl McpTestHome {
             // Drive the genuine resolver against a home that does not exist;
             // it must fail, and the envelope it fails with is what the server
             // would carry in production.
-            let envelope = resolve_runtime_for(&self.home_root())
+            let envelope = nexum_core::session::resolve_runtime_for(&self.home_root())
                 .expect_err("resolve_runtime must fail for an un-initialized home");
             RuntimeState::Unavailable(envelope)
         }
@@ -400,30 +400,6 @@ fn init_and_resolve(root: &TempDir) -> (Paths, Config) {
 fn index(paths: &Paths, cfg: &Config) {
     nexum_core::api::index_run(paths, cfg)
         .expect("index pass must succeed in the MCP test harness");
-}
-
-/// Run the production runtime resolver against an arbitrary `.nexum` root.
-/// Used by the `unavailable` fixture to capture the real failure envelope.
-///
-/// `resolve_runtime` reads the home from the `NEXUM_HOME` env var (the same
-/// way the CLI and `nexum-mcp`'s `run()` do), so this sets it for the call.
-/// Tests using the `unavailable` fixture therefore accept that this env
-/// mutation is process-global; the resolver fails fast (before any disk
-/// read) for a path with no `.nexum` content, so there is no cross-test
-/// interference in practice.
-fn resolve_runtime_for(
-    home_root: &Path,
-) -> Result<(Paths, Config), nexum_core::api::error::ErrorEnvelope> {
-    // SAFETY: `set_var` is process-global. The `unavailable` fixture points
-    // at a path with no `.nexum` content, so the resolver fails fast on
-    // `Paths::resolve` / `load_config` before touching any shared disk
-    // state — no cross-test interference in practice. If a future test
-    // needs concurrent `unavailable` + `ready` fixtures, switch the resolver
-    // to a `&Path`-taking variant (a small `nexum-core` addition).
-    unsafe {
-        std::env::set_var("NEXUM_HOME", home_root);
-    }
-    nexum_core::session::resolve_runtime()
 }
 
 // ───── record seeding (mirrors the CLI / core test commons) ────────────────
