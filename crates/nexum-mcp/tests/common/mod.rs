@@ -131,6 +131,127 @@ impl McpTestHome {
         }
     }
 
+    /// Initialized but **not** indexed: `init::run` ran cleanly, so
+    /// `Paths` + `Config` resolve and the server starts `Ready`, but
+    /// `index.db` does not exist yet. Every record verb returns the
+    /// `NOT_INDEXED` envelope from the api layer.
+    pub fn ready_without_index() -> Self {
+        let root = TempDir::new().expect("tempdir for McpTestHome");
+        let (paths, cfg) = init_and_resolve(&root);
+        // Intentionally no `index(&paths, &cfg)` — the index DB stays absent.
+        Self {
+            root,
+            paths: Some(paths),
+            cfg: Some(cfg),
+        }
+    }
+
+    /// Initialized + indexed with two records sharing the bare `id`
+    /// but living under different `(source, project_id)` keys. A bare
+    /// `get` cannot disambiguate, so the verb returns `AMBIGUOUS_KEY`
+    /// with both fully-qualified candidates in `context.matches`.
+    ///
+    /// The fixture cannot use the local adapter for both rows: the
+    /// indexer's upsert pass keys candidates by bare `id` within a
+    /// source and last-write-wins on collision, so two YAML files with
+    /// the same `id` collapse to one row. The fixture instead inserts
+    /// the second row directly into `records` as a `cc-native` row,
+    /// mirroring how the `query::get` unit test
+    /// (`get_by_partial_key_with_source_only_narrows`) builds its own
+    /// ambiguity fixture. The first row lands through the normal
+    /// `init` + `index` path; the second is appended with a minimal
+    /// raw INSERT against the same schema.
+    pub fn ready_with_two_records_same_id(id: &str) -> Self {
+        let root = TempDir::new().expect("tempdir for McpTestHome");
+        let (paths, cfg) = init_and_resolve(&root);
+        // Row 1 — the local-adapter path.
+        write_local_yaml(&paths.notebook_git, "decisions", id, "first body");
+        index(&paths, &cfg);
+        // Row 2 — append a `cc-native` row carrying the same bare id
+        // but a distinct `(source, project_id)`. The schema CHECK
+        // constraint on `source` accepts `cc-native`; the column set
+        // mirrors the indexer's own upsert insert.
+        // `open_existing` opens read-only; the fixture writes a row, so
+        // `open_or_create` (read-write) is the right opener.
+        let conn = nexum_core::indexer::db::open_or_create(&paths.index_db)
+            .expect("open index db for ambiguity row insert");
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, \
+             tags, tags_fts, agent, confidence, outcome, session_refs, files, \
+             commits, created, updated, content_hash, index_hash, crypto_result, \
+             indexed_at) VALUES \
+             (?1, 'cc-native', 'second-project', 'decision', 'second title', \
+              'second body', '[]', '', 'claude-code', 'medium', 'working', \
+              '[]', '[]', '[]', \
+              '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h2', 'ih2', \
+              'no-signature', '2026-04-29T00:01:00Z')",
+            [id],
+        )
+        .expect("insert ambiguity row into index db");
+        // Sanity: confirm both rows are in the DB before handing the
+        // fixture back. If the count is < 2 the test will fail with a
+        // far less informative `NOT_FOUND`; the eprintln keeps the
+        // diagnostic local to the fixture.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM records WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .expect("count rows with the shared id");
+        assert_eq!(
+            count, 2,
+            "ambiguity fixture must seed exactly two rows with id `{id}`"
+        );
+        drop(conn);
+        Self {
+            root,
+            paths: Some(paths),
+            cfg: Some(cfg),
+        }
+    }
+
+    /// Initialized + indexed under the default `unsigned_default =
+    /// "warn-but-show"` policy with one unsigned record at the given
+    /// `id`. Exercises the no-silent-unsigned invariant (every
+    /// non-verified row carries a canonical warning) and the
+    /// `_meta.policy_warnings` channel (non-empty when any unsigned row
+    /// is returned).
+    pub fn ready_unsigned_under_warn(id: &str) -> Self {
+        let root = TempDir::new().expect("tempdir for McpTestHome");
+        let (paths, cfg) = init_and_resolve(&root);
+        // Default policy is `warn-but-show`; no override needed.
+        write_local_yaml(&paths.notebook_git, "decisions", id, "unsigned body");
+        index(&paths, &cfg);
+        Self {
+            root,
+            paths: Some(paths),
+            cfg: Some(cfg),
+        }
+    }
+
+    /// Initialized + indexed under `warn-but-show` with at least one
+    /// unsigned record. Tests use `require_signed = true` to assert
+    /// the stricter override filters every non-verified row out of the
+    /// result set, independent of the permissive policy.
+    ///
+    /// A "verified + unsigned mix" would require an SSH-signed git
+    /// commit, which the test harness does not stand up. The minimal
+    /// assertion the simpler corpus supports — every returned row has
+    /// `signature_status = "verified"` — still proves the stricter
+    /// override fires.
+    pub fn ready_require_signed_mix() -> Self {
+        let root = TempDir::new().expect("tempdir for McpTestHome");
+        let (paths, cfg) = init_and_resolve(&root);
+        // Two unsigned rows; `require_signed = true` must drop both.
+        write_local_yaml(&paths.notebook_git, "decisions", "u1", "unsigned one");
+        write_local_yaml(&paths.notebook_git, "decisions", "u2", "unsigned two");
+        index(&paths, &cfg);
+        Self {
+            root,
+            paths: Some(paths),
+            cfg: Some(cfg),
+        }
+    }
+
     /// Initialized + indexed home with `unsigned_default = "hide"` and one
     /// unsigned record at the given id. Exercises the `HiddenByPolicy` arm
     /// of `get` and the `include_unsigned` override path.
@@ -172,7 +293,8 @@ impl McpTestHome {
         // can resolve its path from `cfg.projects`.
         let mut entry = toml::map::Map::new();
         entry.insert("path".into(), toml::Value::String("/example/projx".into()));
-        cfg.projects.insert("projx".into(), toml::Value::Table(entry));
+        cfg.projects
+            .insert("projx".into(), toml::Value::Table(entry));
 
         // One record under `name:projx`.
         write_local_yaml_with_project_id(

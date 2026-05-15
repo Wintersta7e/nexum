@@ -486,10 +486,8 @@ impl NexumServer {
             }
         };
 
-        let result = tokio::task::spawn_blocking(move || {
-            nexum_core::api::list_projects(&paths, &cfg)
-        })
-        .await;
+        let result =
+            tokio::task::spawn_blocking(move || nexum_core::api::list_projects(&paths, &cfg)).await;
 
         match result {
             Ok(Ok(listing)) => {
