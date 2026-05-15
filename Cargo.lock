@@ -1172,6 +1172,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "ssh-key",
  "tempfile",
  "tokio",
  "tracing",

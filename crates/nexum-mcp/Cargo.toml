@@ -37,6 +37,9 @@ schemars = { workspace = true }
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
+# The harness generates an ephemeral ed25519 keypair to feed `init::run`,
+# mirroring the CLI / core test commons — no committed credentials.
+ssh-key = { workspace = true }
 
 [features]
 # The tool-catalog test (`tests/tool_list.rs`) asserts all six tools are
