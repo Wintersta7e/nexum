@@ -12,7 +12,8 @@
 //! and what `rmcp`'s `#[tool]` macro expects will drift.
 //!
 //! `RecentParams` lands first; the other tools' params follow with their
-//! handlers.
+//! handlers. `SearchParams`, `ListParams`, and `BySessionParams` follow the
+//! same conventions and ship with their handlers.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -40,9 +41,113 @@ fn default_recent_limit() -> u32 {
     10
 }
 
+// ───── search ──────────────────────────────────────────────────────────────
+
+/// Params for the `search` tool — FTS-ranked full-text search.
+// Suppressed until the `search` handler lands and constructs this in the same compile unit.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchParams {
+    /// Full-text query string. Required.
+    pub query: String,
+    /// Maximum results to return. Defaults to 5.
+    #[serde(default = "default_search_top_k")]
+    pub top_k: u32,
+    /// Restrict to one record type: `decision`, `recommendation`, `failure`,
+    /// or `untyped`. Omit for all types.
+    #[serde(default)]
+    pub record_type: Option<String>,
+    /// Restrict to one source adapter: `cc-native`, `codex-native`, or
+    /// `local`. Omit for all sources.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Minimum confidence to include: `high`, `medium`, or `low`.
+    /// Omit for all confidence levels.
+    #[serde(default)]
+    pub min_confidence: Option<String>,
+    /// Return only records carrying a verified signature.
+    #[serde(default)]
+    pub require_signed: bool,
+    /// Force strict-revocation checking on for this call.
+    #[serde(default)]
+    pub strict_revocation: bool,
+}
+
+#[allow(dead_code)]
+fn default_search_top_k() -> u32 {
+    5
+}
+
+// ───── list ────────────────────────────────────────────────────────────────
+
+/// Params for the `list` tool — filtered, paginated listing.
+// Suppressed until the `list` handler lands and constructs this in the same compile unit.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListParams {
+    /// Maximum rows to return. Defaults to 50.
+    #[serde(default = "default_list_limit")]
+    pub limit: u32,
+    /// Opaque pagination cursor from a previous result's `_meta.next_cursor`.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Restrict to one record type: `decision`, `recommendation`, `failure`,
+    /// or `untyped`. Omit for all types.
+    #[serde(default)]
+    pub record_type: Option<String>,
+    /// Restrict to one source adapter: `cc-native`, `codex-native`, or
+    /// `local`. Omit for all sources.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Return only records carrying a verified signature.
+    #[serde(default)]
+    pub require_signed: bool,
+    /// Force strict-revocation checking on for this call.
+    #[serde(default)]
+    pub strict_revocation: bool,
+}
+
+#[allow(dead_code)]
+fn default_list_limit() -> u32 {
+    50
+}
+
+// ───── by_session ──────────────────────────────────────────────────────────
+
+/// Params for the `by_session` tool — records associated with one session ref.
+///
+/// Exactly one of `cc_session_id`, `codex_rollout_path`, or
+/// `codex_thread_id` must be supplied. Zero or multiple refs produce an
+/// `invalid_params` protocol error at the handler level, not here (the JSON
+/// schema cannot express mutual exclusion, so deserialize accepts any
+/// combination and the handler enforces the arity).
+// Suppressed until the `by_session` handler lands and constructs this in the same compile unit.
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BySessionParams {
+    /// A Claude Code session UUID (e.g. `"01912c3a-..."`). Exactly one of the
+    /// three ref fields must be supplied.
+    #[serde(default)]
+    pub cc_session_id: Option<String>,
+    /// An absolute path to a Codex rollout directory. Exactly one of the three
+    /// ref fields must be supplied.
+    #[serde(default)]
+    pub codex_rollout_path: Option<String>,
+    /// A Codex thread identifier string. Exactly one of the three ref fields
+    /// must be supplied.
+    #[serde(default)]
+    pub codex_thread_id: Option<String>,
+    /// Return only records carrying a verified signature.
+    #[serde(default)]
+    pub require_signed: bool,
+    /// Force strict-revocation checking on for this call.
+    #[serde(default)]
+    pub strict_revocation: bool,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::RecentParams;
+    use super::{BySessionParams, ListParams, RecentParams, SearchParams};
 
     #[test]
     fn empty_object_deserializes_to_documented_defaults() {
@@ -53,6 +158,51 @@ mod tests {
         let params: RecentParams = serde_json::from_str("{}").unwrap();
         assert_eq!(params.limit, 10);
         assert_eq!(params.source, None);
+        assert!(!params.require_signed);
+        assert!(!params.strict_revocation);
+    }
+
+    #[test]
+    fn search_params_required_query_optional_rest() {
+        // Minimal call — only `query` supplied; all optional fields default.
+        let params: SearchParams = serde_json::from_str(r#"{"query":"jwt rotation"}"#).unwrap();
+        assert_eq!(params.query, "jwt rotation");
+        assert_eq!(params.top_k, 5, "default top_k");
+        assert_eq!(params.record_type, None);
+        assert_eq!(params.source, None);
+        assert_eq!(params.min_confidence, None);
+        assert!(!params.require_signed);
+        assert!(!params.strict_revocation);
+
+        // Missing `query` must fail — it has no default.
+        let result: Result<SearchParams, _> = serde_json::from_str("{}");
+        assert!(
+            result.is_err(),
+            "missing required `query` field must be Err"
+        );
+    }
+
+    #[test]
+    fn list_params_all_optional() {
+        // An empty object is a valid `list` call — all fields are optional.
+        let params: ListParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(params.limit, 50, "default limit");
+        assert_eq!(params.cursor, None);
+        assert_eq!(params.record_type, None);
+        assert_eq!(params.source, None);
+        assert!(!params.require_signed);
+        assert!(!params.strict_revocation);
+    }
+
+    #[test]
+    fn by_session_params_all_optional_at_deserialize_time() {
+        // `BySessionParams` intentionally accepts any combination of refs at
+        // deserialize time — the handler enforces the "exactly one" arity so
+        // that the error message can name the conflicting fields.
+        let params: BySessionParams = serde_json::from_str("{}").unwrap();
+        assert_eq!(params.cc_session_id, None);
+        assert_eq!(params.codex_rollout_path, None);
+        assert_eq!(params.codex_thread_id, None);
         assert!(!params.require_signed);
         assert!(!params.strict_revocation);
     }
