@@ -243,12 +243,13 @@ fn is_verified(p: &ProjectedTrust) -> bool {
 /// `1 / (k + rank)`. Rows present in both branches see their scores
 /// summed.
 ///
-/// Returns `(rowid, score)` sorted by descending score. Ties (rows that
-/// landed at the same rank in only one branch each) come out in the order
-/// they were first inserted: vector-branch rows first, then FTS-branch
-/// rows. The score-equal sort step uses `partial_cmp` and falls back to
-/// `Ordering::Equal` so NaN scores (impossible here, defended for sanity)
-/// do not panic.
+/// Returns `(rowid, score)` sorted by descending score. Ties are
+/// broken by `sort_by`'s stability against the accumulation order, so
+/// callers MUST NOT depend on the relative order of equal-scored rows
+/// — a future change (e.g., breaking ties by trust signal) is in
+/// scope and won't be a contract break. The score-equal sort step
+/// uses `partial_cmp` and falls back to `Ordering::Equal` so NaN
+/// scores (impossible here, defended for sanity) do not panic.
 pub(crate) fn rrf_fuse(
     vec_ranked: &[(i64, f64)],
     fts_ranked: &[(i64, f64)],
@@ -801,9 +802,11 @@ mod tests {
     fn rrf_fuses_vec_and_fts_ranks() {
         // Both branches list rowid 10 at rank 1. Rowid 20 is rank-2 in the
         // vector branch only; rowid 30 is rank-2 in the FTS branch only.
-        // Expected ordering: 10 first (sum of both 1/61 contributions);
-        // 20 and 30 tied at 1/62, ordering deterministic by insertion
-        // order (vector branch first, so 20 before 30).
+        // Rowid 10 sums both contributions (1/61 + 1/61). Rowids 20 and 30
+        // each score 1/62; the test asserts they both appear after rowid 10
+        // without depending on their relative order — that's an internal
+        // detail of the accumulator and may change when tie-breaking grows
+        // a trust-signal pass.
         let vec_ranked = vec![(10_i64, 0.1), (20, 0.2)];
         let fts_ranked = vec![(10_i64, 0.5), (30, 0.6)];
         let fused = super::rrf_fuse(&vec_ranked, &fts_ranked, 60.0);
