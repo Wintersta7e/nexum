@@ -10,6 +10,7 @@ mod common;
 use common::{McpTestHome, expect_error_code, expect_structured};
 use nexum_core::api::error::error_codes;
 use rmcp::model::CallToolRequestParams;
+use rmcp::service::ServiceError;
 
 #[tokio::test]
 async fn ready_home_connects_and_lists_tools() {
@@ -131,6 +132,54 @@ async fn recent_on_indexed_but_empty_returns_empty_result_set() {
         0,
         "the results array is empty"
     );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_on_ready_fixture_returns_structured_result_set() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    // The ready fixture seeds a `decisions/seed.yml` record — "seed" matches.
+    args.insert("query".into(), serde_json::Value::from("seed"));
+    args.insert("top_k".into(), serde_json::Value::from(3));
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("search").with_arguments(args))
+        .await
+        .expect("search tool call must dispatch");
+
+    let structured = expect_structured(&result);
+    assert!(structured.get("results").is_some());
+    assert!(structured.get("_meta").is_some());
+    assert!(structured["results"].as_array().expect("results array").len() <= 3);
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn search_unknown_record_type_is_invalid_params() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("query".into(), serde_json::Value::from("x"));
+    args.insert("record_type".into(), serde_json::Value::from("not-a-type"));
+    let err = connected
+        .client
+        .call_tool(CallToolRequestParams::new("search").with_arguments(args))
+        .await
+        .expect_err("unknown record_type is a protocol error (Err), not a domain envelope");
+
+    // The handler returns `Err(rmcp::ErrorData)` which surfaces on the client
+    // as `Err(ServiceError::McpError(ErrorData))`. The `code` field on
+    // `ErrorData` is `ErrorCode(i32)` with a public `.0` accessor; -32602 is
+    // JSON-RPC `invalid_params`.
+    let code = match err {
+        ServiceError::McpError(ref e) => e.code.0,
+        _ => panic!("expected ServiceError::McpError, got: {err:?}"),
+    };
+    assert_eq!(code, -32602, "unknown enum-string -> invalid_params");
 
     connected.shutdown().await;
 }

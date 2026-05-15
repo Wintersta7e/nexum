@@ -44,8 +44,6 @@ fn default_recent_limit() -> u32 {
 // ───── search ──────────────────────────────────────────────────────────────
 
 /// Params for the `search` tool — FTS-ranked full-text search.
-// Suppressed until the `search` handler lands and constructs this in the same compile unit.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
     /// Full-text query string. Required.
@@ -73,7 +71,6 @@ pub struct SearchParams {
     pub strict_revocation: bool,
 }
 
-#[allow(dead_code)]
 fn default_search_top_k() -> u32 {
     5
 }

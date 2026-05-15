@@ -6,7 +6,8 @@ use std::sync::Arc;
 use nexum_core::api::error::ErrorEnvelope;
 use nexum_core::config::types::Config;
 use nexum_core::paths::Paths;
-use nexum_core::query::Filters;
+use nexum_core::query::{Filters, SearchOpts, SessionLookup};
+use nexum_core::records::{Confidence, RecordType, Source};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -14,7 +15,7 @@ use rmcp::model::{
 };
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
-use crate::dto::RecentParams;
+use crate::dto::{RecentParams, SearchParams};
 
 /// Resolved-once runtime context for the server process.
 ///
@@ -125,6 +126,80 @@ impl NexumServer {
             Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
             Err(join_err) => Err(rmcp::ErrorData::internal_error(
                 format!("recent task panicked: {join_err}"),
+                None,
+            )),
+        }
+    }
+
+    /// Full-text ranked search across memory records.
+    ///
+    /// Results are FTS-ranked, newest-first within the same score band.
+    /// Each row carries the trust contract (`signature_status`, `trust_basis`,
+    /// warnings). Optional filters narrow by `record_type`, `source`, and
+    /// `min_confidence`; `require_signed` drops unverified rows.
+    #[tool(
+        description = "Full-text ranked search across memory records. Results are \
+                       FTS-ranked, newest-first within the same score band. Each \
+                       row includes trust fields (signature_status, trust_basis, \
+                       warnings). Optional filters: record_type \
+                       (decision|recommendation|failure|untyped), source \
+                       (cc-native|codex-native|local), min_confidence \
+                       (high|medium|low), require_signed.",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn search(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Enum-string fields are parsed before the runtime gate so a malformed
+        // call fails fast with invalid_params, not NOT_INDEXED or UNAVAILABLE.
+        let record_type = parse_record_type(params.record_type.as_deref())?;
+        let source = parse_source(params.source.as_deref())?;
+        let min_confidence = parse_min_confidence(params.min_confidence.as_deref())?;
+
+        let (paths, cfg) = match self.runtime() {
+            RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
+            RuntimeState::Unavailable(envelope) => {
+                return Ok(unavailable_result(envelope));
+            }
+        };
+
+        let filters = Filters {
+            require_signed: params.require_signed,
+            strict_revocation: params.strict_revocation,
+            record_type,
+            source,
+            min_confidence,
+            ..Filters::default()
+        };
+        let mut opts = SearchOpts::new(params.query);
+        opts.top_k = params.top_k;
+        opts.trust_policy = cfg.trust.unsigned_default;
+        opts.filters = filters;
+
+        let result = tokio::task::spawn_blocking(move || {
+            nexum_core::api::search(&paths, &cfg, &opts)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(result_set)) => {
+                let value = serde_json::to_value(&result_set).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to serialize search result: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("search task panicked: {join_err}"),
                 None,
             )),
         }
@@ -264,4 +339,113 @@ pub(crate) fn unavailable_result(envelope: &ErrorEnvelope) -> CallToolResult {
 pub(crate) fn api_error_result(err: &nexum_core::api::ApiError) -> CallToolResult {
     let envelope: ErrorEnvelope = err.into();
     envelope_to_result(&envelope)
+}
+
+// ───── Protocol-error helpers: enum-string parsing ─────────────────────────
+//
+// `record_type` / `source` / `min_confidence` arrive as JSON strings and
+// become typed `Filters` fields. An unrecognized value is a malformed call,
+// not a domain condition — it travels as `rmcp::ErrorData::invalid_params`,
+// the protocol-error channel, NOT as a `CallToolResult` domain envelope.
+// (`recent`'s `source` is the exception — it is passed through to the core
+// verb unparsed, so an unknown value there surfaces as an INVALID_FILTER
+// domain envelope. `search`/`list` parse up front because the value reaches
+// `Filters` as a typed enum, which cannot carry an unknown string.)
+
+/// Parse the optional `record_type` enum-string. `None` input → `Ok(None)`
+/// (no filter); a present-but-unrecognized value → `Err(invalid_params)`.
+fn parse_record_type(raw: Option<&str>) -> Result<Option<RecordType>, rmcp::ErrorData> {
+    match raw {
+        None => Ok(None),
+        Some(s) => RecordType::try_from_user_str(s)
+            .map(Some)
+            .ok_or_else(|| invalid_enum_string("record_type", s)),
+    }
+}
+
+/// Parse the optional `source` enum-string. See [`parse_record_type`].
+fn parse_source(raw: Option<&str>) -> Result<Option<Source>, rmcp::ErrorData> {
+    match raw {
+        None => Ok(None),
+        Some(s) => Source::try_from_user_str(s)
+            .map(Some)
+            .ok_or_else(|| invalid_enum_string("source", s)),
+    }
+}
+
+/// Parse the optional `min_confidence` enum-string. See [`parse_record_type`].
+fn parse_min_confidence(raw: Option<&str>) -> Result<Option<Confidence>, rmcp::ErrorData> {
+    match raw {
+        None => Ok(None),
+        Some(s) => Confidence::try_from_user_str(s)
+            .map(Some)
+            .ok_or_else(|| invalid_enum_string("min_confidence", s)),
+    }
+}
+
+/// Build an `invalid_params` error naming the offending field + value, so the
+/// agent can correct the call without re-parsing English. The `data` payload
+/// carries the field/value pair as structured JSON.
+fn invalid_enum_string(field: &str, value: &str) -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_params(
+        format!("unknown value `{value}` for `{field}`"),
+        Some(serde_json::json!({ "field": field, "value": value })),
+    )
+}
+
+// ───── Protocol-error helper: by_session arity ─────────────────────────────
+
+/// Build a `SessionLookup` from the three optional `by_session` ref fields,
+/// enforcing the "exactly one of" arity.
+///
+/// - zero refs set → `invalid_params` ("provide exactly one ...").
+/// - two or three set → `invalid_params` naming the conflict.
+/// - exactly one set → the matching `SessionLookup` variant. A `cc_session_id`
+///   that is present but not a parseable UUID is itself an `invalid_params`
+///   (the field is structurally wrong, not a missing match).
+///
+/// Zero/multiple/bad-UUID are all malformed *calls*, not domain conditions —
+/// hence the protocol-error channel, never a `CallToolResult` envelope.
+#[allow(dead_code)]
+fn build_session_lookup(
+    cc_session_id: Option<&str>,
+    codex_rollout_path: Option<&str>,
+    codex_thread_id: Option<&str>,
+) -> Result<SessionLookup, rmcp::ErrorData> {
+    match (cc_session_id, codex_rollout_path, codex_thread_id) {
+        (Some(raw), None, None) => {
+            let uuid = uuid::Uuid::parse_str(raw).map_err(|e| {
+                rmcp::ErrorData::invalid_params(
+                    format!("`cc_session_id` is not a valid UUID: {e}"),
+                    Some(serde_json::json!({ "field": "cc_session_id", "value": raw })),
+                )
+            })?;
+            Ok(SessionLookup::CcSession { uuid })
+        }
+        (None, Some(path), None) => Ok(SessionLookup::CodexRollout {
+            path: std::path::PathBuf::from(path),
+        }),
+        (None, None, Some(thread_id)) => Ok(SessionLookup::CodexThread {
+            thread_id: thread_id.to_string(),
+        }),
+        (None, None, None) => Err(rmcp::ErrorData::invalid_params(
+            "provide exactly one of `cc_session_id`, `codex_rollout_path`, \
+             or `codex_thread_id`",
+            Some(serde_json::json!({ "supplied": serde_json::Value::Array(vec![]) })),
+        )),
+        (cc, rollout, thread) => {
+            let supplied: Vec<&str> = [
+                cc.map(|_| "cc_session_id"),
+                rollout.map(|_| "codex_rollout_path"),
+                thread.map(|_| "codex_thread_id"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            Err(rmcp::ErrorData::invalid_params(
+                "provide exactly one session ref, not multiple",
+                Some(serde_json::json!({ "supplied": supplied })),
+            ))
+        }
+    }
 }
