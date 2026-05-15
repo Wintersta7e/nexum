@@ -61,7 +61,9 @@ schemars = "1"
 # Git.
 git2 = "0.20"
 # HTTP / API client.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# Async stream combinators (StreamExt) for reqwest's bytes_stream.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # UUIDs for trust event_ids.
 uuid = { version = "1", features = ["v7", "serde"] }
 # SSH key generation for the trust spike and the production signer wrapper.
