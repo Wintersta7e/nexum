@@ -31,7 +31,8 @@ ssh-key = { workspace = true }
 walkdir = { workspace = true }
 ort = { workspace = true }
 tokenizers = { workspace = true }
-# `rayon`, `reqwest` deferred — added when implementation hits each layer.
+reqwest = { workspace = true }
+# `rayon` deferred — added when implementation hits that layer.
 
 [dev-dependencies]
 insta = { workspace = true }
