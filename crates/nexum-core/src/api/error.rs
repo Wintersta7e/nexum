@@ -219,6 +219,7 @@ fn indexer_envelope(err: &crate::indexer::IndexerError) -> ErrorEnvelope {
             remediation: None,
             context: serde_json::json!({ "kind": "config", "message": s }),
         },
+        IndexerError::Embed(e) => store_integrity_foreign("embed", e),
     }
 }
 

@@ -26,6 +26,7 @@ use crate::{
         local::LocalAdapter,
     },
     config::types::Config,
+    embed::{EmbedError, Embedder},
     index::tag_normalization::normalize_tags_for_fts,
     indexer::{
         db::IndexerError,
@@ -141,6 +142,11 @@ fn run_inner(
 ) -> Result<IndexerOutcome, IndexerError> {
     let mut outcome = IndexerOutcome::default();
 
+    // Build the embedder once per pass. Returns `None` when embed.enabled is
+    // false, or when the configured model isn't installed (logged at warn so
+    // indexing degrades gracefully — records still land in FTS).
+    let embedder: Option<Embedder> = build_embedder_for_pass(cfg)?;
+
     // Run adapters OUTSIDE any transaction — they perform their own I/O.
     let cc_pass = if cfg.adapters.cc.enabled {
         Some(build_cc_adapter(cfg).list()?)
@@ -166,6 +172,7 @@ fn run_inner(
             &pass,
             |id| build_cc_adapter(&cfg_for_read).read(id).ok(),
             force,
+            embedder.as_ref(),
             &mut outcome,
         )?;
     }
@@ -177,6 +184,7 @@ fn run_inner(
             &pass,
             |id| build_codex_adapter(&cfg_for_read).read(id).ok(),
             force,
+            embedder.as_ref(),
             &mut outcome,
         )?;
     }
@@ -247,11 +255,41 @@ fn run_inner(
                 Some(record)
             },
             force,
+            embedder.as_ref(),
             &mut outcome,
         )?;
     }
 
     Ok(outcome)
+}
+
+/// Construct the per-pass `Embedder`. Returns `Ok(None)` when embeddings are
+/// disabled in config, or when the configured model isn't installed yet — the
+/// indexer logs a warning and proceeds without writing to `record_embeddings`.
+/// Any other load failure surfaces as `IndexerError::Embed`.
+fn build_embedder_for_pass(cfg: &Config) -> Result<Option<Embedder>, IndexerError> {
+    if !cfg.embed.enabled {
+        return Ok(None);
+    }
+    let model_path = std::path::Path::new(&cfg.embed.model_path);
+    let model_dir = model_path.parent().ok_or_else(|| {
+        IndexerError::Config(format!(
+            "embed.model_path '{}' is not under a directory",
+            cfg.embed.model_path
+        ))
+    })?;
+    match Embedder::load(model_dir) {
+        Ok(e) => Ok(Some(e)),
+        Err(EmbedError::ModelNotInstalled { reason }) => {
+            warn!(
+                target: "nexum::indexer",
+                %reason,
+                "embed.enabled=true but model not installed; indexing without embeddings",
+            );
+            Ok(None)
+        }
+        Err(other) => Err(IndexerError::Embed(other)),
+    }
 }
 
 fn build_cc_adapter(cfg: &Config) -> CcAdapter {
@@ -275,6 +313,7 @@ fn apply_pass<F>(
     pass: &AdapterPass,
     read_full: F,
     force: bool,
+    embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
 ) -> Result<(), IndexerError>
 where
@@ -350,6 +389,7 @@ where
         pass,
         &read_full,
         force,
+        embedder,
         outcome,
         &mut per_source,
     )?;
@@ -372,12 +412,18 @@ fn any_records_from_source(conn: &Connection, source: Source) -> Result<bool, In
     Ok(exists)
 }
 
+// The per-pass plumbing carries the tx, source, candidates view, indexed
+// view, adapter read callback, optional embedder, and the two outcome
+// accumulators. Bundling them into a context struct would mostly move the
+// noise to the call site without simplifying any of the inner logic.
+#[allow(clippy::too_many_arguments)]
 fn apply_pass_inside_tx<F>(
     tx: &Transaction<'_>,
     source: Source,
     pass: &AdapterPass,
     read_full: &F,
     force: bool,
+    embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError>
@@ -412,6 +458,7 @@ where
         &candidates,
         &indexed,
         read_full,
+        embedder,
         outcome,
         per_source,
     )?;
@@ -463,12 +510,17 @@ fn load_indexed_for_source(
     Ok(indexed)
 }
 
+// Same plumbing rationale as `apply_pass_inside_tx`: the per-candidate
+// loop needs the read callback, the optional embedder, and the two outcome
+// accumulators alongside the SQL handle.
+#[allow(clippy::too_many_arguments)]
 fn apply_upserts<F>(
     tx: &Transaction<'_>,
     source: Source,
     candidates: &std::collections::HashMap<String, String>,
     indexed: &IndexedHashes,
     read_full: &F,
+    embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError>
@@ -516,7 +568,31 @@ where
             reset_miss_for_id(tx, source, id)?;
             continue;
         }
-        upsert(tx, source, &record, &new_index_hash)?;
+        // Compute the dense embedding before opening the upsert SQL block.
+        // Embedding failure is non-fatal: log at warn and persist the record
+        // without a vec0 row — FTS still indexes it, and a later
+        // re-embedding pass can fill in the gap.
+        let embedding: Option<Vec<f32>> = embedder.and_then(|e| {
+            let input = format!(
+                "{}\n{}\n{}",
+                record.title,
+                record.summary.as_deref().unwrap_or(""),
+                record.body
+            );
+            match e.embed(&input) {
+                Ok(v) => Some(v),
+                Err(err) => {
+                    warn!(
+                        target: "nexum::indexer",
+                        ?err,
+                        ?id,
+                        "embed failed; persisting record without vector",
+                    );
+                    None
+                }
+            }
+        });
+        upsert(tx, source, &record, &new_index_hash, embedding.as_deref())?;
         per_source.upserts += 1;
         outcome.upserts += 1;
         reset_miss_for_id(tx, source, id)?;
@@ -626,15 +702,15 @@ fn upsert(
     source: Source,
     r: &UnifiedRecord,
     index_hash: &str,
+    embedding: Option<&[f32]>,
 ) -> Result<(), IndexerError> {
     let row = UpsertRow::from_record(r);
 
     // Look up rowid by composite (source, project_id, id) — the natural
-    // identity. If a row exists we mirror the vec0-before-records ordering
-    // rule on the UPDATE path (DELETE the embedding row first, then UPDATE
-    // the record). vec0 INSERT is skipped — `record_embeddings` is empty in
-    // this phase. The records UPDATE / INSERT statements fire the FTS
-    // triggers.
+    // identity. If a row exists we mirror the documented ordering on the
+    // UPDATE path (DELETE the embedding row first, then UPDATE the record,
+    // then re-INSERT the embedding when present). The records UPDATE /
+    // INSERT statements fire the FTS triggers.
     let existing_rowid: Option<i64> = tx
         .query_row(
             "SELECT rowid FROM records WHERE source = ?1 AND project_id = ?2 AND id = ?3",
@@ -649,9 +725,38 @@ fn upsert(
             params![rid],
         )?;
         update_record(tx, r, index_hash, &row, rid)?;
+        if let Some(vec) = embedding {
+            insert_embedding(tx, rid, vec)?;
+        }
     } else {
         insert_record(tx, source, r, index_hash, &row)?;
+        if let Some(vec) = embedding {
+            let rid = tx.last_insert_rowid();
+            insert_embedding(tx, rid, vec)?;
+        }
     }
+    Ok(())
+}
+
+/// Insert one row into the `record_embeddings` vec0 virtual table. The
+/// caller is responsible for the ordering: on INSERT, records must be
+/// written first so `last_insert_rowid()` is valid; on UPDATE, the prior
+/// embedding row must be deleted before the new one is written.
+///
+/// `sqlite-vec` 0.1 accepts a binary blob (raw little-endian f32 bytes)
+/// wrapped by the `vec_f32` SQL function. Byte length must equal
+/// `EMBED_DIM * 4`; the schema enforces dimension via the `FLOAT[1024]`
+/// column declaration.
+fn insert_embedding(
+    tx: &Transaction<'_>,
+    record_rowid: i64,
+    embedding: &[f32],
+) -> Result<(), IndexerError> {
+    let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    tx.execute(
+        "INSERT INTO record_embeddings (record_rowid, embedding) VALUES (?1, vec_f32(?2))",
+        params![record_rowid, bytes.as_slice()],
+    )?;
     Ok(())
 }
 
