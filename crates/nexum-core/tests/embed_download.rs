@@ -123,6 +123,182 @@ impl nexum_core::embed::reporter::Reporter for TestReporter {
     fn bytes(&mut self, _done: u64, _total: u64) {}
 }
 
+/// Test-only manifest matching the four tiny files under
+/// `tests/fixtures/embed_install/`. Hashes are the `sha256sum` of each
+/// fixture's bytes.
+const TEST_MANIFEST: &[nexum_core::embed::ManifestEntry; 4] = &[
+    nexum_core::embed::ManifestEntry {
+        name: "model.onnx",
+        size: 5,
+        sha256: "f6aac9d445ab169b1fd359463aaaed95faee7808a97d9f840f63273314397708",
+    },
+    nexum_core::embed::ManifestEntry {
+        name: "model.onnx_data",
+        size: 8,
+        sha256: "44df6bfb223b6a881a58274f56bbbbe35909725f3fc09f6896f0c9154857e134",
+    },
+    nexum_core::embed::ManifestEntry {
+        name: "Constant_7_attr__value",
+        size: 5,
+        sha256: "3b5d28caea5749e89cc6dd0d73f0a622abeca96772b8680a47b4604ee0f93383",
+    },
+    nexum_core::embed::ManifestEntry {
+        name: "tokenizer.json",
+        size: 9,
+        sha256: "b8513f1a0c28d8dd9b3b175bee09eabca97c4819614ec9a2df7442a5b4eff8d7",
+    },
+];
+
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("embed_install");
+    std::fs::read(dir.join(name)).expect("read fixture")
+}
+
+#[test]
+fn tampered_file_is_detected_after_retry() {
+    // Seed <models_dir>/bge-m3/ with the four fixture files, then flip
+    // one byte in Constant_7_attr__value so verify_manifest's first hash
+    // call mismatches. The injected redownload closure writes the same
+    // bad bytes again so the retry observes the same mismatch and we
+    // reach the fail-closed branch.
+    let temp = tempfile::TempDir::new().unwrap();
+    let bge_dir = temp.path().join("bge-m3");
+    std::fs::create_dir_all(&bge_dir).unwrap();
+    for entry in TEST_MANIFEST {
+        std::fs::write(bge_dir.join(entry.name), fixture_bytes(entry.name)).unwrap();
+    }
+    let tampered = bge_dir.join("Constant_7_attr__value");
+    let mut bad = fixture_bytes("Constant_7_attr__value");
+    bad.push(0xFF);
+    std::fs::write(&tampered, &bad).unwrap();
+
+    let mut reporter = NullReporter;
+    let mut report = nexum_core::embed::InstallReport {
+        downloaded: 0,
+        total_bytes: nexum_core::embed::bge_m3_total_bytes(),
+        smoke_test_ms: 0,
+    };
+    // Retry closure: write the bad bytes again to force a second-failure.
+    let bad_clone = bad.clone();
+    let redownload = move |_entry: &nexum_core::embed::ManifestEntry,
+                           dest: &std::path::Path|
+          -> Result<(), nexum_core::embed::EmbedError> {
+        std::fs::write(dest, &bad_clone).map_err(|e| nexum_core::embed::EmbedError::Io {
+            path: dest.to_owned(),
+            source: e,
+        })?;
+        Ok(())
+    };
+
+    let err = nexum_core::embed::install::verify_and_smoke_with(
+        temp.path(),
+        TEST_MANIFEST,
+        &mut report,
+        &mut reporter,
+        redownload,
+    )
+    .expect_err("verify should fail when retry also mismatches");
+
+    match err {
+        nexum_core::embed::EmbedError::ChecksumMismatch { file, .. } => {
+            assert_eq!(file, "Constant_7_attr__value");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert!(
+        !tampered.exists(),
+        "tampered file should be deleted after final mismatch"
+    );
+}
+
+#[test]
+fn retry_writes_good_bytes_lets_verifier_proceed() {
+    // Same setup as the tampered test, but this time the redownload
+    // closure writes the CORRECT bytes — verify_manifest should accept
+    // them and proceed past Constant_7_attr__value.
+    let temp = tempfile::TempDir::new().unwrap();
+    let bge_dir = temp.path().join("bge-m3");
+    std::fs::create_dir_all(&bge_dir).unwrap();
+    for entry in TEST_MANIFEST {
+        std::fs::write(bge_dir.join(entry.name), fixture_bytes(entry.name)).unwrap();
+    }
+    let tampered = bge_dir.join("Constant_7_attr__value");
+    let mut bad = fixture_bytes("Constant_7_attr__value");
+    bad.push(0xFF);
+    std::fs::write(&tampered, &bad).unwrap();
+
+    let mut reporter = NullReporter;
+    let mut report = nexum_core::embed::InstallReport {
+        downloaded: 0,
+        total_bytes: nexum_core::embed::bge_m3_total_bytes(),
+        smoke_test_ms: 0,
+    };
+    let redownload = |entry: &nexum_core::embed::ManifestEntry,
+                      dest: &std::path::Path|
+     -> Result<(), nexum_core::embed::EmbedError> {
+        std::fs::write(dest, fixture_bytes(entry.name)).map_err(|e| {
+            nexum_core::embed::EmbedError::Io {
+                path: dest.to_owned(),
+                source: e,
+            }
+        })?;
+        Ok(())
+    };
+
+    // verify_manifest passes; run_smoke then fails because the fixture
+    // files aren't a real ONNX model. We only care that verification got
+    // past the retry, so an error other than ChecksumMismatch is OK.
+    let result = nexum_core::embed::install::verify_and_smoke_with(
+        temp.path(),
+        TEST_MANIFEST,
+        &mut report,
+        &mut reporter,
+        redownload,
+    );
+    if let Err(nexum_core::embed::EmbedError::ChecksumMismatch { .. }) = result {
+        panic!("retry-with-good-bytes should not surface ChecksumMismatch");
+    }
+    // After the retry, the file content matches the manifest hash.
+    assert_eq!(
+        std::fs::read(&tampered).unwrap(),
+        fixture_bytes("Constant_7_attr__value")
+    );
+}
+
+#[test]
+#[ignore = "requires real bge-m3 install; gated by NEXUM_TEST_BGE_M3_FIXTURE"]
+fn clean_install_verifies_and_smokes() {
+    let Some(fixture) = std::env::var_os("NEXUM_TEST_BGE_M3_FIXTURE") else {
+        return;
+    };
+    let real_dir = PathBuf::from(fixture);
+    let temp = tempfile::TempDir::new().unwrap();
+    let bge_dir = temp.path().join("bge-m3");
+    std::fs::create_dir_all(&bge_dir).unwrap();
+    for entry in nexum_core::embed::BGE_M3_FILES {
+        std::fs::copy(real_dir.join(entry.name), bge_dir.join(entry.name)).unwrap();
+    }
+
+    let mut reporter = NullReporter;
+    let mut report = nexum_core::embed::InstallReport {
+        downloaded: 0,
+        total_bytes: nexum_core::embed::bge_m3_total_bytes(),
+        smoke_test_ms: 0,
+    };
+    nexum_core::embed::install::verify_and_smoke(
+        temp.path(),
+        "http://unused.invalid/",
+        &mut report,
+        &mut reporter,
+    )
+    .expect("verify_and_smoke succeeds on a real install");
+    assert!(report.smoke_test_ms > 0);
+    assert!(report.smoke_test_ms < 60_000, "smoke shouldn't take >60s");
+}
+
 #[test]
 fn no_part_files_left_after_successful_download() {
     let payloads: HashMap<&'static str, Vec<u8>> = HashMap::from([
