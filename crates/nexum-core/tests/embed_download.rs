@@ -178,7 +178,6 @@ fn tampered_file_is_detected_after_retry() {
     let mut reporter = NullReporter;
     let mut report = nexum_core::embed::InstallReport {
         downloaded: 0,
-        total_bytes: nexum_core::embed::bge_m3_total_bytes(),
         smoke_test_ms: 0,
     };
     // Retry closure: write the bad bytes again to force a second-failure.
@@ -233,7 +232,6 @@ fn retry_writes_good_bytes_lets_verifier_proceed() {
     let mut reporter = NullReporter;
     let mut report = nexum_core::embed::InstallReport {
         downloaded: 0,
-        total_bytes: nexum_core::embed::bge_m3_total_bytes(),
         smoke_test_ms: 0,
     };
     let redownload = |entry: &nexum_core::embed::ManifestEntry,
@@ -285,7 +283,6 @@ fn clean_install_verifies_and_smokes() {
     let mut reporter = NullReporter;
     let mut report = nexum_core::embed::InstallReport {
         downloaded: 0,
-        total_bytes: nexum_core::embed::bge_m3_total_bytes(),
         smoke_test_ms: 0,
     };
     nexum_core::embed::install::verify_and_smoke(

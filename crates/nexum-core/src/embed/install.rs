@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::embedder::Embedder;
 use super::manifest::{BGE_M3_FILES, ManifestEntry};
-use super::reporter::Reporter;
+use super::reporter::{NullReporter, Reporter};
 use super::types::{EMBED_DIM, EmbedError};
 use crate::config::Config;
 
@@ -27,9 +27,6 @@ const REPORT_STEP: u64 = 64 * 1024;
 pub struct InstallReport {
     /// Bytes actually pulled across the wire.
     pub downloaded: u64,
-    /// Manifest total — useful for the CLI to confirm we read the right
-    /// amount.
-    pub total_bytes: u64,
     /// Smoke-test inference latency. Filled by the verify-and-smoke
     /// step; zero until that step has run successfully.
     pub smoke_test_ms: u64,
@@ -61,20 +58,28 @@ fn download_with_manifest(
     manifest: &[ManifestEntry],
     reporter: &mut dyn Reporter,
 ) -> Result<InstallReport, EmbedError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .map_err(|e| EmbedError::Io {
-            path: models_dir.to_owned(),
-            source: e,
-        })?;
+    let runtime = build_blocking_runtime(models_dir)?;
     runtime.block_on(download_async(
         models_dir,
         model_base_url,
         manifest,
         reporter,
     ))
+}
+
+/// Build the small current-thread tokio runtime used by the synchronous
+/// download entry points. Centralised so both [`download_with_manifest`]
+/// and [`default_redownload`] stay in sync; the MCP server's
+/// multi-thread runtime is a different shape and lives elsewhere.
+fn build_blocking_runtime(path_for_error: &Path) -> Result<tokio::runtime::Runtime, EmbedError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|e| EmbedError::Io {
+            path: path_for_error.to_owned(),
+            source: e,
+        })
 }
 
 async fn download_async(
@@ -100,9 +105,7 @@ async fn download_async(
         })?;
 
     let mut downloaded: u64 = 0;
-    let mut total_bytes: u64 = 0;
     for entry in manifest {
-        total_bytes += entry.size;
         let url = format!("{base}/{}", entry.name);
         let dest = bge_dir.join(entry.name);
         reporter.progress(&format!(
@@ -116,7 +119,6 @@ async fn download_async(
 
     Ok(InstallReport {
         downloaded,
-        total_bytes,
         smoke_test_ms: 0,
     })
 }
@@ -349,44 +351,25 @@ fn verify_manifest(
 }
 
 /// Production `redownload` closure: pull a single file from
-/// `model_base_url` via reqwest and overwrite `dest`.
+/// `model_base_url` via reqwest and overwrite `dest`. Routes through
+/// the same streaming + `.part` rename path as the initial download so
+/// a multi-GB retry never buffers the full body in memory and a crash
+/// mid-stream cannot leave a half-written `dest` behind.
 fn default_redownload(
     model_base_url: &str,
 ) -> impl FnMut(&ManifestEntry, &Path) -> Result<(), EmbedError> + '_ {
     move |entry: &ManifestEntry, dest: &Path| -> Result<(), EmbedError> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .map_err(|e| EmbedError::Io {
-                path: dest.to_owned(),
-                source: e,
-            })?;
+        let runtime = build_blocking_runtime(dest)?;
         runtime.block_on(async move {
             let url = format!("{}/{}", model_base_url.trim_end_matches('/'), entry.name);
-            let resp = reqwest::Client::new()
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| EmbedError::Download {
-                    file: entry.name.to_owned(),
-                    source: e,
-                })?
-                .error_for_status()
+            let client = reqwest::Client::builder()
+                .build()
                 .map_err(|e| EmbedError::Download {
                     file: entry.name.to_owned(),
                     source: e,
                 })?;
-            let bytes = resp.bytes().await.map_err(|e| EmbedError::Download {
-                file: entry.name.to_owned(),
-                source: e,
-            })?;
-            tokio::fs::write(dest, &bytes)
-                .await
-                .map_err(|e| EmbedError::Io {
-                    path: dest.to_owned(),
-                    source: e,
-                })?;
+            let mut reporter = NullReporter;
+            download_one(&client, &url, dest, entry, &mut reporter).await?;
             Ok(())
         })
     }

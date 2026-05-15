@@ -120,23 +120,18 @@ fn test_manifest_from_env() -> Option<TestFixture> {
 /// updates to one line per ~5% of the file or every ~50 MiB, whichever
 /// comes first.
 struct StderrReporter {
-    last_byte_pct: u8,
     last_file_bytes: u64,
 }
 
 impl StderrReporter {
     fn new() -> Self {
-        Self {
-            last_byte_pct: 0,
-            last_file_bytes: 0,
-        }
+        Self { last_file_bytes: 0 }
     }
 }
 
 impl Reporter for StderrReporter {
     fn progress(&mut self, msg: &str) {
         let _ = writeln!(stderr(), "{msg}");
-        self.last_byte_pct = 0;
         self.last_file_bytes = 0;
     }
 
@@ -144,13 +139,16 @@ impl Reporter for StderrReporter {
         if total == 0 {
             return;
         }
-        // `pct` is bounded to [0, 100] by `min(100)`; the cast is lossless.
+        // `pct` values are bounded to [0, 100] by `min(100)`; the casts
+        // are lossless. `last_pct` is recomputed from `last_file_bytes`
+        // so the two values can't drift.
         let pct = u8::try_from((done.saturating_mul(100) / total).min(100)).unwrap_or(100);
-        let pct_jump = pct >= self.last_byte_pct.saturating_add(5);
+        let last_pct = u8::try_from((self.last_file_bytes.saturating_mul(100) / total).min(100))
+            .unwrap_or(100);
+        let pct_jump = pct >= last_pct.saturating_add(5);
         let byte_jump = done >= self.last_file_bytes + 50 * 1024 * 1024;
         if pct_jump || byte_jump {
             let _ = writeln!(stderr(), "  {pct}% ({done} / {total} bytes)");
-            self.last_byte_pct = pct;
             self.last_file_bytes = done;
         }
     }
