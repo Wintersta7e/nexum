@@ -17,8 +17,11 @@ pub struct SearchOpts {
     pub top_k: u32,
     pub filters: Filters,
     pub trust_policy: TrustPolicy,
-    /// Embedding pool saturation flag — surfaced through the response envelope
-    /// once an embedder is wired. Currently always `false`.
+    /// Set to true by the api facade when `embed.enabled` was requested but
+    /// the vector branch did not contribute to this query (model not
+    /// installed, embedder load failed, query embedding failed, or the
+    /// embed pool was saturated). Preserved for back-compat — see
+    /// `meta.embed_status` for the structured signal.
     pub embed_pool_saturated: bool,
     pub saturation_wait_ms: u32,
     /// Per-query disposition of the semantic ranking branch. Filled by the
@@ -41,12 +44,13 @@ pub struct SearchOpts {
     /// `cfg.embed.top_k_fts`; the default mirrors the config default so the
     /// branches stay in lockstep.
     pub top_k_fts: u32,
-    /// Query embedding for the vector branch. When `Some`, `search` runs both
-    /// the vector and FTS branches and fuses their ranks via RRF. When `None`
-    /// (the unit-test path and any caller that hasn't wired an embedder), only
-    /// the FTS branch runs. Skipped during (de)serialization — vectors don't
-    /// round-trip through JSON / MCP DTOs; the api facade fills this after
-    /// deserialization once the query embedder lands.
+    /// Query embedding for the vector branch. The api facade builds this
+    /// from the configured embedder when `embed.enabled` and `embed_status`
+    /// would otherwise be `Ok`. Unit-test callers that drive
+    /// `query::search::search` directly can construct a fixture vector and
+    /// set this field manually; the FTS-only fallback runs when `None`.
+    /// Skipped during (de)serialization — vectors don't round-trip through
+    /// JSON / MCP DTOs.
     #[serde(skip)]
     pub query_vector: Option<Vec<f32>>,
 }
@@ -845,6 +849,26 @@ mod tests {
     }
 
     #[test]
+    fn rrf_sums_distinct_rank_contributions() {
+        // Rowid 7 is rank-1 in vector, rank-5 in FTS. Expected score:
+        // 1/(60+1) + 1/(60+5) = 1/61 + 1/65. This distinguishes
+        // `acc.insert` from `acc.and_modify` (the same-rank test cannot).
+        let vec_ranked = vec![(7_i64, 0.1), (8, 0.2), (9, 0.3), (10, 0.4), (11, 0.5)];
+        let fts_ranked = vec![(1_i64, 0.1), (2, 0.2), (3, 0.3), (4, 0.4), (7, 0.5)];
+        let fused = super::rrf_fuse(&vec_ranked, &fts_ranked, 60.0);
+
+        let (_, score) = fused
+            .iter()
+            .find(|(id, _)| *id == 7)
+            .expect("rowid 7 present");
+        let expected = 1.0 / 61.0 + 1.0 / 65.0;
+        assert!(
+            (score - expected).abs() < 1e-9,
+            "got {score}, expected {expected}"
+        );
+    }
+
+    #[test]
     fn rrf_vec_only_degenerates_cleanly() {
         let vec_ranked = vec![(10_i64, 0.1), (20, 0.2), (30, 0.3)];
         let fused = super::rrf_fuse(&vec_ranked, &[], 60.0);
@@ -914,5 +938,103 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pid, "p2");
+    }
+
+    /// Insert a record with both a vector embedding and a signed/unsigned
+    /// crypto state, so hybrid-path tests can mix the two branches with the
+    /// unsigned penalty. Shares the SQL shape with `insert_record_with_vector`
+    /// but flips the trust columns based on `signed`.
+    fn insert_record_with_vector_signed(
+        conn: &Connection,
+        id: &str,
+        title: &str,
+        body: &str,
+        vec: &[f32],
+        signed: bool,
+    ) {
+        let cr = if signed { "good" } else { "no-signature" };
+        let (signer_fp, trust_commit) = if signed {
+            (
+                Some(crate::query::test_util::TEST_BOOTSTRAP_FP),
+                Some(crate::query::test_util::TEST_TRUST_COMMIT),
+            )
+        } else {
+            (None, None)
+        };
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, confidence, outcome, created, updated, content_hash, index_hash, \
+             crypto_result, signer_fingerprint, relevant_trust_events_commit, indexed_at) \
+             VALUES (?1, 'local', 'p', 'decision', ?2, ?3, '[]', '', 'manual', 'medium', \
+             'working', '2026-04-29T00:00:00Z', '2026-04-29T00:00:00Z', 'h', 'ih', ?4, ?5, ?6, \
+             '2026-04-29T00:00:00Z')",
+            rusqlite::params![id, title, body, cr, signer_fp, trust_commit],
+        )
+        .unwrap();
+        let rowid: i64 = conn
+            .query_row(
+                "SELECT rowid FROM records WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let blob = crate::embed::f32_slice_to_le_bytes(vec);
+        conn.execute(
+            "INSERT INTO record_embeddings (record_rowid, embedding) VALUES (?1, vec_f32(?2))",
+            rusqlite::params![rowid, blob.as_slice()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn hybrid_unsigned_penalty_applies_to_fused_score() {
+        // Two rows with identical title / body so they tie on the FTS
+        // branch, and identical vectors so they tie on the vector branch
+        // before the penalty. With penalty enabled, the verified row must
+        // rank above the unsigned row purely because of the penalty.
+        let (_dir, conn) = open_test_db();
+        insert_record_with_vector_signed(
+            &conn,
+            "v",
+            "concurrency match",
+            "shared body",
+            &mostly_ones(),
+            true,
+        );
+        insert_record_with_vector_signed(
+            &conn,
+            "u",
+            "concurrency match",
+            "shared body",
+            &mostly_ones(),
+            false,
+        );
+
+        let mut opts = SearchOpts::new("concurrency");
+        opts.query_vector = Some(mostly_ones());
+        opts.top_k = 5;
+
+        let res = search(&conn, &opts).expect("hybrid search");
+        let ids: Vec<String> = res.results.iter().map(|r| r.id.clone()).collect();
+        let v_idx = ids.iter().position(|id| id == "v").expect("verified row");
+        let u_idx = ids.iter().position(|id| id == "u").expect("unsigned row");
+        assert!(
+            v_idx < u_idx,
+            "verified must rank above unsigned on the hybrid path: {ids:?}"
+        );
+
+        // With the penalty disabled both rows still surface; we don't
+        // assert their relative order — the FTS-rank tie-break is a
+        // deterministic but undocumented function of tokens / rowid.
+        let mut opts_no_penalty = opts.clone();
+        opts_no_penalty.filters.no_unsigned_penalty = true;
+        let res_no_penalty = search(&conn, &opts_no_penalty).expect("hybrid search no penalty");
+        let ids_np: std::collections::HashSet<String> = res_no_penalty
+            .results
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        assert!(ids_np.contains("v"));
+        assert!(ids_np.contains("u"));
     }
 }

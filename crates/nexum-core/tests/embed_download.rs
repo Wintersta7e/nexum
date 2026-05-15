@@ -297,6 +297,46 @@ fn clean_install_verifies_and_smokes() {
 }
 
 #[test]
+fn stale_part_file_does_not_block_new_download() {
+    // Setup: bge_dir contains a stale model.onnx.part with junk bytes from
+    // a hypothetical earlier crash. The new download must overwrite it
+    // cleanly and produce the correct final file.
+    let model_onnx = b"GRAPH".to_vec();
+    let payloads: HashMap<&'static str, Vec<u8>> = HashMap::from([
+        ("model.onnx", model_onnx.clone()),
+        ("model.onnx_data", vec![0u8; 1024]),
+        ("Constant_7_attr__value", b"CONST".to_vec()),
+        ("tokenizer.json", br#"{"version":"1.0"}"#.to_vec()),
+    ]);
+    let addr = serve_fixed_payloads(payloads);
+    let base_url = format!("http://{addr}/");
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let models_dir = temp.path().join("models");
+    let bge_dir = models_dir.join("bge-m3");
+    std::fs::create_dir_all(&bge_dir).unwrap();
+    // Seed a stale `.part` with junk bytes that do not match the upcoming
+    // download payload.
+    let stale_part = bge_dir.join("model.onnx.part");
+    std::fs::write(&stale_part, b"junk-bytes-from-a-prior-crash").unwrap();
+
+    let mut reporter = NullReporter;
+    download_bge_m3(&models_dir, &base_url, &mut reporter)
+        .expect("download succeeds despite stale .part");
+
+    // The new payload is at the final path with the right bytes.
+    assert_eq!(
+        std::fs::read(bge_dir.join("model.onnx")).unwrap(),
+        model_onnx
+    );
+    // The stale `.part` is gone after the rename.
+    assert!(
+        !stale_part.exists(),
+        "stale model.onnx.part should be removed after successful download"
+    );
+}
+
+#[test]
 fn no_part_files_left_after_successful_download() {
     let payloads: HashMap<&'static str, Vec<u8>> = HashMap::from([
         ("model.onnx", b"GRAPH".to_vec()),

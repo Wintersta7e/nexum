@@ -768,10 +768,9 @@ pub struct UnifiedRecord {
 }
 
 impl UnifiedRecord {
-    /// The text used as input to the embedding model: title, then summary
-    /// (empty if absent), then body, joined with newlines. This is the
-    /// published embedding input format; any re-embed path must call this
-    /// to stay consistent with index-time embeddings.
+    /// Embedding input is title + newline + summary (empty if absent) +
+    /// newline + body. Any re-embed path must call this to stay
+    /// consistent with index-time embeddings.
     #[must_use]
     pub fn embed_input(&self) -> String {
         format!(

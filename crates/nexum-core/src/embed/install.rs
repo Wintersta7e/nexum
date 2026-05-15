@@ -303,8 +303,8 @@ where
 /// Verify every entry's SHA256 against its manifest hash. On the FIRST
 /// mismatch, delete the file and ask the caller to re-download it once
 /// (via the `redownload` closure); rehash the replacement. If the second
-/// hash still mismatches, return `ChecksumMismatch`. This matches the
-/// published install contract: retry once, then fail.
+/// hash still mismatches, return `ChecksumMismatch`. Retry once, then
+/// fail closed — never accept a hash mismatch.
 fn verify_manifest(
     models_dir: &Path,
     manifest: &[ManifestEntry],

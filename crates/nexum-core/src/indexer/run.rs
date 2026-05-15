@@ -10,10 +10,12 @@
 //! * `Partial` → apply upserts; reset every miss counter for this source (we
 //!   don't know which records were actually missing this pass).
 //!
-//! The vec0 ordering rule is honored on every UPDATE / DELETE path:
-//! `record_embeddings` rows are removed before the `records` row they refer to.
-//! vec0 INSERT is intentionally a no-op in this phase — semantic ranking lands
-//! in a later milestone, and `record_embeddings` stays empty until then.
+//! Indexer — open / create `index.db`, run a reindex pass over all enabled
+//! adapters, write results into `records` + `records_fts` + (when
+//! `embed.enabled` and the bge-m3 model is installed) `record_embeddings`.
+//! Vec0 writes respect the documented ordering rule (records first on
+//! insert; embedding first on delete; DELETE+INSERT inside one transaction
+//! on update).
 
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};

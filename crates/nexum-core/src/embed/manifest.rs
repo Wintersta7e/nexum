@@ -1,6 +1,7 @@
-//! Pinned bge-m3 ONNX file manifest. Hashes verified by direct download
-//! into the model dir; bumping is a deliberate release-time decision per
-//! the public spec.
+//! Pinned bge-m3 ONNX file manifest. Files match the BAAI/bge-m3
+//! `SentenceTransformers` ONNX export on Hugging Face. Hashes verified by
+//! direct download into the model dir; bumping is a deliberate
+//! release-time decision.
 
 /// One entry in the bge-m3 manifest: file name (joined onto the model
 /// base URL at download time), expected size in bytes, and the SHA256
@@ -62,8 +63,9 @@ mod tests {
     }
 
     #[test]
-    fn manifest_total_matches_published_size() {
-        // 2.13 GiB ≈ 2_284_693_904 bytes per the published table.
+    fn manifest_total_matches_sum_of_entries() {
+        // 2.13 GiB ≈ 2_284_693_904 bytes; the sum of the four entry sizes
+        // pinned above (graph + weights + tiny shard + tokenizer).
         assert_eq!(bge_m3_total_bytes(), 2_284_693_904);
     }
 
