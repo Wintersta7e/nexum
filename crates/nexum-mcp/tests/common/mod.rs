@@ -153,6 +153,51 @@ impl McpTestHome {
         }
     }
 
+    /// Initialized + indexed with two records belonging to **different**
+    /// `project_id` values, exercising the `list_projects` path:
+    ///
+    /// - `name:projx` — a registered `name:`-identity project; its path is
+    ///   stored in `cfg.projects`.
+    /// - `git:abc123def4567890` — an unregistered `git:`-identity project;
+    ///   no path entry is stored.
+    ///
+    /// The fixture mirrors the production shape without requiring a real git
+    /// repo: the `project_id` strings are written directly into the YAML
+    /// records and the indexer picks them up verbatim.
+    pub fn ready_with_two_projects() -> Self {
+        let root = TempDir::new().expect("tempdir for McpTestHome");
+        let (paths, mut cfg) = init_and_resolve(&root);
+
+        // Register `projx` as a name-identity project so `list_projects`
+        // can resolve its path from `cfg.projects`.
+        let mut entry = toml::map::Map::new();
+        entry.insert("path".into(), toml::Value::String("/example/projx".into()));
+        cfg.projects.insert("projx".into(), toml::Value::Table(entry));
+
+        // One record under `name:projx`.
+        write_local_yaml_with_project_id(
+            &paths.notebook_git,
+            "decisions",
+            "projx-rec",
+            "projx record body",
+            "name:projx",
+        );
+        // One record under a bare git-identity project_id.
+        write_local_yaml_with_project_id(
+            &paths.notebook_git,
+            "decisions",
+            "git-rec",
+            "git record body",
+            "git:abc123def4567890",
+        );
+        index(&paths, &cfg);
+        Self {
+            root,
+            paths: Some(paths),
+            cfg: Some(cfg),
+        }
+    }
+
     /// No nexum home at all: the temp dir exists but `nexum init` was never
     /// run, so `resolve_runtime` fails. The server still starts — every tool
     /// call returns a `NOT_INITIALIZED` structured error.
@@ -284,6 +329,38 @@ pub fn write_local_yaml(notebook_git: &Path, sub: &str, id: &str, body: &str) ->
         ),
     )
     .expect("write local yaml");
+    p
+}
+
+/// Write a local-adapter-format YAML record with an explicit `project_id`.
+///
+/// Same shape as [`write_local_yaml`] except the `project_id` field is
+/// provided by the caller rather than defaulting to `example`. Used by
+/// multi-project fixtures that need distinct `project_id` values in the index.
+pub fn write_local_yaml_with_project_id(
+    notebook_git: &Path,
+    sub: &str,
+    id: &str,
+    body: &str,
+    project_id: &str,
+) -> PathBuf {
+    let p = notebook_git.join(sub).join(format!("{id}.yml"));
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("create_dir_all for local yaml");
+    }
+    let kind = match sub {
+        "decisions" => "decision",
+        "recommendations" => "recommendation",
+        "failures" => "failure",
+        _ => "untyped",
+    };
+    std::fs::write(
+        &p,
+        format!(
+            "schema_version: 1\nid: {id}\nrecord_type: {kind}\ntitle: {id}\nbody: |\n  {body}\nproject_id: {project_id}\ntags: []\nagent: manual\ncreated: 2026-04-29T00:00:00Z\nupdated: 2026-04-29T00:00:00Z\nconfidence: high\noutcome: working\n"
+        ),
+    )
+    .expect("write local yaml with project_id");
     p
 }
 

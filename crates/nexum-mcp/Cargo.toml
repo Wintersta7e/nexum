@@ -41,6 +41,8 @@ tempfile = { workspace = true }
 # The harness generates an ephemeral ed25519 keypair to feed `init::run`,
 # mirroring the CLI / core test commons — no committed credentials.
 ssh-key = { workspace = true }
+# Multi-project fixtures write into `Config.projects` (type `toml::Table`).
+toml = { workspace = true }
 
 [features]
 # The tool-catalog test (`tests/tool_list.rs`) asserts all six tools are

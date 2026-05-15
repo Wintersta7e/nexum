@@ -458,6 +458,59 @@ impl NexumServer {
             )),
         }
     }
+
+    /// Per-project record counts + identity + registered path.
+    ///
+    /// Read-only. Returns every distinct `project_id` in the index with its
+    /// record / signed-record counts and identity kind. `path` is the
+    /// registered filesystem path for `name:`-identity projects and `null`
+    /// otherwise.
+    #[tool(
+        description = "List every project in the index with its record count, \
+                       signed-record count, and identity kind. `path` is the \
+                       registered filesystem path for `name:`-identity \
+                       projects and null for `git:` / `cc-slug:` / \
+                       `codex-cwd:` identities. Takes no parameters.",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn list_projects(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let (paths, cfg) = match self.runtime() {
+            RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
+            RuntimeState::Unavailable(envelope) => {
+                return Ok(unavailable_result(envelope));
+            }
+        };
+
+        let result = tokio::task::spawn_blocking(move || {
+            nexum_core::api::list_projects(&paths, &cfg)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(listing)) => {
+                // `ProjectListing` already serializes as `{ results, _meta }` —
+                // the `_meta` rename lives on the core type, so the MCP layer
+                // serializes it straight through.
+                let value = serde_json::to_value(&listing).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to serialize list_projects result: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("list_projects task panicked: {join_err}"),
+                None,
+            )),
+        }
+    }
 }
 
 #[tool_handler(router = self.tool_router)]

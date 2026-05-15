@@ -475,3 +475,69 @@ async fn get_malformed_qualified_id_is_invalid_params() {
 
     connected.shutdown().await;
 }
+
+#[tokio::test]
+async fn list_projects_returns_rows_with_path_nullability() {
+    // Two distinct projects: one registered `name:` identity (has a path),
+    // one `git:` identity (no stored path).
+    let connected = McpTestHome::ready_with_two_projects().connect().await;
+
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("list_projects"))
+        .await
+        .expect("list_projects must dispatch");
+
+    let structured = expect_structured(&result);
+    let rows = structured["results"]
+        .as_array()
+        .expect("results is an array");
+    assert_eq!(rows.len(), 2, "two distinct project ids");
+    assert!(
+        structured["_meta"]["trust_policy"].is_string(),
+        "_meta carries trust_policy"
+    );
+
+    // Find the two rows by project_id prefix and assert the path nullability.
+    let name_row = rows
+        .iter()
+        .find(|r| r["project_id"].as_str().unwrap().starts_with("name:"))
+        .expect("a name:-identity row");
+    assert!(
+        name_row["path"].is_string(),
+        "registered name:-identity has a path"
+    );
+    let git_row = rows
+        .iter()
+        .find(|r| r["project_id"].as_str().unwrap().starts_with("git:"))
+        .expect("a git:-identity row");
+    assert!(
+        git_row["path"].is_null() || git_row.get("path").is_none(),
+        "git:-identity has no stored path (null or omitted under skip_serializing_if)"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_projects_on_indexed_empty_returns_no_rows() {
+    let connected = McpTestHome::indexed_empty().connect().await;
+
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("list_projects"))
+        .await
+        .expect("list_projects must dispatch");
+
+    let structured = expect_structured(&result);
+    assert_eq!(
+        structured["results"]
+            .as_array()
+            .expect("results array")
+            .len(),
+        0,
+        "no records → no projects"
+    );
+
+    connected.shutdown().await;
+}

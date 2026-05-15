@@ -1175,6 +1175,7 @@ dependencies = [
  "ssh-key",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
