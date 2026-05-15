@@ -122,3 +122,39 @@ impl nexum_core::embed::reporter::Reporter for TestReporter {
     }
     fn bytes(&mut self, _done: u64, _total: u64) {}
 }
+
+#[test]
+fn no_part_files_left_after_successful_download() {
+    let payloads: HashMap<&'static str, Vec<u8>> = HashMap::from([
+        ("model.onnx", b"GRAPH".to_vec()),
+        ("model.onnx_data", vec![0u8; 1024]),
+        ("Constant_7_attr__value", b"CONST".to_vec()),
+        ("tokenizer.json", br#"{"version":"1.0"}"#.to_vec()),
+    ]);
+    let addr = serve_fixed_payloads(payloads);
+    let base_url = format!("http://{addr}/");
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let models_dir = temp.path().join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+    let mut reporter = NullReporter;
+    download_bge_m3(&models_dir, &base_url, &mut reporter).expect("download succeeds");
+
+    let bge_dir = models_dir.join("bge-m3");
+    let mut entries: Vec<_> = std::fs::read_dir(&bge_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    // Four expected files; no `.part` siblings.
+    assert_eq!(entries.len(), 4, "got {entries:?}");
+    for name in &entries {
+        assert!(
+            !std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("part")),
+            "{name} left over"
+        );
+    }
+}

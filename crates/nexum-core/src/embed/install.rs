@@ -3,7 +3,7 @@
 //! download leg; verification and the ORT smoke-test land in
 //! follow-up changes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt;
@@ -11,6 +11,12 @@ use tokio::io::AsyncWriteExt;
 use super::manifest::{BGE_M3_FILES, ManifestEntry};
 use super::reporter::Reporter;
 use super::types::EmbedError;
+
+/// Coalesce byte-progress callbacks to one per ~64 KiB of read body
+/// (matching the `Reporter::bytes` doc contract). Without debouncing the
+/// chunk loop floods the reporter on slow links where the stream emits
+/// 1–16 KiB chunks.
+const REPORT_STEP: u64 = 64 * 1024;
 
 /// Summary of one install run. The CLI command surfaces this on success.
 #[derive(Debug, Clone, Copy)]
@@ -111,31 +117,53 @@ async fn download_one(
     })?;
     let total: u64 = resp.content_length().unwrap_or(entry.size);
 
-    let mut file = tokio::fs::File::create(dest)
+    // Stream to a `.part` sibling, then rename atomically once `flush`
+    // succeeds. A crash mid-stream leaves the `.part` file behind; the
+    // final `dest` only ever exists as a byte-complete download.
+    let temp_dest: PathBuf = {
+        let mut s = dest.as_os_str().to_owned();
+        s.push(".part");
+        PathBuf::from(s)
+    };
+
+    let mut file = tokio::fs::File::create(&temp_dest)
         .await
         .map_err(|e| EmbedError::Io {
-            path: dest.to_owned(),
+            path: temp_dest.clone(),
             source: e,
         })?;
 
     let mut stream = resp.bytes_stream();
     let mut done: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| EmbedError::Download {
             file: entry.name.to_owned(),
             source: e,
         })?;
         file.write_all(&chunk).await.map_err(|e| EmbedError::Io {
-            path: dest.to_owned(),
+            path: temp_dest.clone(),
             source: e,
         })?;
         done += chunk.len() as u64;
-        reporter.bytes(done, total);
+        if done - last_reported >= REPORT_STEP || done == total {
+            reporter.bytes(done, total);
+            last_reported = done;
+        }
     }
     file.flush().await.map_err(|e| EmbedError::Io {
-        path: dest.to_owned(),
+        path: temp_dest.clone(),
         source: e,
     })?;
+    // Release the OS handle before rename — required on Windows, harmless
+    // on Unix.
+    drop(file);
+    tokio::fs::rename(&temp_dest, dest)
+        .await
+        .map_err(|e| EmbedError::Io {
+            path: dest.to_owned(),
+            source: e,
+        })?;
     Ok(done)
 }
 
