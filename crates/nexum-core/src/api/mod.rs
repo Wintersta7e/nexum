@@ -78,7 +78,8 @@ fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
     Ok(conn)
 }
 
-/// FTS-only search (vector branch lands later).
+/// Hybrid search: FTS plus an optional vector branch when an embedder is
+/// configured and the query embedding succeeds.
 ///
 /// The `cfg.trust.ranking_penalty` value overrides any
 /// `unsigned_ranking_penalty` set on `opts` so a single configured value
@@ -86,19 +87,77 @@ fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
 /// likewise overrides `opts.filters.strict_revocation` so the projection
 /// uses the runtime configuration.
 ///
+/// When `cfg.embed.enabled` is true the facade attempts to load the
+/// embedder and embed `opts.query`. Failure at either step degrades to
+/// FTS-only and sets `meta.embed_pool_saturated` so callers see that the
+/// requested semantic ranking was not applied.
+///
 /// # Errors
 ///
 /// Returns `ApiError::Query` on rusqlite or filter encoding failure (and
 /// on materializer rebuild failure, routed through `QueryError::Trust`).
 pub fn search(paths: &Paths, cfg: &Config, opts: &SearchOpts) -> Result<ResultSet, ApiError> {
     let conn = open_for_query(paths)?;
+    let (query_vector, embed_pool_saturated) = build_query_vector(cfg, &opts.query);
     let mut effective_opts = opts.clone();
     effective_opts.unsigned_ranking_penalty = cfg.trust.ranking_penalty;
     // Stricter prevails: per-call flag wins if set, config default applies
     // otherwise. Same shape across every read verb.
     effective_opts.filters.strict_revocation =
         opts.filters.strict_revocation || cfg.trust.strict_revocation;
+    effective_opts.query_vector = query_vector;
+    effective_opts.top_k_semantic = cfg.embed.top_k_semantic;
+    effective_opts.top_k_fts = cfg.embed.top_k_fts;
+    // Wanted-but-didn't-get-it signal. `or` so an explicit caller flag still
+    // wins, and the field surfaces through `build_meta_search` into the
+    // response envelope.
+    effective_opts.embed_pool_saturated = opts.embed_pool_saturated || embed_pool_saturated;
     Ok(query_search(&conn, &effective_opts)?)
+}
+
+/// Build the per-query embedding for the facade-side search verb.
+///
+/// Returns `(query_vector, embed_pool_saturated)` where the bool means
+/// "the caller asked for semantic ranking but we couldn't deliver it".
+///
+/// - `cfg.embed.enabled == false` → `(None, false)`: no embedder
+///   constructed, the FTS-only path runs unchanged.
+/// - `cfg.embed.enabled == true` but `try_load_from_config` returned
+///   `Ok(None)` (model not installed) → `(None, true)`: degrade silently,
+///   surface the wanted-but-missing signal through `meta`.
+/// - `try_load_from_config` errored → log warn, return `(None, true)`.
+/// - Load succeeded but `Embedder::embed` errored → log warn, return
+///   `(None, true)`.
+/// - Load + embed both succeeded → `(Some(vec), false)`.
+///
+/// Logs go to stderr via `tracing` so MCP stdio framing stays clean.
+fn build_query_vector(cfg: &Config, query: &str) -> (Option<Vec<f32>>, bool) {
+    if !cfg.embed.enabled {
+        return (None, false);
+    }
+    let embedder = match crate::embed::try_load_from_config(cfg) {
+        Ok(Some(e)) => e,
+        Ok(None) => return (None, true),
+        Err(err) => {
+            tracing::warn!(
+                target: "nexum::embed",
+                ?err,
+                "failed to load embedder for query; degrading to FTS-only",
+            );
+            return (None, true);
+        }
+    };
+    match embedder.embed(query) {
+        Ok(v) => (Some(v), false),
+        Err(err) => {
+            tracing::warn!(
+                target: "nexum::embed",
+                ?err,
+                "failed to embed query text; degrading to FTS-only",
+            );
+            (None, true)
+        }
+    }
 }
 
 /// Get one record by composite key; honors the `include_unsigned` escape
@@ -517,5 +576,76 @@ mod tests {
         for s in &listing.results {
             assert_eq!(s.path, None, "path must be None for {}", s.project_id);
         }
+    }
+
+    /// Seed one minimal row so the FTS path returns at least a candidate
+    /// without requiring the indexer pipeline.
+    fn seed_search_corpus(paths: &Paths) {
+        let conn = open_or_create(&paths.index_db).unwrap();
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
+             ('r1','local','git:abc','decision','concurrency notes','body with concurrency word', \
+              '[]','','manual','[]','[]','[]','medium','working', \
+              '2026-04-29T00:00:00Z','2026-04-29T00:00:00Z','h','ih','no-signature','2026-04-29T00:01:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn facade_search_skips_embed_when_disabled() {
+        let (_dir, paths) = paths_with_temp_home();
+        seed_search_corpus(&paths);
+        let mut cfg = Config::seed();
+        cfg.embed.enabled = false;
+        let opts = SearchOpts::new("concurrency");
+        let res = search(&paths, &cfg, &opts).expect("search");
+        // FTS-only path runs unchanged: no embedder constructed, no
+        // wanted-but-missing signal on the response envelope.
+        assert!(!res.meta.embed_pool_saturated);
+    }
+
+    #[test]
+    fn facade_search_sets_saturated_when_model_missing() {
+        let (_dir, paths) = paths_with_temp_home();
+        seed_search_corpus(&paths);
+        let mut cfg = Config::seed();
+        cfg.embed.enabled = true;
+        // `model_path` defaults to the empty string under `Config::seed`; set
+        // it to a path that definitely does not exist so `Embedder::load`
+        // returns `ModelNotInstalled` and the facade degrades to FTS-only
+        // while flipping the wanted-but-missing signal.
+        cfg.embed.model_path = "/nonexistent/nexum-test/model.onnx".into();
+        let opts = SearchOpts::new("concurrency");
+        let res = search(&paths, &cfg, &opts).expect("search");
+        assert!(
+            res.meta.embed_pool_saturated,
+            "embed.enabled=true with no installed model must surface as saturated"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires bge-m3 model installed; gated by NEXUM_E2E_EMBED env"]
+    fn facade_search_builds_query_vector_when_embed_enabled() {
+        if std::env::var_os("NEXUM_E2E_EMBED").is_none() {
+            return;
+        }
+        let (_dir, paths) = paths_with_temp_home();
+        seed_search_corpus(&paths);
+        let mut cfg = Config::seed();
+        cfg.embed.enabled = true;
+        // The gated env var implies a real install; the path comes from the
+        // caller's local environment. Don't bake a fixture path into the test.
+        if let Ok(p) = std::env::var("NEXUM_E2E_EMBED_MODEL_PATH") {
+            cfg.embed.model_path = p;
+        }
+        let opts = SearchOpts::new("concurrency");
+        let res = search(&paths, &cfg, &opts).expect("search");
+        // Smoke: the hybrid path didn't crash; the envelope reports no
+        // wanted-but-missing degradation since the model is installed.
+        assert!(!res.meta.embed_pool_saturated);
+        assert!(res.results.len() <= 5);
     }
 }
