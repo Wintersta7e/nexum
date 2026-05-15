@@ -49,6 +49,16 @@ impl Default for GetOpts {
     }
 }
 
+/// Serializable `get` success envelope — `{ record, _meta }`. The CLI and
+/// MCP `get` success paths serialize this straight from a
+/// `GetOutcome::Found`; neither layer hand-builds the `_meta` wrapper.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GetSuccess {
+    pub record: Box<UnifiedRecord>,
+    #[serde(rename = "_meta")]
+    pub meta: super::Meta,
+}
+
 /// Fetch the full `UnifiedRecord` for `key`.
 ///
 /// Returns:
@@ -542,5 +552,37 @@ mod tests {
         assert_eq!(meta.hidden_invalid, 0);
         assert_eq!(meta.hidden_compromised, 0);
         assert_eq!(meta.trust_summary.verified, 0);
+    }
+
+    #[test]
+    fn get_success_serializes_record_and_underscore_meta() {
+        // The wire shape is `{ record, _meta }`; the struct field name `meta`
+        // is renamed via serde and must not leak. The record's body and id
+        // are surfaced under `record`; `_meta` carries the same `Meta`
+        // envelope every other read verb emits.
+        let (_dir, conn) = open();
+        insert(&conn, "alpha", true);
+        let outcome = get(
+            &conn,
+            &RecordKey::bare("alpha"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record, meta } = outcome else {
+            panic!("expected Found, got {outcome:?}");
+        };
+        let envelope = GetSuccess { record, meta };
+        let v = serde_json::to_value(&envelope).expect("GetSuccess serializes");
+        assert!(v.get("record").is_some(), "carries `record` key");
+        assert!(v.get("_meta").is_some(), "carries `_meta` key (renamed)");
+        assert!(
+            v.get("meta").is_none(),
+            "the raw struct field name must not leak"
+        );
+        assert_eq!(v["record"]["id"], "alpha");
     }
 }
