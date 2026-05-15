@@ -78,8 +78,6 @@ fn default_search_top_k() -> u32 {
 // ───── list ────────────────────────────────────────────────────────────────
 
 /// Params for the `list` tool — filtered, paginated listing.
-// Suppressed until the `list` handler lands and constructs this in the same compile unit.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListParams {
     /// Maximum rows to return. Defaults to 50.
@@ -104,7 +102,6 @@ pub struct ListParams {
     pub strict_revocation: bool,
 }
 
-#[allow(dead_code)]
 fn default_list_limit() -> u32 {
     50
 }

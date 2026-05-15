@@ -183,3 +183,47 @@ async fn search_unknown_record_type_is_invalid_params() {
 
     connected.shutdown().await;
 }
+
+#[tokio::test]
+async fn list_on_ready_fixture_returns_structured_result_set() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("limit".into(), serde_json::Value::from(5));
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("list").with_arguments(args))
+        .await
+        .expect("list tool call must dispatch");
+
+    let structured = expect_structured(&result);
+    assert!(structured.get("results").is_some(), "structured payload carries `results`");
+    assert!(structured.get("_meta").is_some(), "structured payload carries `_meta`");
+    assert!(
+        structured["results"].as_array().expect("results array").len() <= 5,
+        "limit=5 caps the returned rows"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_unknown_source_is_invalid_params() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("source".into(), serde_json::Value::from("not-a-source"));
+    let err = connected
+        .client
+        .call_tool(CallToolRequestParams::new("list").with_arguments(args))
+        .await
+        .expect_err("unknown source is a protocol error (Err), not a domain envelope");
+
+    let code = match err {
+        ServiceError::McpError(ref e) => e.code.0,
+        _ => panic!("expected ServiceError::McpError, got: {err:?}"),
+    };
+    assert_eq!(code, -32602, "unknown enum-string -> invalid_params");
+
+    connected.shutdown().await;
+}

@@ -15,7 +15,7 @@ use rmcp::model::{
 };
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
-use crate::dto::{RecentParams, SearchParams};
+use crate::dto::{ListParams, RecentParams, SearchParams};
 
 /// Resolved-once runtime context for the server process.
 ///
@@ -200,6 +200,74 @@ impl NexumServer {
             Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
             Err(join_err) => Err(rmcp::ErrorData::internal_error(
                 format!("search task panicked: {join_err}"),
+                None,
+            )),
+        }
+    }
+
+    /// Filtered, paginated listing of memory records.
+    ///
+    /// No FTS ranking — results are newest-first. Each row carries the trust
+    /// contract (`signature_status`, `trust_basis`, warnings). Optional
+    /// filters narrow by `record_type` and `source`; `limit` and `cursor`
+    /// control pagination.
+    #[tool(
+        description = "Filtered, paginated listing of memory records, newest \
+                       first. No FTS ranking. Each row includes trust fields \
+                       (signature_status, trust_basis, warnings). Optional \
+                       filters: record_type \
+                       (decision|recommendation|failure|untyped), source \
+                       (cc-native|codex-native|local), require_signed. \
+                       Use cursor from _meta.next_cursor for subsequent pages.",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn list(
+        &self,
+        Parameters(params): Parameters<ListParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let record_type = parse_record_type(params.record_type.as_deref())?;
+        let source = parse_source(params.source.as_deref())?;
+
+        let (paths, cfg) = match self.runtime() {
+            RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
+            RuntimeState::Unavailable(envelope) => {
+                return Ok(unavailable_result(envelope));
+            }
+        };
+
+        let filters = Filters {
+            require_signed: params.require_signed,
+            strict_revocation: params.strict_revocation,
+            record_type,
+            source,
+            ..Filters::default()
+        };
+        let limit = params.limit;
+        let cursor = params.cursor;
+
+        let result = tokio::task::spawn_blocking(move || {
+            nexum_core::api::list(&paths, &cfg, &filters, limit, cursor.as_deref())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(result_set)) => {
+                let value = serde_json::to_value(&result_set).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to serialize list result: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("list task panicked: {join_err}"),
                 None,
             )),
         }
