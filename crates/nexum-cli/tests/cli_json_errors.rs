@@ -146,6 +146,38 @@ fn project_list_emits_envelope_on_error() {
 }
 
 #[test]
+fn project_list_emits_results_and_meta_on_success() {
+    // A seeded, indexed home has at least the `seed` record, so
+    // `project list --json` produces a non-error `{ results, _meta }` payload.
+    let home = TestHome::initialized_with_seeded_index();
+    let out = home.run(&["project", "list", "--json"]);
+    assert!(
+        out.status.success(),
+        "project list --json should succeed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON");
+    let results = v["results"]
+        .as_array()
+        .expect("`results` must be a JSON array");
+    assert!(!results.is_empty(), "seeded index must list >=1 project");
+    // `_meta` is the shared envelope, carried straight off `ProjectListing`.
+    assert!(
+        v["_meta"].is_object(),
+        "`_meta` must be present and an object"
+    );
+    assert!(
+        v["_meta"]["source_counts"].is_object(),
+        "`_meta.source_counts` must be present"
+    );
+    assert!(
+        v["_meta"]["trust_policy"].is_string(),
+        "`_meta.trust_policy` must be present"
+    );
+}
+
+#[test]
 fn project_resolve_emits_usage_envelope_for_missing_path() {
     let home = TestHome::initialized_no_index();
     let (env, code) = run_json(

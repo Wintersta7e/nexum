@@ -43,9 +43,13 @@ pub fn run(args: &GetArgs) -> ExitCode {
         Err(c) => return c,
     };
     match api::get(&paths, &cfg, &key, &opts) {
-        Ok(GetOutcome::Found(r)) => {
+        Ok(GetOutcome::Found { record: r, meta }) => {
             if args.json {
-                match serde_json::to_string_pretty(&r) {
+                // The `_meta` key is named explicitly: an enum variant's
+                // fields cannot carry a struct-level serde rename the way
+                // `ResultSet` / `ProjectListing` do.
+                let payload = serde_json::json!({ "record": &r, "_meta": &meta });
+                match serde_json::to_string_pretty(&payload) {
                     Ok(s) => println!("{s}"),
                     Err(e) => return super::json_emit::emit_serialize_failure(&e),
                 }

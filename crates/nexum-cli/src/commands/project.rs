@@ -8,6 +8,7 @@ use nexum_core::{
     api,
     api::error::{ErrorEnvelope, Remediation, error_codes},
     config::io::save as save_config,
+    config::types::Config,
     paths::Paths,
     project::{ProjectInput, ProjectResolution, resolve::resolve as resolve_project},
 };
@@ -44,30 +45,11 @@ pub fn run(args: &ProjectArgs) -> ExitCode {
     match &args.command {
         ProjectSub::Register { name, path } => register(name, path),
         ProjectSub::List { json } => {
-            let paths = match Paths::resolve() {
-                Ok(p) => p,
-                Err(e) => {
-                    if *json {
-                        let env = ErrorEnvelope {
-                            error_code: error_codes::NOT_INITIALIZED,
-                            message: format!("{e}"),
-                            remediation: Some(Remediation {
-                                command: Some("nexum init".into()),
-                                rationale: "Initialize a nexum home before listing projects."
-                                    .into(),
-                            }),
-                            context: serde_json::json!({ "phase": "paths_resolve" }),
-                        };
-                        return super::json_emit::emit_error(
-                            &env,
-                            super::exit_codes::for_envelope(&env),
-                        );
-                    }
-                    eprintln!("error: {e}\nDid you run `nexum init`?");
-                    return ExitCode::from(super::exit_codes::NOT_INITIALIZED);
-                }
+            let (paths, cfg) = match super::common::resolve_runtime(*json) {
+                Ok(v) => v,
+                Err(c) => return c,
             };
-            list(&paths, *json)
+            list(&paths, &cfg, *json)
         }
         ProjectSub::Resolve { path, json } => resolve_path(path, *json),
     }
@@ -101,23 +83,27 @@ fn register(name: &str, path: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn list(paths: &Paths, json: bool) -> ExitCode {
-    match api::list_projects(paths) {
-        Ok(summaries) => {
+fn list(paths: &Paths, cfg: &Config, json: bool) -> ExitCode {
+    match api::list_projects(paths, cfg) {
+        Ok(listing) => {
             if json {
-                match serde_json::to_string_pretty(&summaries) {
+                match serde_json::to_string_pretty(&listing) {
                     Ok(s) => println!("{s}"),
                     Err(e) => return super::json_emit::emit_serialize_failure(&e),
                 }
             } else {
                 println!(
-                    "{:<24}  {:<18}  {:>10}  {:>10}",
+                    "{:<24}  {:<18}  {:>10}  {:>10}  PATH",
                     "PROJECT_ID", "IDENTITY_KIND", "RECORDS", "SIGNED"
                 );
-                for p in &summaries {
+                for p in &listing.results {
                     println!(
-                        "{:<24}  {:<18}  {:>10}  {:>10}",
-                        p.project_id, p.identity_kind, p.record_count, p.signed_record_count,
+                        "{:<24}  {:<18}  {:>10}  {:>10}  {}",
+                        p.project_id,
+                        p.identity_kind,
+                        p.record_count,
+                        p.signed_record_count,
+                        p.path.as_deref().unwrap_or("-"),
                     );
                 }
             }
