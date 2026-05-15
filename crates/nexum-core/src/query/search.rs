@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{Confidence, CryptoResult, RecordType, SignatureStatus, Source, TrustPolicy};
 
-use super::policy::{apply as apply_policy, PolicyOpts};
+use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::{Filters, QueryError, ResultSet, SearchResult};
 use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
 
