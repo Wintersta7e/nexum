@@ -1,0 +1,19 @@
+schema_version: 1
+id: concurrency_atomic_counters
+record_type: decision
+project_id: example
+title: Picking memory ordering for atomic counters
+body: |
+  For a plain hit counter incremented from many threads, Relaxed
+  ordering is enough because no other state depends on the counter's
+  value. For a flag that gates the publication of other writes,
+  Release on the writer and Acquire on the reader create the
+  happens-before edge that makes those writes visible. SeqCst is
+  the conservative default but adds a global ordering constraint
+  most code does not actually need.
+tags: ["rust", "atomics"]
+agent: manual
+created: 2026-04-04T00:00:00Z
+updated: 2026-04-04T00:00:00Z
+confidence: high
+outcome: working

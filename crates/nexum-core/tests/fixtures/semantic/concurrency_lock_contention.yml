@@ -1,0 +1,19 @@
+schema_version: 1
+id: concurrency_lock_contention
+record_type: decision
+project_id: example
+title: Reducing contention on a hot mutex
+body: |
+  When a single mutex is the bottleneck under load, the usual moves
+  are: shard the protected state across N stripes keyed by hash so
+  most acquisitions miss each other; replace the lock with an
+  RwLock when reads dominate writes; or step out of the locked
+  region entirely with a lock-free queue and a single consumer task.
+  Profile first: perf-stat or tokio-console will show whether the
+  wait time is actually inside the critical section or outside it.
+tags: ["performance", "scaling"]
+agent: manual
+created: 2026-04-03T00:00:00Z
+updated: 2026-04-03T00:00:00Z
+confidence: high
+outcome: working
