@@ -216,3 +216,189 @@ fn models_install_unknown_model_returns_exit_2() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Shared bootstrap for the install-failure / install-success tests below.
+/// Init a nexum home, point `[embed].model_base_url` at the stub server,
+/// and return the temp dirs + manifest JSON the CLI will resolve.
+struct InstallHarness {
+    _root: TempDir,
+    nexum_home: std::path::PathBuf,
+    ssh_home: std::path::PathBuf,
+    manifest_json: String,
+}
+
+fn init_install_harness(
+    payloads: HashMap<&'static str, Vec<u8>>,
+    manifest_json: String,
+) -> InstallHarness {
+    let addr = serve_fixed_payloads(payloads);
+    let base_url = format!("http://{addr}/");
+    let root = TempDir::new().expect("tempdir");
+    let nexum_home = root.path().join(".nexum");
+    let ssh_home = root.path().join("ssh-home");
+    std::fs::create_dir_all(ssh_home.join(".ssh")).expect("mkdir ssh-home/.ssh");
+    let key_path = common::write_ephemeral_keypair(&ssh_home.join(".ssh"));
+    let init_out = common::run_nexum(
+        &nexum_home,
+        &ssh_home,
+        &[
+            "init",
+            "--yes",
+            "--ssh-key",
+            key_path.to_str().expect("ssh key path utf-8"),
+        ],
+    );
+    assert!(
+        init_out.status.success(),
+        "init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&init_out.stdout),
+        String::from_utf8_lossy(&init_out.stderr),
+    );
+    set_embed_model_base_url(&nexum_home, &base_url);
+    InstallHarness {
+        _root: root,
+        nexum_home,
+        ssh_home,
+        manifest_json,
+    }
+}
+
+/// Build a fixture manifest whose `model.onnx_data` SHA256 deliberately
+/// does not match the served bytes, so the install pipeline trips the
+/// checksum-mismatch retry path and surfaces `CHECKSUM_MISMATCH` (12).
+fn tampered_checksum_fixture() -> (HashMap<&'static str, Vec<u8>>, String) {
+    let model_onnx = b"GRAPH".to_vec();
+    let model_data = vec![0u8; 1024];
+    let constant = b"CONST".to_vec();
+    let tokenizer = br#"{"version":"1.0"}"#.to_vec();
+    let payloads: HashMap<&'static str, Vec<u8>> = HashMap::from([
+        ("model.onnx", model_onnx.clone()),
+        ("model.onnx_data", model_data.clone()),
+        ("Constant_7_attr__value", constant.clone()),
+        ("tokenizer.json", tokenizer.clone()),
+    ]);
+    // Wrong sha256 for model.onnx_data so the verifier rejects it on the
+    // first pass and the (idempotent stub) second pass.
+    let tampered_data_sha = "00".repeat(32);
+    let manifest_json = serde_json::json!([
+        { "name": "model.onnx", "size": model_onnx.len(), "sha256": sha256_hex(&model_onnx) },
+        { "name": "model.onnx_data", "size": model_data.len(), "sha256": tampered_data_sha },
+        { "name": "Constant_7_attr__value", "size": constant.len(), "sha256": sha256_hex(&constant) },
+        { "name": "tokenizer.json", "size": tokenizer.len(), "sha256": sha256_hex(&tokenizer) },
+    ])
+    .to_string();
+    (payloads, manifest_json)
+}
+
+#[test]
+fn models_install_checksum_mismatch_returns_exit_12() {
+    let (payloads, manifest_json) = tampered_checksum_fixture();
+    let harness = init_install_harness(payloads, manifest_json);
+
+    let out = Command::new(common::nexum_bin())
+        .args(["models", "install", "bge-m3"])
+        .env("NEXUM_HOME", &harness.nexum_home)
+        .env("HOME", &harness.ssh_home)
+        .env("NEXUM_TEST_BGE_M3_FIXTURE_MANIFEST", &harness.manifest_json)
+        .output()
+        .expect("nexum binary exec failed");
+
+    assert_eq!(
+        out.status.code(),
+        Some(12),
+        "expected exit 12 (CHECKSUM_MISMATCH); stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn models_install_json_success_envelope() {
+    let model_onnx = b"GRAPH".to_vec();
+    let model_data = vec![0u8; 1024];
+    let constant = b"CONST".to_vec();
+    let tokenizer = br#"{"version":"1.0"}"#.to_vec();
+    let payloads: HashMap<&'static str, Vec<u8>> = HashMap::from([
+        ("model.onnx", model_onnx.clone()),
+        ("model.onnx_data", model_data.clone()),
+        ("Constant_7_attr__value", constant.clone()),
+        ("tokenizer.json", tokenizer.clone()),
+    ]);
+    let manifest_json = serde_json::json!([
+        { "name": "model.onnx", "size": model_onnx.len(), "sha256": sha256_hex(&model_onnx) },
+        { "name": "model.onnx_data", "size": model_data.len(), "sha256": sha256_hex(&model_data) },
+        { "name": "Constant_7_attr__value", "size": constant.len(), "sha256": sha256_hex(&constant) },
+        { "name": "tokenizer.json", "size": tokenizer.len(), "sha256": sha256_hex(&tokenizer) },
+    ])
+    .to_string();
+    let total: u64 = model_onnx.len() as u64
+        + model_data.len() as u64
+        + constant.len() as u64
+        + tokenizer.len() as u64;
+
+    let harness = init_install_harness(payloads, manifest_json);
+
+    let out = Command::new(common::nexum_bin())
+        .args(["models", "install", "bge-m3", "--json"])
+        .env("NEXUM_HOME", &harness.nexum_home)
+        .env("HOME", &harness.ssh_home)
+        .env("NEXUM_TEST_BGE_M3_FIXTURE_MANIFEST", &harness.manifest_json)
+        .output()
+        .expect("nexum binary exec failed");
+
+    let stdout_str = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr_str = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        out.status.success(),
+        "expected exit 0 on --json success; exit={:?}\nstdout={stdout_str}\nstderr={stderr_str}",
+        out.status.code(),
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout_str.trim()).expect("stdout must be a single JSON object");
+    assert_eq!(parsed["ok"], serde_json::Value::Bool(true));
+    assert_eq!(parsed["model"], "bge-m3");
+    assert_eq!(
+        parsed["downloaded"].as_u64(),
+        Some(total),
+        "downloaded must match the cumulative fixture bytes",
+    );
+    // Smoke-test step is skipped under the fixture manifest, so
+    // smoke_test_ms is the default 0 — assert the field is present.
+    assert!(parsed.get("smoke_test_ms").is_some());
+    let model_path = parsed["model_path"]
+        .as_str()
+        .expect("model_path must be a string");
+    assert!(
+        model_path.ends_with("bge-m3/model.onnx") || model_path.ends_with("bge-m3\\model.onnx"),
+        "model_path should point at bge-m3/model.onnx, got {model_path:?}",
+    );
+}
+
+#[test]
+fn models_install_json_failure_envelope() {
+    let (payloads, manifest_json) = tampered_checksum_fixture();
+    let harness = init_install_harness(payloads, manifest_json);
+
+    let out = Command::new(common::nexum_bin())
+        .args(["models", "install", "bge-m3", "--json"])
+        .env("NEXUM_HOME", &harness.nexum_home)
+        .env("HOME", &harness.ssh_home)
+        .env("NEXUM_TEST_BGE_M3_FIXTURE_MANIFEST", &harness.manifest_json)
+        .output()
+        .expect("nexum binary exec failed");
+
+    assert_eq!(
+        out.status.code(),
+        Some(12),
+        "expected exit 12 on JSON failure path; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let stdout_str = String::from_utf8_lossy(&out.stdout).into_owned();
+    let parsed: serde_json::Value = serde_json::from_str(stdout_str.trim())
+        .expect("stdout must be a single JSON object on --json failure");
+    assert_eq!(parsed["ok"], serde_json::Value::Bool(false));
+    assert_eq!(parsed["code"], "EMBED_FAILED");
+    assert_eq!(parsed["kind"], "checksum_mismatch");
+    assert_eq!(parsed["file"], "model.onnx_data");
+}
