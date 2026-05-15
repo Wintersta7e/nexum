@@ -115,8 +115,6 @@ fn default_list_limit() -> u32 {
 /// `invalid_params` protocol error at the handler level, not here (the JSON
 /// schema cannot express mutual exclusion, so deserialize accepts any
 /// combination and the handler enforces the arity).
-// Suppressed until the `by_session` handler lands and constructs this in the same compile unit.
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BySessionParams {
     /// A Claude Code session UUID (e.g. `"01912c3a-..."`). Exactly one of the

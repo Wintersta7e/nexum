@@ -15,7 +15,7 @@ use rmcp::model::{
 };
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
-use crate::dto::{ListParams, RecentParams, SearchParams};
+use crate::dto::{BySessionParams, ListParams, RecentParams, SearchParams};
 
 /// Resolved-once runtime context for the server process.
 ///
@@ -182,10 +182,8 @@ impl NexumServer {
         opts.trust_policy = cfg.trust.unsigned_default;
         opts.filters = filters;
 
-        let result = tokio::task::spawn_blocking(move || {
-            nexum_core::api::search(&paths, &cfg, &opts)
-        })
-        .await;
+        let result =
+            tokio::task::spawn_blocking(move || nexum_core::api::search(&paths, &cfg, &opts)).await;
 
         match result {
             Ok(Ok(result_set)) => {
@@ -268,6 +266,75 @@ impl NexumServer {
             Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
             Err(join_err) => Err(rmcp::ErrorData::internal_error(
                 format!("list task panicked: {join_err}"),
+                None,
+            )),
+        }
+    }
+
+    /// Records associated with a specific session.
+    ///
+    /// Exactly one of `cc_session_id`, `codex_rollout_path`, or
+    /// `codex_thread_id` must be supplied. Zero or multiple refs produce an
+    /// `invalid_params` protocol error. Each row carries the trust contract
+    /// (`signature_status`, `trust_basis`, warnings).
+    #[tool(
+        description = "Records associated with a specific session. Supply \
+                       exactly one of: cc_session_id (UUID string), \
+                       codex_rollout_path (absolute path string), or \
+                       codex_thread_id (thread identifier string). Zero or \
+                       multiple refs produce an invalid_params error. Each row \
+                       includes trust fields (signature_status, trust_basis, \
+                       warnings).",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn by_session(
+        &self,
+        Parameters(params): Parameters<BySessionParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Enforce "exactly one ref" arity before touching the runtime — a
+        // malformed call fails fast with invalid_params.
+        let lookup = build_session_lookup(
+            params.cc_session_id.as_deref(),
+            params.codex_rollout_path.as_deref(),
+            params.codex_thread_id.as_deref(),
+        )?;
+
+        let (paths, cfg) = match self.runtime() {
+            RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
+            RuntimeState::Unavailable(envelope) => {
+                return Ok(unavailable_result(envelope));
+            }
+        };
+
+        let filters = Filters {
+            require_signed: params.require_signed,
+            strict_revocation: params.strict_revocation,
+            ..Filters::default()
+        };
+
+        let result = tokio::task::spawn_blocking(move || {
+            nexum_core::api::by_session(&paths, &cfg, &filters, &lookup)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(result_set)) => {
+                let value = serde_json::to_value(&result_set).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to serialize by_session result: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("by_session task panicked: {join_err}"),
                 None,
             )),
         }
@@ -474,7 +541,6 @@ fn invalid_enum_string(field: &str, value: &str) -> rmcp::ErrorData {
 ///
 /// Zero/multiple/bad-UUID are all malformed *calls*, not domain conditions —
 /// hence the protocol-error channel, never a `CallToolResult` envelope.
-#[allow(dead_code)]
 fn build_session_lookup(
     cc_session_id: Option<&str>,
     codex_rollout_path: Option<&str>,

@@ -153,7 +153,13 @@ async fn search_on_ready_fixture_returns_structured_result_set() {
     let structured = expect_structured(&result);
     assert!(structured.get("results").is_some());
     assert!(structured.get("_meta").is_some());
-    assert!(structured["results"].as_array().expect("results array").len() <= 3);
+    assert!(
+        structured["results"]
+            .as_array()
+            .expect("results array")
+            .len()
+            <= 3
+    );
 
     connected.shutdown().await;
 }
@@ -185,6 +191,110 @@ async fn search_unknown_record_type_is_invalid_params() {
 }
 
 #[tokio::test]
+async fn by_session_with_thread_id_returns_structured_result_set() {
+    // The ready fixture has no session-tagged records, but the handler must
+    // succeed (empty results is a success, not an error) when given one valid ref.
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "codex_thread_id".into(),
+        serde_json::Value::from("thread-abc123"),
+    );
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("by_session").with_arguments(args))
+        .await
+        .expect("by_session tool call must dispatch");
+
+    let structured = expect_structured(&result);
+    assert!(
+        structured.get("results").is_some(),
+        "structured payload carries `results`"
+    );
+    assert!(
+        structured.get("_meta").is_some(),
+        "structured payload carries `_meta`"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn by_session_zero_refs_is_invalid_params() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let err = connected
+        .client
+        .call_tool(CallToolRequestParams::new("by_session"))
+        .await
+        .expect_err("zero refs must be a protocol error, not a domain envelope");
+
+    let code = match err {
+        ServiceError::McpError(ref e) => e.code.0,
+        _ => panic!("expected ServiceError::McpError, got: {err:?}"),
+    };
+    assert_eq!(code, -32602, "zero session refs -> invalid_params");
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn by_session_multiple_refs_is_invalid_params() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "codex_thread_id".into(),
+        serde_json::Value::from("thread-abc"),
+    );
+    args.insert(
+        "codex_rollout_path".into(),
+        serde_json::Value::from("/some/path"),
+    );
+    let err = connected
+        .client
+        .call_tool(CallToolRequestParams::new("by_session").with_arguments(args))
+        .await
+        .expect_err("multiple refs must be a protocol error, not a domain envelope");
+
+    let code = match err {
+        ServiceError::McpError(ref e) => e.code.0,
+        _ => panic!("expected ServiceError::McpError, got: {err:?}"),
+    };
+    assert_eq!(code, -32602, "multiple session refs -> invalid_params");
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn by_session_malformed_uuid_is_invalid_params() {
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert(
+        "cc_session_id".into(),
+        serde_json::Value::from("not-a-uuid"),
+    );
+    let err = connected
+        .client
+        .call_tool(CallToolRequestParams::new("by_session").with_arguments(args))
+        .await
+        .expect_err("malformed UUID must be a protocol error, not a domain envelope");
+
+    let code = match err {
+        ServiceError::McpError(ref e) => e.code.0,
+        _ => panic!("expected ServiceError::McpError, got: {err:?}"),
+    };
+    assert_eq!(
+        code, -32602,
+        "malformed cc_session_id UUID -> invalid_params"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_on_ready_fixture_returns_structured_result_set() {
     let connected = McpTestHome::ready().connect().await;
 
@@ -197,10 +307,20 @@ async fn list_on_ready_fixture_returns_structured_result_set() {
         .expect("list tool call must dispatch");
 
     let structured = expect_structured(&result);
-    assert!(structured.get("results").is_some(), "structured payload carries `results`");
-    assert!(structured.get("_meta").is_some(), "structured payload carries `_meta`");
     assert!(
-        structured["results"].as_array().expect("results array").len() <= 5,
+        structured.get("results").is_some(),
+        "structured payload carries `results`"
+    );
+    assert!(
+        structured.get("_meta").is_some(),
+        "structured payload carries `_meta`"
+    );
+    assert!(
+        structured["results"]
+            .as_array()
+            .expect("results array")
+            .len()
+            <= 5,
         "limit=5 caps the returned rows"
     );
 
