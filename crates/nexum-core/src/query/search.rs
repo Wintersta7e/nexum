@@ -1,4 +1,4 @@
-//! `search` — FTS-only ranked search.
+//! `search` — hybrid (FTS + optional vector) ranked search.
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,14 @@ pub struct SearchOpts {
     /// `cfg.embed.top_k_fts`; the default mirrors the config default so the
     /// branches stay in lockstep.
     pub top_k_fts: u32,
+    /// Query embedding for the vector branch. When `Some`, `search` runs both
+    /// the vector and FTS branches and fuses their ranks via RRF. When `None`
+    /// (the unit-test path and any caller that hasn't wired an embedder), only
+    /// the FTS branch runs. Skipped during (de)serialization — vectors don't
+    /// round-trip through JSON / MCP DTOs; the api facade fills this after
+    /// deserialization once the query embedder lands.
+    #[serde(skip)]
+    pub query_vector: Option<Vec<f32>>,
 }
 
 impl SearchOpts {
@@ -51,46 +59,40 @@ impl SearchOpts {
             unsigned_ranking_penalty: 0.7,
             top_k_semantic: 100,
             top_k_fts: 100,
+            query_vector: None,
         }
     }
 }
 
-/// FTS-only ranked search. The vector branch is absent in the current build —
-/// ranking degenerates to "by FTS5 bm25 rank, with the unsigned-content
-/// penalty applied last".
+/// `k` constant for the RRF score `1 / (k + rank)`. The TREC literature uses
+/// 60; the value is intentionally not exposed as a knob — it makes the two
+/// branch contributions comparable without giving either a runaway tail.
+const K_RRF: f64 = 60.0;
+
+/// Hybrid ranked search.
+///
+/// When `opts.query_vector` is `Some`, both the FTS and vector branches run;
+/// their ranked rowid lists are fused via reciprocal-rank-fusion (`k = 60`)
+/// before the unsigned-content penalty, the warn/hide/strict policy filter,
+/// and the top-K cut. When `query_vector` is `None`, only the FTS branch
+/// runs and the score collapses to `1 / (60 + fts_rank)`.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on any rusqlite error;
 /// `QueryError::InvalidFilter` if a filter is malformed;
 /// `QueryError::Trust` if the chain-state hydration fails.
 pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryError> {
-    let projected_rows = fetch_and_project(conn, opts)?;
+    // FTS branch: always runs. Carries the projected trust shape so the
+    // fusion path can re-use the projection (cheap) for any rowid that
+    // came back from FTS instead of re-hydrating it row-by-row.
+    let fts_projected = fetch_and_project(conn, opts)?;
 
-    // Reciprocal-rank-fusion-style score over a single branch:
-    //   score(r) = 1 / (k + rank)
-    // With one branch the ranking degenerates to "by FTS rank ascending".
-    // Apply the unsigned penalty after RRF; the policy filter runs after
-    // sorting so the top-K cut is taken from the visible set.
-    let k_const: f64 = 60.0;
-    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
-        .into_iter()
-        .enumerate()
-        .map(|(idx, (r, p))| {
-            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
-            let rank = f64::from(rank) + 1.0;
-            let mut score = 1.0 / (k_const + rank);
-            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
-            // ordinal above is the actual ranking signal; the underlying
-            // bm25 value is intentionally not surfaced here.
-
-            let is_unsigned = p.signature_status != SignatureStatus::Verified;
-            if is_unsigned && !opts.filters.no_unsigned_penalty {
-                score *= opts.unsigned_ranking_penalty;
-            }
-            (r, p, score)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let scored: Vec<(FtsRow, ProjectedTrust, f64)> =
+        if let Some(query_vector) = opts.query_vector.as_deref() {
+            score_hybrid(conn, opts, fts_projected, query_vector)?
+        } else {
+            score_fts_only(opts, fts_projected)
+        };
 
     // Centralized warn/hide/strict policy filter. The closure plucks the
     // projected trust shape out of the (row, projected, score) tuple so
@@ -132,6 +134,210 @@ pub fn search(conn: &Connection, opts: &SearchOpts) -> Result<ResultSet, QueryEr
     })
 }
 
+/// FTS-only scoring path. Ranks degenerate to FTS rank ascending; the score
+/// is `1 / (k + rank)` with the unsigned-content penalty applied afterwards.
+/// Sorting is deferred to the post-policy stage.
+fn score_fts_only(
+    opts: &SearchOpts,
+    projected_rows: Vec<(FtsRow, ProjectedTrust)>,
+) -> Vec<(FtsRow, ProjectedTrust, f64)> {
+    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = projected_rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (r, p))| {
+            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
+            let rank = f64::from(rank) + 1.0;
+            let mut score = 1.0 / (K_RRF + rank);
+            // FTS5 `rank` is a bm25 score (lower = better). The 1-based
+            // ordinal above is the actual ranking signal; the underlying
+            // bm25 value is intentionally not surfaced here.
+            if !is_verified(&p) && !opts.filters.no_unsigned_penalty {
+                score *= opts.unsigned_ranking_penalty;
+            }
+            (r, p, score)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+}
+
+/// Hybrid scoring path. Runs the vector branch, fuses with the FTS rowid
+/// list via RRF, and rehydrates any rowid that came from the vector branch
+/// but did not appear in the FTS candidates. The unsigned-content penalty
+/// applies to the fused score, not per-branch.
+fn score_hybrid(
+    conn: &Connection,
+    opts: &SearchOpts,
+    fts_projected: Vec<(FtsRow, ProjectedTrust)>,
+    query_vector: &[f32],
+) -> Result<Vec<(FtsRow, ProjectedTrust, f64)>, QueryError> {
+    let fts_ranked: Vec<(i64, f64)> = fts_projected
+        .iter()
+        .map(|(row, _)| (row.rowid, 0.0))
+        .collect();
+    let vec_ranked: Vec<(i64, f64)> =
+        fetch_semantic_candidates(conn, &opts.filters, query_vector, opts.top_k_semantic)?
+            .into_iter()
+            .map(|(rowid, distance)| (rowid, f64::from(distance)))
+            .collect();
+
+    let fused = rrf_fuse(&vec_ranked, &fts_ranked, K_RRF);
+
+    // Index the FTS-projected rows by rowid so the hydration step pulls
+    // straight from memory rather than re-querying the records table for
+    // rows we already have.
+    let mut fts_by_rowid: std::collections::HashMap<i64, (FtsRow, ProjectedTrust)> = fts_projected
+        .into_iter()
+        .map(|(r, p)| (r.rowid, (r, p)))
+        .collect();
+
+    // Any rowid that surfaced only from the vector branch needs hydration.
+    let vec_only: Vec<i64> = fused
+        .iter()
+        .filter_map(|(rowid, _)| {
+            if fts_by_rowid.contains_key(rowid) {
+                None
+            } else {
+                Some(*rowid)
+            }
+        })
+        .collect();
+    let mut hydrated: std::collections::HashMap<i64, (FtsRow, ProjectedTrust)> =
+        hydrate_rows_by_rowid(conn, opts, &vec_only)?
+            .into_iter()
+            .map(|(r, p)| (r.rowid, (r, p)))
+            .collect();
+
+    let mut scored: Vec<(FtsRow, ProjectedTrust, f64)> = Vec::with_capacity(fused.len());
+    for (rowid, fused_score) in fused {
+        let (row, projected) = if let Some(pair) = fts_by_rowid.remove(&rowid) {
+            pair
+        } else if let Some(pair) = hydrated.remove(&rowid) {
+            pair
+        } else {
+            // The rowid surfaced from the vector branch but was filtered
+            // out by the metadata pushdown during hydration (the two
+            // branches share the same filter SQL, so this is unreachable
+            // in practice). Skip rather than fabricate a row.
+            continue;
+        };
+        let mut score = fused_score;
+        if !is_verified(&projected) && !opts.filters.no_unsigned_penalty {
+            score *= opts.unsigned_ranking_penalty;
+        }
+        scored.push((row, projected, score));
+    }
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(scored)
+}
+
+/// Convenience: a row is "verified" when its projected signature status is
+/// `Verified`. Drives the unsigned-content penalty branch in both scoring
+/// paths.
+fn is_verified(p: &ProjectedTrust) -> bool {
+    p.signature_status == SignatureStatus::Verified
+}
+
+/// Reciprocal-rank-fusion over two ranked candidate lists. Both inputs are
+/// sorted best-first; the position (1-indexed) is the rank used in
+/// `1 / (k + rank)`. Rows present in both branches see their scores
+/// summed.
+///
+/// Returns `(rowid, score)` sorted by descending score. Ties (rows that
+/// landed at the same rank in only one branch each) come out in the order
+/// they were first inserted: vector-branch rows first, then FTS-branch
+/// rows. The score-equal sort step uses `partial_cmp` and falls back to
+/// `Ordering::Equal` so NaN scores (impossible here, defended for sanity)
+/// do not panic.
+pub(crate) fn rrf_fuse(
+    vec_ranked: &[(i64, f64)],
+    fts_ranked: &[(i64, f64)],
+    k: f64,
+) -> Vec<(i64, f64)> {
+    use std::collections::HashMap;
+    let mut acc: HashMap<i64, f64> = HashMap::new();
+    let mut order: Vec<i64> = Vec::with_capacity(vec_ranked.len() + fts_ranked.len());
+
+    let mut accumulate = |branch: &[(i64, f64)]| {
+        for (idx, (rowid, _)) in branch.iter().enumerate() {
+            let rank = u32::try_from(idx).unwrap_or(u32::MAX);
+            let rank = f64::from(rank) + 1.0;
+            let contribution = 1.0 / (k + rank);
+            acc.entry(*rowid)
+                .and_modify(|s| *s += contribution)
+                .or_insert_with(|| {
+                    order.push(*rowid);
+                    contribution
+                });
+        }
+    };
+    accumulate(vec_ranked);
+    accumulate(fts_ranked);
+
+    let mut out: Vec<(i64, f64)> = order.into_iter().map(|id| (id, acc[&id])).collect();
+    out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// Re-fetch records by rowid and project per-row trust. Used by the hybrid
+/// path for rowids that came from the vector branch but were absent from
+/// the FTS candidates. Empty `rowids` short-circuits.
+fn hydrate_rows_by_rowid(
+    conn: &Connection,
+    opts: &SearchOpts,
+    rowids: &[i64],
+) -> Result<Vec<(FtsRow, ProjectedTrust)>, QueryError> {
+    if rowids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (1..=rowids.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
+                records.body, records.source, records.project_id, \
+                records.crypto_result, records.updated, \
+                records.record_commit_sha, records.signer_fingerprint, \
+                records.relevant_trust_events_commit \
+         FROM records WHERE records.rowid IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<rusqlite::types::Value> = rowids
+        .iter()
+        .map(|id| rusqlite::types::Value::Integer(*id))
+        .collect();
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+        let crypto_result = CryptoResult::from_db_str(&row.get::<_, String>(8)?);
+        Ok(FtsRow {
+            rowid: row.get(0)?,
+            id: row.get(1)?,
+            record_type: row.get::<_, String>(2)?,
+            title: row.get(3)?,
+            summary: row.get::<_, Option<String>>(4)?,
+            body: row.get::<_, String>(5)?,
+            source: row.get::<_, String>(6)?,
+            project_id: row.get(7)?,
+            crypto_result,
+            updated: row.get(9)?,
+            record_commit_sha: row.get::<_, Option<String>>(10)?,
+            signer_fingerprint: row.get::<_, Option<String>>(11)?,
+            relevant_trust_events_commit: row.get::<_, Option<String>>(12)?,
+        })
+    })?;
+    let raw_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
+
+    let ctx = ProjectionContext::new(conn)?;
+    ctx.project_rows(raw_rows, opts.filters.strict_revocation, |row| {
+        CachedCrypto {
+            crypto_result: row.crypto_result,
+            signer_fingerprint: row.signer_fingerprint.as_deref(),
+            commit_sha: row.record_commit_sha.as_deref(),
+            relevant_trust_events_commit: row.relevant_trust_events_commit.as_deref(),
+        }
+    })
+}
+
 /// Fetch the FTS-matched rows and project per-row trust. Splits out of
 /// `search` so the verb stays under the strict-clippy `too-many-lines`
 /// threshold.
@@ -153,7 +359,7 @@ fn fetch_and_project(
     // up trust state at the events.yml commit effective when the record
     // was signed.
     let fts_sql = format!(
-        "SELECT records.id, records.record_type, records.title, records.summary, \
+        "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
                 records.body, records.source, records.project_id, \
                 records.crypto_result, records.updated, \
                 records.record_commit_sha, records.signer_fingerprint, \
@@ -174,20 +380,21 @@ fn fetch_and_project(
         params.push(p);
     }
     let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
-        let crypto_result = CryptoResult::from_db_str(&row.get::<_, String>(7)?);
+        let crypto_result = CryptoResult::from_db_str(&row.get::<_, String>(8)?);
         Ok(FtsRow {
-            id: row.get(0)?,
-            record_type: row.get::<_, String>(1)?,
-            title: row.get(2)?,
-            summary: row.get::<_, Option<String>>(3)?,
-            body: row.get::<_, String>(4)?,
-            source: row.get::<_, String>(5)?,
-            project_id: row.get(6)?,
+            rowid: row.get(0)?,
+            id: row.get(1)?,
+            record_type: row.get::<_, String>(2)?,
+            title: row.get(3)?,
+            summary: row.get::<_, Option<String>>(4)?,
+            body: row.get::<_, String>(5)?,
+            source: row.get::<_, String>(6)?,
+            project_id: row.get(7)?,
             crypto_result,
-            updated: row.get(8)?,
-            record_commit_sha: row.get::<_, Option<String>>(9)?,
-            signer_fingerprint: row.get::<_, Option<String>>(10)?,
-            relevant_trust_events_commit: row.get::<_, Option<String>>(11)?,
+            updated: row.get(9)?,
+            record_commit_sha: row.get::<_, Option<String>>(10)?,
+            signer_fingerprint: row.get::<_, Option<String>>(11)?,
+            relevant_trust_events_commit: row.get::<_, Option<String>>(12)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -234,6 +441,9 @@ fn project_row(r: FtsRow, p: ProjectedTrust, score: f64, include_body: bool) -> 
 
 #[derive(Debug)]
 struct FtsRow {
+    /// `records.rowid` — kept so the hybrid branch can fuse the FTS and vector
+    /// candidate lists by rowid before re-hydrating projected rows.
+    rowid: i64,
     id: String,
     record_type: String,
     title: String,
@@ -344,10 +554,6 @@ pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::type
 /// # Errors
 /// `QueryError::Rusqlite` on any rusqlite error;
 /// `QueryError::InvalidFilter` if the query vector has the wrong dimension.
-// Transitional: the RRF-fusion site that consumes this helper lands in the
-// next task; tests exercise it directly so the dead-code lint fires until
-// then. Remove this allow when the hybrid scoring wire-up arrives.
-#[allow(dead_code)]
 pub(crate) fn fetch_semantic_candidates(
     conn: &Connection,
     filters: &Filters,
@@ -589,6 +795,81 @@ mod tests {
             .collect();
         assert_eq!(ids[0], "a");
         assert_eq!(ids[1], "b");
+    }
+
+    #[test]
+    fn rrf_fuses_vec_and_fts_ranks() {
+        // Both branches list rowid 10 at rank 1. Rowid 20 is rank-2 in the
+        // vector branch only; rowid 30 is rank-2 in the FTS branch only.
+        // Expected ordering: 10 first (sum of both 1/61 contributions);
+        // 20 and 30 tied at 1/62, ordering deterministic by insertion
+        // order (vector branch first, so 20 before 30).
+        let vec_ranked = vec![(10_i64, 0.1), (20, 0.2)];
+        let fts_ranked = vec![(10_i64, 0.5), (30, 0.6)];
+        let fused = super::rrf_fuse(&vec_ranked, &fts_ranked, 60.0);
+
+        let ids: Vec<i64> = fused.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids[0], 10);
+        assert_eq!(ids.len(), 3);
+        assert!(ids[1..].contains(&20));
+        assert!(ids[1..].contains(&30));
+
+        let expected_tied = 1.0 / 62.0;
+        for (id, score) in &fused[1..] {
+            assert!(
+                (score - expected_tied).abs() < 1e-9,
+                "tied rowid {id} got score {score}"
+            );
+        }
+        let expected_both = 1.0 / 61.0 + 1.0 / 61.0;
+        assert!((fused[0].1 - expected_both).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rrf_vec_only_degenerates_cleanly() {
+        let vec_ranked = vec![(10_i64, 0.1), (20, 0.2), (30, 0.3)];
+        let fused = super::rrf_fuse(&vec_ranked, &[], 60.0);
+        assert_eq!(
+            fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn rrf_fts_only_degenerates_cleanly() {
+        let fts_ranked = vec![(10_i64, 0.1), (20, 0.2), (30, 0.3)];
+        let fused = super::rrf_fuse(&[], &fts_ranked, 60.0);
+        assert_eq!(
+            fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn hybrid_search_returns_rows_from_both_branches() {
+        // Row "a-fts" has a title matching the FTS query but a vector that
+        // is far from the query vector. Row "b-vec" has a title that does
+        // not match the FTS query but a vector close to the query vector.
+        // With both branches running, fusion must surface both rowids.
+        let (_dir, conn) = open_test_db();
+        insert_record_with_vector(&conn, "a-fts", "concurrency match", &mostly_zeros(), "p");
+        insert_record_with_vector(&conn, "b-vec", "title-b", &mostly_ones(), "p");
+
+        let mut opts = SearchOpts::new("concurrency");
+        opts.query_vector = Some(mostly_ones());
+        opts.top_k = 5;
+
+        let res = search(&conn, &opts).expect("hybrid search");
+        let ids: std::collections::HashSet<String> =
+            res.results.iter().map(|r| r.id.clone()).collect();
+        assert!(
+            ids.contains("a-fts"),
+            "FTS-only match should appear: {ids:?}"
+        );
+        assert!(
+            ids.contains("b-vec"),
+            "vector-only match should appear: {ids:?}"
+        );
     }
 
     #[test]
