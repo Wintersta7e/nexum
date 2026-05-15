@@ -3,11 +3,11 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use nexum_core::api::error::ErrorEnvelope;
+use nexum_core::api::error::{ErrorEnvelope, Remediation, error_codes};
 use nexum_core::config::types::Config;
 use nexum_core::paths::Paths;
-use nexum_core::query::{Filters, SearchOpts, SessionLookup};
-use nexum_core::records::{Confidence, RecordType, Source};
+use nexum_core::query::{Filters, GetOpts, GetSuccess, SearchOpts, SessionLookup};
+use nexum_core::records::{Confidence, GetOutcome, RecordKey, RecordType, Source};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -15,7 +15,7 @@ use rmcp::model::{
 };
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 
-use crate::dto::{BySessionParams, ListParams, RecentParams, SearchParams};
+use crate::dto::{BySessionParams, GetParams, ListParams, RecentParams, SearchParams};
 
 /// Resolved-once runtime context for the server process.
 ///
@@ -335,6 +335,125 @@ impl NexumServer {
             Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
             Err(join_err) => Err(rmcp::ErrorData::internal_error(
                 format!("by_session task panicked: {join_err}"),
+                None,
+            )),
+        }
+    }
+
+    /// Fetch one full record by id.
+    ///
+    /// `id` accepts a bare id or `<source>:<project_id>:<id>`. A bare id that
+    /// matches multiple rows returns an `AMBIGUOUS_KEY` envelope with the
+    /// candidate list. Records suppressed by trust policy return
+    /// `HIDDEN_BY_POLICY`; retry with `include_unsigned: true` to inspect.
+    #[tool(
+        description = "Fetch one full record by id. `id` accepts a bare id or \
+                       qualified key `<source>:<project_id>:<id>`. A bare id \
+                       matching multiple rows returns AMBIGUOUS_KEY with the \
+                       candidate list. Records suppressed by trust policy \
+                       return HIDDEN_BY_POLICY; retry with \
+                       include_unsigned=true to inspect. Each row includes \
+                       trust fields (signature_status, trust_basis, warnings).",
+        annotations(
+            read_only_hint = true,
+            idempotent_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn get(
+        &self,
+        Parameters(params): Parameters<GetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Mirror the CLI: a colon-bearing id must parse as the qualified form,
+        // a bare id always resolves to a bare key. A colon-bearing id that
+        // fails to parse is a malformed call (`invalid_params`), not a domain
+        // condition — we won't silently fall back to bare.
+        let key = if params.id.contains(':') {
+            match RecordKey::parse_qualified(&params.id) {
+                Some(k) => k,
+                None => {
+                    return Err(rmcp::ErrorData::invalid_params(
+                        format!(
+                            "`{}` looks like a qualified key but isn't valid \
+                             `<source>:<project_id>:<id>`",
+                            params.id
+                        ),
+                        Some(serde_json::json!({ "field": "id", "value": params.id })),
+                    ));
+                }
+            }
+        } else {
+            RecordKey::bare(params.id.clone())
+        };
+
+        let (paths, cfg) = match self.runtime() {
+            RuntimeState::Ready { paths, cfg } => (paths.clone(), cfg.clone()),
+            RuntimeState::Unavailable(envelope) => {
+                return Ok(unavailable_result(envelope));
+            }
+        };
+
+        let opts = GetOpts {
+            include_unsigned: params.include_unsigned,
+            trust_policy: cfg.trust.unsigned_default,
+            strict_revocation: params.strict_revocation,
+        };
+        let requested_id = params.id.clone();
+
+        // The synchronous core verb runs on a blocking thread so the async
+        // runtime worker is not parked on SQLite I/O.
+        let result =
+            tokio::task::spawn_blocking(move || nexum_core::api::get(&paths, &cfg, &key, &opts))
+                .await;
+
+        match result {
+            Ok(Ok(GetOutcome::Found { record, meta })) => {
+                let envelope = GetSuccess { record, meta };
+                let value = serde_json::to_value(&envelope).map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to serialize get result: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Ok(Ok(GetOutcome::NotFound)) => {
+                let env = ErrorEnvelope {
+                    error_code: error_codes::NOT_FOUND,
+                    message: format!("no record matches `{requested_id}`"),
+                    remediation: Some(Remediation {
+                        command: None,
+                        rationale: "Verify the id is correct, or call `search` \
+                                    to find candidate records."
+                            .into(),
+                    }),
+                    context: serde_json::json!({ "requested_id": requested_id }),
+                };
+                Ok(envelope_to_result(&env))
+            }
+            Ok(Ok(GetOutcome::HiddenByPolicy { signature_status })) => {
+                let env = ErrorEnvelope {
+                    error_code: error_codes::HIDDEN_BY_POLICY,
+                    message: format!(
+                        "record exists but hidden by trust policy (status: {signature_status})"
+                    ),
+                    remediation: Some(Remediation {
+                        command: None,
+                        rationale: "Retry with `include_unsigned: true` to inspect the record \
+                                    deliberately."
+                            .into(),
+                    }),
+                    context: serde_json::json!({
+                        "signature_status": signature_status.to_string(),
+                        "requested_id": requested_id,
+                    }),
+                };
+                Ok(envelope_to_result(&env))
+            }
+            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+            Err(join_err) => Err(rmcp::ErrorData::internal_error(
+                format!("get task panicked: {join_err}"),
                 None,
             )),
         }

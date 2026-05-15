@@ -14,7 +14,7 @@ pub mod types;
 pub mod verify;
 
 pub use by_session::{SessionLookup, by_session};
-pub use get::{GetOpts, get};
+pub use get::{GetOpts, GetSuccess, get};
 pub use list::list;
 pub use recent::recent;
 pub use search::{SearchOpts, search};

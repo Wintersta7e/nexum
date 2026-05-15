@@ -131,6 +131,28 @@ impl McpTestHome {
         }
     }
 
+    /// Initialized + indexed home with `unsigned_default = "hide"` and one
+    /// unsigned record at the given id. Exercises the `HiddenByPolicy` arm
+    /// of `get` and the `include_unsigned` override path.
+    ///
+    /// The local-adapter record written here lands uncommitted in
+    /// `notebook.git`, so the indexer's crypto batch finds no
+    /// `record_commit_sha` and leaves the adapter's
+    /// `CryptoResult::NoSignature` in place — the record projects as
+    /// `SignatureStatus::Unsigned`, which the hide policy then suppresses.
+    pub fn ready_hide_policy_with_unsigned_record(id: &str) -> Self {
+        let root = TempDir::new().expect("tempdir for McpTestHome");
+        let (paths, mut cfg) = init_and_resolve(&root);
+        cfg.trust.unsigned_default = nexum_core::records::TrustPolicy::Hide;
+        write_local_yaml(&paths.notebook_git, "decisions", id, "unsigned body");
+        index(&paths, &cfg);
+        Self {
+            root,
+            paths: Some(paths),
+            cfg: Some(cfg),
+        }
+    }
+
     /// No nexum home at all: the temp dir exists but `nexum init` was never
     /// run, so `resolve_runtime` fails. The server still starts — every tool
     /// call returns a `NOT_INITIALIZED` structured error.

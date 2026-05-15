@@ -347,3 +347,131 @@ async fn list_unknown_source_is_invalid_params() {
 
     connected.shutdown().await;
 }
+
+#[tokio::test]
+async fn get_found_returns_record_and_meta() {
+    // The ready fixture seeds `decisions/seed.yml` with id `seed`; a
+    // bare-id `get` returns the record (success) with the `_meta` envelope.
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("id".into(), serde_json::Value::from("seed"));
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("get").with_arguments(args))
+        .await
+        .expect("get tool call must dispatch");
+
+    let structured = expect_structured(&result);
+    assert_eq!(
+        structured["record"]["id"], "seed",
+        "the returned record carries the requested id"
+    );
+    assert!(
+        structured["_meta"]["trust_policy"].is_string(),
+        "_meta carries a `trust_policy` string"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn get_missing_id_returns_not_found_envelope() {
+    // An indexed-but-empty home has no records; `get` returns the
+    // structured `NOT_FOUND` envelope, not a protocol error.
+    let connected = McpTestHome::indexed_empty().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("id".into(), serde_json::Value::from("missing"));
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("get").with_arguments(args))
+        .await
+        .expect("get tool call must dispatch");
+
+    assert_eq!(result.is_error, Some(true), "no record -> is_error = true");
+    assert_eq!(
+        expect_error_code(&result),
+        error_codes::NOT_FOUND,
+        "missing id must surface as NOT_FOUND"
+    );
+    let envelope = result
+        .structured_content
+        .as_ref()
+        .expect("error result carries a structured envelope");
+    assert_eq!(
+        envelope["context"]["requested_id"], "missing",
+        "context echoes the requested id back"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn get_unsigned_under_hide_policy_returns_hidden_envelope() {
+    // First call: hide policy is active and the seeded record is unsigned,
+    // so `get` returns the `HIDDEN_BY_POLICY` envelope. Second call: the
+    // `include_unsigned` override bypasses the policy and surfaces the
+    // record as a success.
+    let connected = McpTestHome::ready_hide_policy_with_unsigned_record("u")
+        .connect()
+        .await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("id".into(), serde_json::Value::from("u"));
+    let hidden = connected
+        .client
+        .call_tool(CallToolRequestParams::new("get").with_arguments(args))
+        .await
+        .expect("get tool call must dispatch");
+    assert_eq!(
+        hidden.is_error,
+        Some(true),
+        "hide policy -> is_error = true"
+    );
+    assert_eq!(
+        expect_error_code(&hidden),
+        error_codes::HIDDEN_BY_POLICY,
+        "unsigned record under hide policy -> HIDDEN_BY_POLICY"
+    );
+
+    let mut override_args = serde_json::Map::new();
+    override_args.insert("id".into(), serde_json::Value::from("u"));
+    override_args.insert("include_unsigned".into(), serde_json::Value::from(true));
+    let shown = connected
+        .client
+        .call_tool(CallToolRequestParams::new("get").with_arguments(override_args))
+        .await
+        .expect("get tool call must dispatch");
+    let structured = expect_structured(&shown);
+    assert_eq!(
+        structured["record"]["id"], "u",
+        "include_unsigned=true returns the record verbatim"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn get_malformed_qualified_id_is_invalid_params() {
+    // A colon-bearing id that doesn't parse as `<source>:<project_id>:<id>`
+    // is a malformed call, not a domain condition — the handler returns
+    // `invalid_params` rather than silently falling back to a bare id.
+    let connected = McpTestHome::indexed_empty().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("id".into(), serde_json::Value::from("local:foo"));
+    let err = connected
+        .client
+        .call_tool(CallToolRequestParams::new("get").with_arguments(args))
+        .await
+        .expect_err("a malformed qualified id is a protocol error");
+
+    let code = match err {
+        ServiceError::McpError(ref e) => e.code.0,
+        _ => panic!("expected ServiceError::McpError, got: {err:?}"),
+    };
+    assert_eq!(code, -32602, "malformed qualified id -> invalid_params");
+
+    connected.shutdown().await;
+}

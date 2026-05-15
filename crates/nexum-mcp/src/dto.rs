@@ -137,9 +137,34 @@ pub struct BySessionParams {
     pub strict_revocation: bool,
 }
 
+// ───── get ─────────────────────────────────────────────────────────────────
+
+/// Params for the `get` tool — fetch one full record by id.
+///
+/// `id` accepts either a bare id (`my-record`) or a fully-qualified key
+/// (`<source>:<project_id>:<id>`). A colon-bearing value that fails to parse
+/// as a qualified key is rejected with `invalid_params` at the handler — we
+/// won't silently fall back to a bare key in case the agent typoed
+/// `local:foo` expecting it to qualify.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetParams {
+    /// Record id (bare) or qualified key `<source>:<project_id>:<id>`. Required.
+    pub id: String,
+    /// Return the record regardless of the active trust policy. Pair with the
+    /// envelope-side `HIDDEN_BY_POLICY` remediation: agents retry with
+    /// `include_unsigned: true` only when the user has asked to inspect a
+    /// hidden record deliberately.
+    #[serde(default)]
+    pub include_unsigned: bool,
+    /// Force strict-revocation checking on for this call (cannot relax a
+    /// `true` config default — "stricter prevails").
+    #[serde(default)]
+    pub strict_revocation: bool,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BySessionParams, ListParams, RecentParams, SearchParams};
+    use super::{BySessionParams, GetParams, ListParams, RecentParams, SearchParams};
 
     #[test]
     fn empty_object_deserializes_to_documented_defaults() {
@@ -197,5 +222,14 @@ mod tests {
         assert_eq!(params.codex_thread_id, None);
         assert!(!params.require_signed);
         assert!(!params.strict_revocation);
+    }
+
+    #[test]
+    fn get_params_id_required_others_default() {
+        let p: GetParams = serde_json::from_str(r#"{"id":"x"}"#).unwrap();
+        assert_eq!(p.id, "x");
+        assert!(!p.include_unsigned);
+        assert!(!p.strict_revocation);
+        assert!(serde_json::from_str::<GetParams>("{}").is_err());
     }
 }
