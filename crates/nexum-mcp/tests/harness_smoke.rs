@@ -7,8 +7,9 @@
 
 mod common;
 
-use common::{McpTestHome, expect_error_code};
+use common::{McpTestHome, expect_error_code, expect_structured};
 use nexum_core::api::error::error_codes;
+use rmcp::model::CallToolRequestParams;
 
 #[tokio::test]
 async fn ready_home_connects_and_lists_tools() {
@@ -71,6 +72,64 @@ async fn recent_on_unavailable_home_returns_not_initialized() {
         expect_error_code(&result),
         error_codes::NOT_INITIALIZED,
         "a tool call on an unavailable runtime must yield a NOT_INITIALIZED structured error"
+    );
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn recent_on_ready_fixture_returns_structured_result_set() {
+    // A `Ready` fixture has one seeded record; `recent` returns a structured
+    // ResultSet with the standard wire shape (`results` + `_meta`), capped at
+    // the `limit` argument the agent passed.
+    let connected = McpTestHome::ready().connect().await;
+
+    let mut args = serde_json::Map::new();
+    args.insert("limit".into(), serde_json::Value::from(5));
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("recent").with_arguments(args))
+        .await
+        .expect("recent tool call must dispatch without a protocol error");
+
+    let structured = expect_structured(&result);
+    assert!(
+        structured.get("results").is_some(),
+        "structured payload carries `results`"
+    );
+    assert!(
+        structured.get("_meta").is_some(),
+        "structured payload carries the `_meta` envelope"
+    );
+    let results = structured["results"]
+        .as_array()
+        .expect("`results` is an array");
+    assert!(results.len() <= 5, "limit=5 caps the returned rows");
+
+    connected.shutdown().await;
+}
+
+#[tokio::test]
+async fn recent_on_indexed_but_empty_returns_empty_result_set() {
+    // An indexed-but-empty home is a *success*, not an error: the wire shape
+    // is intact — `total_matched = 0` and an empty `results` array.
+    let connected = McpTestHome::indexed_empty().connect().await;
+
+    let result = connected
+        .client
+        .call_tool(CallToolRequestParams::new("recent"))
+        .await
+        .expect("recent tool call must dispatch");
+
+    let structured = expect_structured(&result);
+    assert_eq!(structured["total_matched"], 0, "no records indexed");
+    assert_eq!(
+        structured["results"]
+            .as_array()
+            .expect("`results` is an array")
+            .len(),
+        0,
+        "the results array is empty"
     );
 
     connected.shutdown().await;
