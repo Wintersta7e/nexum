@@ -43,10 +43,3 @@ tempfile = { workspace = true }
 ssh-key = { workspace = true }
 # Multi-project fixtures write into `Config.projects` (type `toml::Table`).
 toml = { workspace = true }
-
-[features]
-# The tool-catalog test (`tests/tool_list.rs`) asserts all six tools are
-# registered; it stays RED until the tool handlers land. Gated off by
-# default so the workspace `cargo test --all-targets` gate stays green
-# between tasks. The last tool task removes this gate for good.
-full-tool-catalog = []

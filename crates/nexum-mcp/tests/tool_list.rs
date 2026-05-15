@@ -1,4 +1,3 @@
-#![cfg(feature = "full-tool-catalog")]
 //! Tool-catalog conformance: the server exposes exactly the six read-only
 //! tools, each with read-only annotations and a description within the
 //! token budget.
