@@ -108,27 +108,10 @@ impl NexumServer {
         let limit = params.limit;
         let source = params.source;
 
-        let result = tokio::task::spawn_blocking(move || {
+        dispatch_blocking("recent", move || {
             nexum_core::api::recent(&paths, &cfg, &filters, limit, source.as_deref())
         })
-        .await;
-
-        match result {
-            Ok(Ok(result_set)) => {
-                let value = serde_json::to_value(&result_set).map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("failed to serialize recent result: {e}"),
-                        None,
-                    )
-                })?;
-                Ok(CallToolResult::structured(value))
-            }
-            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("recent task panicked: {join_err}"),
-                None,
-            )),
-        }
+        .await
     }
 
     /// Full-text ranked search across memory records.
@@ -182,25 +165,10 @@ impl NexumServer {
         opts.trust_policy = cfg.trust.unsigned_default;
         opts.filters = filters;
 
-        let result =
-            tokio::task::spawn_blocking(move || nexum_core::api::search(&paths, &cfg, &opts)).await;
-
-        match result {
-            Ok(Ok(result_set)) => {
-                let value = serde_json::to_value(&result_set).map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("failed to serialize search result: {e}"),
-                        None,
-                    )
-                })?;
-                Ok(CallToolResult::structured(value))
-            }
-            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("search task panicked: {join_err}"),
-                None,
-            )),
-        }
+        dispatch_blocking("search", move || {
+            nexum_core::api::search(&paths, &cfg, &opts)
+        })
+        .await
     }
 
     /// Filtered, paginated listing of memory records.
@@ -248,27 +216,10 @@ impl NexumServer {
         let limit = params.limit;
         let cursor = params.cursor;
 
-        let result = tokio::task::spawn_blocking(move || {
+        dispatch_blocking("list", move || {
             nexum_core::api::list(&paths, &cfg, &filters, limit, cursor.as_deref())
         })
-        .await;
-
-        match result {
-            Ok(Ok(result_set)) => {
-                let value = serde_json::to_value(&result_set).map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("failed to serialize list result: {e}"),
-                        None,
-                    )
-                })?;
-                Ok(CallToolResult::structured(value))
-            }
-            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("list task panicked: {join_err}"),
-                None,
-            )),
-        }
+        .await
     }
 
     /// Records associated with a specific session.
@@ -317,27 +268,10 @@ impl NexumServer {
             ..Filters::default()
         };
 
-        let result = tokio::task::spawn_blocking(move || {
+        dispatch_blocking("by_session", move || {
             nexum_core::api::by_session(&paths, &cfg, &filters, &lookup)
         })
-        .await;
-
-        match result {
-            Ok(Ok(result_set)) => {
-                let value = serde_json::to_value(&result_set).map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("failed to serialize by_session result: {e}"),
-                        None,
-                    )
-                })?;
-                Ok(CallToolResult::structured(value))
-            }
-            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("by_session task panicked: {join_err}"),
-                None,
-            )),
-        }
+        .await
     }
 
     /// Fetch one full record by id.
@@ -486,28 +420,13 @@ impl NexumServer {
             }
         };
 
-        let result =
-            tokio::task::spawn_blocking(move || nexum_core::api::list_projects(&paths, &cfg)).await;
-
-        match result {
-            Ok(Ok(listing)) => {
-                // `ProjectListing` already serializes as `{ results, _meta }` —
-                // the `_meta` rename lives on the core type, so the MCP layer
-                // serializes it straight through.
-                let value = serde_json::to_value(&listing).map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("failed to serialize list_projects result: {e}"),
-                        None,
-                    )
-                })?;
-                Ok(CallToolResult::structured(value))
-            }
-            Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
-            Err(join_err) => Err(rmcp::ErrorData::internal_error(
-                format!("list_projects task panicked: {join_err}"),
-                None,
-            )),
-        }
+        // `ProjectListing` already serializes as `{ results, _meta }` — the
+        // `_meta` rename lives on the core type, so the MCP layer serializes
+        // it straight through.
+        dispatch_blocking("list_projects", move || {
+            nexum_core::api::list_projects(&paths, &cfg)
+        })
+        .await
     }
 }
 
@@ -644,6 +563,47 @@ pub(crate) fn unavailable_result(envelope: &ErrorEnvelope) -> CallToolResult {
 pub(crate) fn api_error_result(err: &nexum_core::api::ApiError) -> CallToolResult {
     let envelope: ErrorEnvelope = err.into();
     envelope_to_result(&envelope)
+}
+
+/// Dispatch a synchronous `nexum_core::api` read verb onto the blocking
+/// pool and map its three outcomes into the MCP channels:
+///
+/// - `Ok(Ok(payload))` → `CallToolResult::structured` of the payload's
+///   `serde_json` value (success channel).
+/// - `Ok(Err(api_err))` → [`api_error_result`] — the domain-error envelope
+///   channel.
+/// - `Err(join_err)` (the blocking task panicked) →
+///   `rmcp::ErrorData::internal_error` — a genuine server fault, not an
+///   agent-facing outcome.
+///
+/// `verb_name` flows into the failure-path error messages so a serialize
+/// failure or panic names the offending handler. The five listing/search
+/// handlers share this shape; `get` has bespoke `GetOutcome`-variant
+/// mapping and is not routed through here.
+async fn dispatch_blocking<R, F>(
+    verb_name: &'static str,
+    work: F,
+) -> Result<CallToolResult, rmcp::ErrorData>
+where
+    R: serde::Serialize + Send + 'static,
+    F: FnOnce() -> Result<R, nexum_core::api::ApiError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(work).await {
+        Ok(Ok(payload)) => {
+            let value = serde_json::to_value(&payload).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("failed to serialize {verb_name} result: {e}"),
+                    None,
+                )
+            })?;
+            Ok(CallToolResult::structured(value))
+        }
+        Ok(Err(api_err)) => Ok(api_error_result(&api_err)),
+        Err(join_err) => Err(rmcp::ErrorData::internal_error(
+            format!("{verb_name} task panicked: {join_err}"),
+            None,
+        )),
+    }
 }
 
 // ───── Protocol-error helpers: enum-string parsing ─────────────────────────
