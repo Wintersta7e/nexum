@@ -1578,6 +1578,7 @@ dependencies = [
  "fs2",
  "git2",
  "insta",
+ "ndarray",
  "ort",
  "reqwest",
  "rusqlite",

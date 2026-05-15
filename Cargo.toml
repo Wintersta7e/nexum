@@ -38,6 +38,9 @@ rusqlite = { version = "0.39", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1"
 # Embeddings — `ort` is still pre-1.0 in the 2.x series.
 ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
+# `ndarray` is exposed by `ort`'s public tensor API; pin to the same major
+# (`0.17`) that `ort = "=2.0.0-rc.12"` depends on to avoid version skew.
+ndarray = "0.17"
 tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
