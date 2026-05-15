@@ -537,7 +537,7 @@ mod cell_tests {
             },
         )
         .unwrap();
-        assert!(matches!(outcome, GetOutcome::Found(_)));
+        assert!(matches!(outcome, GetOutcome::Found { .. }));
     }
 
     /// Under `WarnButShow + include_unsigned=false`, an unsigned record
@@ -558,7 +558,7 @@ mod cell_tests {
             },
         )
         .unwrap();
-        let GetOutcome::Found(record) = outcome else {
+        let GetOutcome::Found { record, .. } = outcome else {
             panic!("expected Found under WarnButShow, got non-Found");
         };
         assert_eq!(record.id, "unsigned");
@@ -587,7 +587,7 @@ mod cell_tests {
             },
         )
         .unwrap();
-        let GetOutcome::Found(record) = outcome else {
+        let GetOutcome::Found { record, .. } = outcome else {
             panic!("expected Found under WarnButShow, got non-Found");
         };
         assert_eq!(record.id, "bad-sig");

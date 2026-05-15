@@ -11,6 +11,7 @@ mod common;
 
 use common::NexumTestHome;
 use nexum_core::api;
+use nexum_core::config::types::Config;
 use nexum_core::query::{Filters, GetOpts, QueryError, SearchOpts, SessionLookup};
 use nexum_core::records::RecordKey;
 
@@ -92,7 +93,7 @@ fn list_projects_against_missing_index_errors_without_creating_db() {
     let paths = home.paths();
     assert!(!paths.index_db.exists());
 
-    let result = api::list_projects(&paths);
+    let result = api::list_projects(&paths, &Config::seed());
     let err = result.expect_err("list_projects must error when index is missing");
     assert_index_missing(&err);
     assert!(

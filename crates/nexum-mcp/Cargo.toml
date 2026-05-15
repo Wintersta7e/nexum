@@ -11,6 +11,10 @@ description = "MCP (Model Context Protocol) server for nexum"
 [lints]
 workspace = true
 
+[lib]
+name = "nexum_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nexum-mcp"
 path = "src/main.rs"
@@ -18,9 +22,24 @@ path = "src/main.rs"
 [dependencies]
 nexum-core = { path = "../nexum-core" }
 anyhow = { workspace = true }
+uuid = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# rmcp dependency added when MCP server scaffolding lands.
+rmcp = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]
+# `client` + `transport-child-process` drive the in-process duplex test
+# harness and the child-process stdio smoke test. `tokio`'s `test-util`
+# feature provides `tokio::io::duplex`.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+# The harness generates an ephemeral ed25519 keypair to feed `init::run`,
+# mirroring the CLI / core test commons — no committed credentials.
+ssh-key = { workspace = true }
+# Multi-project fixtures write into `Config.projects` (type `toml::Table`).
+toml = { workspace = true }

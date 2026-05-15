@@ -112,7 +112,7 @@ fn get_by_exact_key_returns_found() {
     };
     let key = RecordKey::exact(Source::CodexNative, "git:proj-a", "shared-id");
     let result = query::get(&conn, &key, &opts).unwrap();
-    assert!(matches!(result, GetOutcome::Found(_)));
+    assert!(matches!(result, GetOutcome::Found { .. }));
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn get_by_bare_id_returns_found_when_unique() {
         strict_revocation: false,
     };
     let result = query::get(&conn, &RecordKey::bare("uniq"), &opts).unwrap();
-    assert!(matches!(result, GetOutcome::Found(_)));
+    assert!(matches!(result, GetOutcome::Found { .. }));
 }
 
 // `api::get` accepts &RecordKey end-to-end (CLI's qualified parsing exercised
@@ -144,5 +144,5 @@ fn api_get_round_trip_via_record_key() {
     };
     let cfg = Config::seed();
     let result = api::get(&paths, &cfg, &RecordKey::bare("tau"), &opts).unwrap();
-    assert!(matches!(result, GetOutcome::Found(_)));
+    assert!(matches!(result, GetOutcome::Found { .. }));
 }

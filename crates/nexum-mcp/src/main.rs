@@ -1,23 +1,12 @@
 //! `nexum-mcp` — stdio MCP server binary.
 //!
-//! Stub. The MCP server implementation is not yet wired up.
+//! All logic lives in the `nexum_mcp` library so the integration tests can
+//! drive the server in-process; this binary just calls [`nexum_mcp::run`].
 
 #![forbid(unsafe_code)]
 
-use anyhow::Result;
+use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
-    eprintln!(
-        "nexum-mcp {} — stub. MCP server not yet implemented.",
-        nexum_core::version()
-    );
-    Ok(())
+fn main() -> ExitCode {
+    nexum_mcp::run()
 }

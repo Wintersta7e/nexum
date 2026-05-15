@@ -15,6 +15,7 @@ use crate::records::{
     RecordType, SessionRef, Source, TrustPolicy, UnifiedRecord,
 };
 
+use super::meta::build_meta_listing;
 use super::policy::{PolicyOpts, apply as apply_policy};
 use super::types::QueryError;
 use super::verify::{CachedCrypto, ProjectedTrust, ProjectionContext};
@@ -48,10 +49,21 @@ impl Default for GetOpts {
     }
 }
 
+/// Serializable `get` success envelope — `{ record, _meta }`. The CLI and
+/// MCP `get` success paths serialize this straight from a
+/// `GetOutcome::Found`; neither layer hand-builds the `_meta` wrapper.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GetSuccess {
+    pub record: Box<UnifiedRecord>,
+    #[serde(rename = "_meta")]
+    pub meta: super::Meta,
+}
+
 /// Fetch the full `UnifiedRecord` for `key`.
 ///
 /// Returns:
-/// - `Ok(GetOutcome::Found(r))` — record found and visible.
+/// - `Ok(GetOutcome::Found { record, meta })` — record found and visible;
+///   `meta` is the shared `_meta` envelope built over the same connection.
 /// - `Ok(GetOutcome::NotFound)` — no record matches the key.
 /// - `Ok(GetOutcome::HiddenByPolicy { signature_status })` — exactly one
 ///   record matches but is suppressed by `trust_policy = Hide` with
@@ -94,9 +106,16 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     // `include_unsigned` is the per-call escape hatch for agents that
     // need to inspect a record regardless of trust state. When set, we
     // bypass the centralized policy filter and surface the full
-    // projection.
+    // projection. `_meta` still ships — the success contract is uniform —
+    // but with the hide-bucket counters at their `build_meta_listing`
+    // defaults since no policy filtering ran.
     if opts.include_unsigned {
-        return build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)));
+        let meta = build_meta_listing(conn, opts.trust_policy)?;
+        let record = build_record(raw, crypto_result, projected)?;
+        return Ok(GetOutcome::Found {
+            record: Box::new(record),
+            meta,
+        });
     }
 
     // Route the single row through the same warn/hide/strict policy
@@ -108,9 +127,17 @@ pub fn get(conn: &Connection, key: &RecordKey, opts: &GetOpts) -> Result<GetOutc
     };
     let signature_status = projected.signature_status;
     let outcome = apply_policy(vec![(raw, projected)], policy_opts, |row| &row.1);
+    // `build_meta_listing` + `apply_policy_outcome`: the same `_meta`
+    // sequence the listing verbs run.
+    let mut meta = build_meta_listing(conn, opts.trust_policy)?;
+    meta.apply_policy_outcome(&outcome);
     match outcome.visible.into_iter().next() {
         Some((raw, projected)) => {
-            build_record(raw, crypto_result, projected).map(|r| GetOutcome::Found(Box::new(r)))
+            let record = build_record(raw, crypto_result, projected)?;
+            Ok(GetOutcome::Found {
+                record: Box::new(record),
+                meta,
+            })
         }
         None => Ok(GetOutcome::HiddenByPolicy { signature_status }),
     }
@@ -245,6 +272,7 @@ fn build_record(
             signer_fingerprint: raw.signer_fingerprint,
             crypto_result,
             relevant_trust_events_commit: raw.relevant_trust_events_commit,
+            trust_basis: projected.trust_basis,
             warnings: projected.warnings,
         },
         extras,
@@ -338,11 +366,59 @@ mod tests {
             },
         )
         .unwrap();
-        let GetOutcome::Found(r) = res else {
+        let GetOutcome::Found { record: r, .. } = res else {
             panic!("expected Found, got {res:?}");
         };
         assert_eq!(r.id, "alpha");
         assert_eq!(r.provenance.signature_status, SignatureStatus::Verified);
+    }
+
+    #[test]
+    fn get_signed_record_carries_trust_basis() {
+        use crate::records::TrustBasis;
+
+        let (_dir, conn) = open();
+        insert(&conn, "alpha", true);
+        let res = get(
+            &conn,
+            &RecordKey::bare("alpha"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record: r, .. } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        // The seeded chain keeps the bootstrap key trusted at head, so a
+        // record signed by it projects to `Current` — and `build_record`
+        // must forward that onto `Provenance`, not drop it to `None`.
+        assert_eq!(r.provenance.trust_basis, Some(TrustBasis::Current));
+    }
+
+    #[test]
+    fn get_unsigned_record_has_no_trust_basis() {
+        let (_dir, conn) = open();
+        insert(&conn, "u", false);
+        let res = get(
+            &conn,
+            &RecordKey::bare("u"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record: r, .. } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        // An unsigned record has no basis — the projection returns `None`
+        // and `build_record` forwards it unchanged.
+        assert_eq!(r.provenance.trust_basis, None);
+        assert_eq!(r.provenance.signature_status, SignatureStatus::Unsigned);
     }
 
     #[test]
@@ -367,7 +443,7 @@ mod tests {
         };
         assert!(matches!(
             get(&conn, &RecordKey::bare("u"), &hide_override).unwrap(),
-            GetOutcome::Found(_)
+            GetOutcome::Found { .. }
         ));
     }
 
@@ -385,7 +461,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(matches!(res, GetOutcome::Found(_)));
+        assert!(matches!(res, GetOutcome::Found { .. }));
     }
 
     #[test]
@@ -415,6 +491,98 @@ mod tests {
             id: "shared".into(),
         };
         let outcome = get(&conn, &key, &GetOpts::default()).unwrap();
-        assert!(matches!(outcome, GetOutcome::Found(_)));
+        assert!(matches!(outcome, GetOutcome::Found { .. }));
+    }
+
+    #[test]
+    fn get_found_carries_populated_meta() {
+        let (_dir, conn) = open();
+        insert(&conn, "alpha", true);
+        let res = get(
+            &conn,
+            &RecordKey::bare("alpha"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record, meta } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert_eq!(record.id, "alpha");
+        // `_meta` is built over the same connection: source_counts reflects
+        // the one seeded row, trust_policy mirrors the GetOpts policy.
+        assert_eq!(meta.source_counts.local, 1);
+        assert_eq!(meta.trust_policy, TrustPolicy::WarnButShow);
+        // The single verified row was visible — no rows hidden.
+        assert_eq!(meta.hidden_unsigned, 0);
+        assert_eq!(meta.hidden_invalid, 0);
+        assert_eq!(meta.hidden_compromised, 0);
+        // trust_summary counts the one returned (verified) row.
+        assert_eq!(meta.trust_summary.verified, 1);
+    }
+
+    #[test]
+    fn get_found_via_include_unsigned_carries_meta() {
+        // The escape-hatch path bypasses the policy filter; it must still
+        // produce a populated `meta` so the success contract is uniform.
+        let (_dir, conn) = open();
+        insert(&conn, "u", false);
+        let res = get(
+            &conn,
+            &RecordKey::bare("u"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::Hide,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record, meta } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert_eq!(record.id, "u");
+        assert_eq!(meta.source_counts.local, 1);
+        assert_eq!(meta.trust_policy, TrustPolicy::Hide);
+        // The escape-hatch path skips `apply_policy_outcome`, so the
+        // hide-bucket counters and trust tallies stay at their defaults.
+        assert_eq!(meta.hidden_unsigned, 0);
+        assert_eq!(meta.hidden_invalid, 0);
+        assert_eq!(meta.hidden_compromised, 0);
+        assert_eq!(meta.trust_summary.verified, 0);
+    }
+
+    #[test]
+    fn get_success_serializes_record_and_underscore_meta() {
+        // The wire shape is `{ record, _meta }`; the struct field name `meta`
+        // is renamed via serde and must not leak. The record's body and id
+        // are surfaced under `record`; `_meta` carries the same `Meta`
+        // envelope every other read verb emits.
+        let (_dir, conn) = open();
+        insert(&conn, "alpha", true);
+        let outcome = get(
+            &conn,
+            &RecordKey::bare("alpha"),
+            &GetOpts {
+                include_unsigned: false,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record, meta } = outcome else {
+            panic!("expected Found, got {outcome:?}");
+        };
+        let envelope = GetSuccess { record, meta };
+        let v = serde_json::to_value(&envelope).expect("GetSuccess serializes");
+        assert!(v.get("record").is_some(), "carries `record` key");
+        assert!(v.get("_meta").is_some(), "carries `_meta` key (renamed)");
+        assert!(
+            v.get("meta").is_none(),
+            "the raw struct field name must not leak"
+        );
+        assert_eq!(v["record"]["id"], "alpha");
     }
 }

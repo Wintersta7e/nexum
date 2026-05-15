@@ -259,6 +259,7 @@ fn parse_local_record(
             signer_fingerprint: None,
             crypto_result: CryptoResult::NoSignature,
             relevant_trust_events_commit: None,
+            trust_basis: None,
             warnings: Vec::new(),
         },
         extras: HashMap::new(),

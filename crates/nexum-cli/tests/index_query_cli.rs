@@ -52,7 +52,14 @@ fn nexum_init_then_index_then_search_pipeline() {
     assert!(out.status.success(), "get failed: {out:?}");
     let stdout_str = String::from_utf8_lossy(&out.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&stdout_str).expect("get --json");
-    assert_eq!(parsed["id"], "alpha");
+    // `get --json` success now emits `{ record, _meta }` — the record is
+    // nested under `record`, and the shared `_meta` envelope ships alongside.
+    assert_eq!(parsed["record"]["id"], "alpha");
+    assert!(parsed["_meta"].is_object(), "`_meta` must be present");
+    assert!(
+        parsed["_meta"]["trust_policy"].is_string(),
+        "`_meta.trust_policy` must be present"
+    );
 
     let out = common::run_nexum(&nexum_home, &ssh_home, &["list", "--json"]);
     assert!(out.status.success(), "list failed: {out:?}");
