@@ -37,7 +37,7 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.39", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1"
 # Embeddings — `ort` is still pre-1.0 in the 2.x series.
-ort = "=2.0.0-rc.12"
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
 tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
