@@ -87,12 +87,6 @@ pub struct ReanchorPending {
 }
 
 impl ReanchorPending {
-    /// The reanchor case (A = known previous pin; B = pin lost).
-    #[must_use]
-    pub fn case(&self) -> Case {
-        self.case
-    }
-
     /// The phase at which the reanchor was last checkpointed.
     #[must_use]
     pub fn phase_completed(&self) -> Phase {
@@ -109,12 +103,6 @@ impl ReanchorPending {
     #[must_use]
     pub fn new_pubkey(&self) -> &str {
         &self.new_pubkey
-    }
-
-    /// Previous bootstrap fingerprint; `None` for case B (pin lost).
-    #[must_use]
-    pub fn old_pin_fp(&self) -> Option<&str> {
-        self.old_pin_fp.as_deref()
     }
 }
 
