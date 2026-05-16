@@ -130,20 +130,6 @@ async fn download_one(
     entry: &ManifestEntry,
     reporter: &mut dyn Reporter,
 ) -> Result<u64, EmbedError> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| EmbedError::Download {
-            file: entry.name().to_owned(),
-            source: e,
-        })?;
-    let resp = resp.error_for_status().map_err(|e| EmbedError::Download {
-        file: entry.name().to_owned(),
-        source: e,
-    })?;
-    let total: u64 = resp.content_length().unwrap_or(entry.size());
-
     // Stream to a `.part` sibling, then rename atomically once `flush`
     // succeeds. A crash mid-stream leaves the `.part` file behind; the
     // final `dest` only ever exists as a byte-complete download.
@@ -153,23 +139,126 @@ async fn download_one(
         PathBuf::from(s)
     };
 
-    let mut file = tokio::fs::File::create(&temp_dest)
-        .await
-        .map_err(|e| EmbedError::Io {
-            path: temp_dest.clone(),
+    // Determine how far a prior run got.
+    let existing = match tokio::fs::metadata(&temp_dest).await {
+        Ok(m) => m.len(),
+        Err(_) => 0,
+    };
+
+    // Fast-path: the .part is already at the manifest's expected size, so
+    // the previous run crashed between flush and rename. Rename in place;
+    // verify_manifest catches any corruption via SHA256.
+    if existing == entry.size() {
+        tokio::fs::rename(&temp_dest, dest)
+            .await
+            .map_err(|e| EmbedError::Io {
+                path: dest.to_owned(),
+                source: e,
+            })?;
+        reporter.bytes(existing, existing);
+        return Ok(0);
+    }
+
+    // Over-size .part is corrupt: more bytes than the manifest expected.
+    // Delete and start fresh so we never silently append to a bogus file.
+    if existing > entry.size() {
+        let _ = tokio::fs::remove_file(&temp_dest).await;
+    }
+    let initial_done = if existing > entry.size() { 0 } else { existing };
+
+    // Build a Range request when we have partial bytes; otherwise plain GET.
+    let mut req = client.get(url);
+    if initial_done > 0 {
+        req = req.header("Range", format!("bytes={initial_done}-"));
+    }
+    let resp = req.send().await.map_err(|e| EmbedError::Download {
+        file: entry.name().to_owned(),
+        source: e,
+    })?;
+    let status = resp.status();
+
+    // 416 Range Not Satisfiable: the server says we are already past EOF.
+    // The .part is bogus — delete it and retry once without Range (one
+    // retry max; propagate whatever the second response brings).
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && initial_done > 0 {
+        let _ = tokio::fs::remove_file(&temp_dest).await;
+        let resp2 = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| EmbedError::Download {
+                file: entry.name().to_owned(),
+                source: e,
+            })?;
+        let resp2 = resp2.error_for_status().map_err(|e| EmbedError::Download {
+            file: entry.name().to_owned(),
             source: e,
         })?;
+        return download_streaming(resp2, &temp_dest, dest, entry, reporter, 0).await;
+    }
+
+    let resp = resp.error_for_status().map_err(|e| EmbedError::Download {
+        file: entry.name().to_owned(),
+        source: e,
+    })?;
+    let status = resp.status();
+
+    // On 206 Partial Content open in append mode; on 200 OK (server
+    // ignoring Range) truncate and start fresh to avoid duplicating bytes.
+    if status == reqwest::StatusCode::PARTIAL_CONTENT && initial_done > 0 {
+        download_streaming(resp, &temp_dest, dest, entry, reporter, initial_done).await
+    } else {
+        download_streaming(resp, &temp_dest, dest, entry, reporter, 0).await
+    }
+}
+
+/// Stream `resp` body into `temp_dest`, flush, then rename to `dest`.
+/// `initial_done` is the number of bytes already present at the start of
+/// the network transfer (non-zero only on a 206 resume). Returns the count
+/// of bytes pulled from the network on this call.
+async fn download_streaming(
+    resp: reqwest::Response,
+    temp_dest: &Path,
+    dest: &Path,
+    entry: &ManifestEntry,
+    reporter: &mut dyn Reporter,
+    initial_done: u64,
+) -> Result<u64, EmbedError> {
+    let total: u64 = if initial_done > 0 {
+        initial_done + resp.content_length().unwrap_or(entry.size() - initial_done)
+    } else {
+        resp.content_length().unwrap_or(entry.size())
+    };
+
+    let mut file = if initial_done > 0 {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(temp_dest)
+            .await
+            .map_err(|e| EmbedError::Io {
+                path: temp_dest.to_owned(),
+                source: e,
+            })?
+    } else {
+        tokio::fs::File::create(temp_dest)
+            .await
+            .map_err(|e| EmbedError::Io {
+                path: temp_dest.to_owned(),
+                source: e,
+            })?
+    };
 
     let mut stream = resp.bytes_stream();
-    let mut done: u64 = 0;
-    let mut last_reported: u64 = 0;
+    let mut done: u64 = initial_done;
+    let mut last_reported: u64 = initial_done;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| EmbedError::Download {
             file: entry.name().to_owned(),
             source: e,
         })?;
         file.write_all(&chunk).await.map_err(|e| EmbedError::Io {
-            path: temp_dest.clone(),
+            path: temp_dest.to_owned(),
             source: e,
         })?;
         done += chunk.len() as u64;
@@ -179,19 +268,19 @@ async fn download_one(
         }
     }
     file.flush().await.map_err(|e| EmbedError::Io {
-        path: temp_dest.clone(),
+        path: temp_dest.to_owned(),
         source: e,
     })?;
     // Release the OS handle before rename — required on Windows, harmless
     // on Unix.
     drop(file);
-    tokio::fs::rename(&temp_dest, dest)
+    tokio::fs::rename(temp_dest, dest)
         .await
         .map_err(|e| EmbedError::Io {
             path: dest.to_owned(),
             source: e,
         })?;
-    Ok(done)
+    Ok(done - initial_done)
 }
 
 /// Verify each downloaded file's SHA256 against the pinned manifest and
@@ -472,5 +561,238 @@ mod tests {
             smoke_test: Some(Duration::from_millis(123)),
         };
         assert_eq!(r.smoke_test.unwrap().as_millis(), 123);
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use std::net::SocketAddr;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    // 64-char all-zero placeholder; tests bypass SHA256 via direct
+    // `download_one` calls so the hash content is irrelevant.
+    const DUMMY_SHA: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// Spin up a tiny async HTTP server that honours `Range: bytes=N-`
+    /// requests. Returns a 206 Partial Content slice for range requests and
+    /// a 200 OK for plain GETs.
+    async fn serve_with_range(body: Vec<u8>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = Arc::new(body);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let body = Arc::clone(&body);
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt as _;
+                    let mut buf = vec![0u8; 4096];
+                    let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
+                        .await
+                        .unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // HTTP headers are case-insensitive; reqwest sends "range:" (lowercase).
+                    let range_start = req
+                        .lines()
+                        .find_map(|l| {
+                            let lower = l.to_ascii_lowercase();
+                            lower.strip_prefix("range: bytes=").map(|_| {
+                                // Offset of "bytes=" in the lowercased line is safe to
+                                // apply back to the original (all ASCII, same byte indices).
+                                let off = lower.find("bytes=").unwrap() + "bytes=".len();
+                                &l[off..]
+                            })
+                        })
+                        .and_then(|s| s.split('-').next())
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let slice = &body[range_start..];
+                    let status = if range_start > 0 {
+                        "206 Partial Content"
+                    } else {
+                        "200 OK"
+                    };
+                    let header = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                        slice.len(),
+                    );
+                    let _ = sock.write_all(header.as_bytes()).await;
+                    let _ = sock.write_all(slice).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// Server that always returns 416 for any Range request.
+    async fn serve_416_then_full(body: Vec<u8>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = Arc::new(body);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let body = Arc::clone(&body);
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt as _;
+                    let mut buf = vec![0u8; 4096];
+                    let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
+                        .await
+                        .unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    // HTTP headers are case-insensitive; reqwest sends "range:" (lowercase).
+                    let has_range = req
+                        .lines()
+                        .any(|l| l.to_ascii_lowercase().starts_with("range: bytes="));
+                    if has_range {
+                        // Respond 416 to Range requests.
+                        let _ = sock
+                            .write_all(
+                                b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\r\n",
+                            )
+                            .await;
+                    } else {
+                        // Respond 200 with the full body for the retry GET.
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                            body.len(),
+                        );
+                        let _ = sock.write_all(header.as_bytes()).await;
+                        let _ = sock.write_all(&body).await;
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resumes_from_existing_part_size() {
+        // Pre-populate a .part with the first half of a known body.
+        let full: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
+        let half = full[..512].to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("model.onnx");
+        let part = {
+            let mut s = dest.as_os_str().to_owned();
+            s.push(".part");
+            PathBuf::from(s)
+        };
+        std::fs::write(&part, &half).unwrap();
+
+        let addr = serve_with_range(full.clone()).await;
+        let entry = ManifestEntry::new("model.onnx", 1024, DUMMY_SHA);
+        let url = format!("http://{addr}/model.onnx");
+        let client = reqwest::Client::builder().build().unwrap();
+        let mut reporter = NullReporter;
+        let bytes = download_one(&client, &url, &dest, &entry, &mut reporter)
+            .await
+            .unwrap();
+        // Only the missing half should be pulled across the wire.
+        assert_eq!(bytes, 512);
+        // The renamed destination must contain the full body.
+        assert_eq!(std::fs::read(&dest).unwrap(), full);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn skips_get_when_part_already_complete() {
+        // A .part already at the manifest's expected size: skip the network,
+        // rename in place; SHA256 verification happens in verify_manifest.
+        let body: Vec<u8> = (0u8..=255).cycle().take(64).collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("ok.bin");
+        let part = {
+            let mut s = dest.as_os_str().to_owned();
+            s.push(".part");
+            PathBuf::from(s)
+        };
+        std::fs::write(&part, &body).unwrap();
+
+        let addr = serve_with_range(body.clone()).await;
+        let entry = ManifestEntry::new("ok.bin", 64, DUMMY_SHA);
+        let url = format!("http://{addr}/ok.bin");
+        let client = reqwest::Client::builder().build().unwrap();
+        let mut reporter = NullReporter;
+        let bytes = download_one(&client, &url, &dest, &entry, &mut reporter)
+            .await
+            .unwrap();
+        // No bytes pulled across the wire.
+        assert_eq!(bytes, 0);
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retries_without_range_on_416() {
+        // A .part exists (partial), but the server responds 416. The
+        // downloader must delete the .part and fetch the full body.
+        let full: Vec<u8> = (0u8..=127).collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("model.bin");
+        let part = {
+            let mut s = dest.as_os_str().to_owned();
+            s.push(".part");
+            PathBuf::from(s)
+        };
+        // Seed a .part with half the data (to trigger a Range request).
+        std::fs::write(&part, &full[..64]).unwrap();
+
+        let addr = serve_416_then_full(full.clone()).await;
+        let entry = ManifestEntry::new("model.bin", 128, DUMMY_SHA);
+        let url = format!("http://{addr}/model.bin");
+        let client = reqwest::Client::builder().build().unwrap();
+        let mut reporter = NullReporter;
+        let bytes = download_one(&client, &url, &dest, &entry, &mut reporter)
+            .await
+            .unwrap();
+        // On 416 → retry: full body pulled from network.
+        assert_eq!(bytes, 128);
+        assert_eq!(std::fs::read(&dest).unwrap(), full);
+        // The .part file is gone after the rename.
+        assert!(!part.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn over_size_part_is_discarded_and_restarted() {
+        // A .part whose byte count exceeds entry.size() is corrupt. The
+        // downloader must delete it and pull the full body afresh.
+        let full: Vec<u8> = (0u8..=63).collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("corrupt.bin");
+        let part = {
+            let mut s = dest.as_os_str().to_owned();
+            s.push(".part");
+            PathBuf::from(s)
+        };
+        // Write more bytes than entry.size() will declare.
+        let bloated: Vec<u8> = (0u8..=127).collect();
+        std::fs::write(&part, &bloated).unwrap();
+
+        let addr = serve_with_range(full.clone()).await;
+        // entry.size() is 64, but the .part has 128 bytes.
+        let entry = ManifestEntry::new("corrupt.bin", 64, DUMMY_SHA);
+        let url = format!("http://{addr}/corrupt.bin");
+        let client = reqwest::Client::builder().build().unwrap();
+        let mut reporter = NullReporter;
+        let bytes = download_one(&client, &url, &dest, &entry, &mut reporter)
+            .await
+            .unwrap();
+        // Full body re-pulled; no Range header sent because .part was wiped.
+        assert_eq!(bytes, 64);
+        assert_eq!(std::fs::read(&dest).unwrap(), full);
     }
 }
