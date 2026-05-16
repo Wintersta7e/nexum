@@ -159,12 +159,13 @@ pub fn run_force(
     cfg: &Config,
     paths: &Paths,
 ) -> Result<IndexerOutcome, IndexerError> {
-    run_with_opts_force(conn, cfg, paths, IndexerOpts::default())
+    apply_index_state_ddl(conn)?;
+    run_inner(conn, cfg, paths, true, IndexerOpts::default())
 }
 
-/// Full-control entry point. Accepts both the `force` flag and
-/// `IndexerOpts`. External callers (e.g. `api::index_sweep`) use this
-/// directly; `run` and `run_force` are thin shims over it.
+/// Full-control entry point. Accepts `IndexerOpts` so callers can adjust
+/// per-pass behaviour (e.g. `api::index_sweep` lowers the stale-row
+/// threshold). `run` is a thin shim over it.
 ///
 /// # Errors
 /// Returns `IndexerError::Rusqlite` on SQL failure or
@@ -177,19 +178,6 @@ pub fn run_with_opts(
 ) -> Result<IndexerOutcome, IndexerError> {
     apply_index_state_ddl(conn)?;
     run_inner(conn, cfg, paths, false, opts)
-}
-
-/// `run_force` variant that also accepts `IndexerOpts`. Not currently
-/// exposed as a public API verb — kept private so the force + opts
-/// combination stays internal until there is a real caller.
-fn run_with_opts_force(
-    conn: &mut Connection,
-    cfg: &Config,
-    paths: &Paths,
-    opts: IndexerOpts,
-) -> Result<IndexerOutcome, IndexerError> {
-    apply_index_state_ddl(conn)?;
-    run_inner(conn, cfg, paths, true, opts)
 }
 
 fn run_inner(
