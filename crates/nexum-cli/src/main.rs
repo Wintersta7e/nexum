@@ -51,8 +51,8 @@ enum Commands {
     /// Diagnose store health and (with `--resolve-pending-reanchor`) clean
     /// up a partial-reanchor sentinel.
     Doctor(commands::doctor::DoctorArgs),
-    /// Manage signing keys. M1b supports `rotate` (additive — adds a new
-    /// trusted key without retiring the old one).
+    /// Manage signing keys. This release supports `rotate` (additive —
+    /// adds a new trusted key without retiring the old one).
     Keys {
         #[command(subcommand)]
         cmd: commands::keys::KeysCommand,
