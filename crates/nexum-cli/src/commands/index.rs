@@ -1,4 +1,4 @@
-//! `nexum index [--force | --incremental]` — build / update the index.
+//! `nexum index [--force | --incremental | --reembed]` — build / update the index.
 
 use std::process::ExitCode;
 
@@ -22,6 +22,11 @@ pub struct IndexArgs {
     /// tampering. Exits 4 if any tampering is detected.
     #[arg(long, default_value_t = false, conflicts_with = "incremental")]
     pub check: bool,
+    /// Re-embed every record already in the index against the configured
+    /// embedder. Refuses if `[embed].enabled = false`. Idempotent — a kill
+    /// mid-run resumes from where it stopped.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["force", "check"])]
+    pub reembed: bool,
     /// Print the per-source summary as JSON.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -29,6 +34,9 @@ pub struct IndexArgs {
 
 /// Run `nexum index`.
 pub fn run(args: &IndexArgs) -> ExitCode {
+    if args.reembed {
+        return run_reembed(args.json);
+    }
     let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
@@ -84,6 +92,30 @@ pub fn run(args: &IndexArgs) -> ExitCode {
             }
         }
         Err(e) => super::json_emit::route_api_error(&e, args.json && !args.check),
+    }
+}
+
+/// Run `nexum index --reembed`: re-embed all records in the existing index.
+fn run_reembed(emit_json: bool) -> ExitCode {
+    let (paths, cfg) = match super::common::resolve_runtime(emit_json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match api::index_reembed(&paths, &cfg) {
+        Ok(outcome) => {
+            if emit_json {
+                let env = serde_json::json!({
+                    "ok": true,
+                    "kind": "index.reembed.completed",
+                    "embedded": outcome.embedded,
+                });
+                println!("{env:#}");
+            } else {
+                println!("re-embedded {} records", outcome.embedded);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => super::json_emit::route_api_error(&e, emit_json),
     }
 }
 

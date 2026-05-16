@@ -49,6 +49,14 @@ impl From<IndexStateError> for IndexerError {
     }
 }
 
+impl From<crate::index::meta::MetaError> for IndexerError {
+    fn from(e: crate::index::meta::MetaError) -> Self {
+        match e {
+            crate::index::meta::MetaError::Sqlite(r) => Self::Rusqlite(r),
+        }
+    }
+}
+
 /// Completeness label for a single per-source pass. Mirrors the variants of
 /// the internal `PassCompleteness` enum but is scoped to the per-source
 /// boundary so the JSON wire format stays flat (`snake_case` strings rather than
@@ -758,7 +766,7 @@ fn upsert(
 /// wrapped by the `vec_f32` SQL function. Byte length must equal
 /// `EMBED_DIM * 4`; the schema enforces dimension via the `FLOAT[1024]`
 /// column declaration.
-fn insert_embedding(
+pub(crate) fn insert_embedding(
     tx: &Transaction<'_>,
     record_rowid: i64,
     embedding: &[f32],
@@ -769,6 +777,89 @@ fn insert_embedding(
         params![record_rowid, bytes.as_slice()],
     )?;
     Ok(())
+}
+
+/// Re-embed every record already in `records` against the configured embedder.
+///
+/// Iterates by `rowid` in 50-row batches and persists the resume cursor to
+/// `index.db.meta` per batch so a killed run picks up where it left off.
+/// Embedder failures on a single row are logged at `warn` and skipped; the row
+/// keeps its existing embedding (or none).
+///
+/// # Errors
+///
+/// Returns `IndexerError::Config` when no embedder can be built from `cfg`
+/// (model not installed or configuration invalid).
+/// Returns `IndexerError::Rusqlite` on any SQL failure.
+pub fn run_reembed_existing(
+    conn: &mut Connection,
+    cfg: &Config,
+    _paths: &Paths,
+) -> Result<crate::api::ReembedOutcome, IndexerError> {
+    use crate::index::meta::{read_str, write_str};
+
+    const BATCH: i64 = 50;
+    const RESUME_KEY: &str = "reembed_resume_rowid";
+
+    let embedder = build_embedder_for_pass(cfg)?.ok_or_else(|| {
+        IndexerError::Config(
+            "embedder unavailable: model not installed or config invalid".to_owned(),
+        )
+    })?;
+
+    let mut resume_rowid: i64 = read_str(conn, RESUME_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let mut count: u64 = 0;
+
+    loop {
+        let tx = conn.transaction()?;
+        let rows: Vec<(i64, String, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT rowid, title, COALESCE(summary, ''), COALESCE(body, '') \
+                 FROM records WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+            )?;
+            stmt.query_map(params![resume_rowid, BATCH], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        if rows.is_empty() {
+            tx.commit()?;
+            break;
+        }
+        let last_rowid_in_batch = rows.last().map_or(resume_rowid, |r| r.0);
+
+        for (rowid, title, summary, body) in &rows {
+            let text = format!("{title}\n{summary}\n{body}");
+            match embedder.embed(&text) {
+                Ok(vec) => {
+                    tx.execute(
+                        "DELETE FROM record_embeddings WHERE record_rowid = ?1",
+                        params![rowid],
+                    )?;
+                    insert_embedding(&tx, *rowid, &vec)?;
+                    count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(rowid = *rowid, error = %e, "reembed: embedding failed; skipping");
+                }
+            }
+        }
+        write_str(&tx, RESUME_KEY, &last_rowid_in_batch.to_string())?;
+        tx.commit()?;
+        resume_rowid = last_rowid_in_batch;
+    }
+
+    write_str(conn, RESUME_KEY, "")?;
+
+    Ok(crate::api::ReembedOutcome {
+        embedded: count,
+        skipped_current: 0,
+        resume_rowid: None,
+    })
 }
 
 fn update_record(

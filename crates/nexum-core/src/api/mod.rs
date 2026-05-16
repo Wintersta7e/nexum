@@ -8,7 +8,7 @@ use crate::{
     config::types::Config,
     indexer::{
         IndexerOutcome,
-        db::{open_existing, open_existing_writable, open_or_create},
+        db::{IndexerError, open_existing, open_existing_writable, open_or_create},
         run::{run as indexer_run, run_force as indexer_run_force},
     },
     paths::Paths,
@@ -61,6 +61,60 @@ pub fn index_run(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, ApiError
 pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, ApiError> {
     let mut conn = open_or_create(&paths.index_db)?;
     Ok(indexer_run_force(&mut conn, cfg, paths)?)
+}
+
+/// Outcome of a `--reembed` pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReembedOutcome {
+    /// Number of records that received a new embedding vector.
+    pub embedded: u64,
+    /// Records already current (hash-stable skip — not yet implemented;
+    /// placeholder always returns 0).
+    pub skipped_current: u64,
+    /// Resume cursor after a partial run. `None` after a clean completion.
+    pub resume_rowid: Option<i64>,
+}
+
+/// Re-embed every record already in the index against the configured
+/// embedder. Refuses if `cfg.embed.enabled = false`.
+///
+/// Acquires the writer lock so a concurrent `nexum index` pass cannot race
+/// the resume cursor. The lock is released on every return path.
+///
+/// # Errors
+///
+/// Returns `ApiError::Config(ConfigError::Invalid)` if embed is not enabled.
+/// Returns `ApiError::Indexer` on any indexer or lock failure.
+pub fn index_reembed(paths: &Paths, cfg: &Config) -> Result<ReembedOutcome, ApiError> {
+    use fs2::FileExt as _;
+
+    if !cfg.embed.enabled {
+        return Err(ApiError::Config(crate::config::ConfigError::Invalid {
+            field: "embed.enabled".into(),
+            reason: "--reembed requires [embed].enabled = true".into(),
+        }));
+    }
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.lock)
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        })?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.lock.clone(),
+            source: e,
+        })
+    })?;
+    let mut conn = open_existing_writable(&paths.index_db)?;
+    let outcome = crate::indexer::run::run_reembed_existing(&mut conn, cfg, paths)?;
+    lock_file.unlock().ok();
+    Ok(outcome)
 }
 
 /// Open the index DB and prime the trust-events view for a read verb.
