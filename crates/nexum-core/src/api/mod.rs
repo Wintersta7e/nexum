@@ -136,6 +136,74 @@ pub fn index_reembed(paths: &Paths, cfg: &Config) -> Result<ReembedOutcome, ApiE
     Ok(outcome)
 }
 
+/// Run the registered index-DB migrators under the writer lock.
+///
+/// Acquires `~/.nexum/.lock` exclusively before opening the database so no
+/// concurrent indexer or reembed pass races the migration. Opens with raw
+/// `rusqlite::Connection::open_with_flags(READ_WRITE)` rather than
+/// `open_existing_writable` because that helper rejects an under-versioned
+/// store with `MigrationRequired`, which is the exact case this verb exists
+/// to resolve.
+///
+/// # Errors
+///
+/// Returns `ApiError::Indexer(IndexerError::Io)` if the lock file cannot be
+/// opened or the exclusive lock cannot be acquired (store busy).
+/// Returns `ApiError::Indexer(IndexerError::Rusqlite)` if the DB cannot be
+/// opened. Returns `ApiError::Indexer(IndexerError::Migration)` on any
+/// migration failure (step error, incompatible store, post-apply schema
+/// verification failure).
+pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcome, ApiError> {
+    use fs2::FileExt as _;
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.lock)
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        })?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.lock.clone(),
+            source: e,
+        })
+    })?;
+
+    // Register the sqlite-vec auto-extension before opening the raw
+    // connection. The open_or_create / open_existing_* helpers do this
+    // internally, but migrate_index_db bypasses them intentionally
+    // (open_existing_writable rejects under-versioned stores with
+    // MigrationRequired). Without this call, a DB that contains vec0
+    // virtual tables would fail to open because the extension is not yet
+    // loaded for this process.
+    crate::indexer::db::register_sqlite_vec_once();
+
+    // Open with raw rusqlite rather than open_existing_writable: the
+    // open_existing_with_flags helper returns MigrationRequired when
+    // v_disk < INDEX_DB_LATEST_VERSION, which is precisely the case we
+    // are here to handle.
+    let mut conn = rusqlite::Connection::open_with_flags(
+        &paths.index_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    )
+    .map_err(|e| ApiError::Indexer(IndexerError::Rusqlite(e)))?;
+
+    let outcome = crate::migrate::index_db::migrate_to_latest(
+        &mut conn,
+        &paths.index_db,
+        /* lock_held = */ true,
+    )
+    .map_err(|e| ApiError::Indexer(IndexerError::Migration(e)))?;
+
+    lock_file.unlock().ok();
+    Ok(outcome)
+}
+
 /// Open the index DB and prime the trust-events view for a read verb.
 ///
 /// Read verbs share two preconditions: the DB must already exist

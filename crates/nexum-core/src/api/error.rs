@@ -230,6 +230,7 @@ fn indexer_envelope(err: &crate::indexer::IndexerError) -> ErrorEnvelope {
             context: serde_json::json!({ "kind": "config", "message": s }),
         },
         IndexerError::Embed(e) => embed_envelope(e),
+        IndexerError::Migration(e) => migration_error_envelope(e),
     }
 }
 
@@ -249,6 +250,44 @@ fn embed_envelope(err: &crate::embed::EmbedError) -> ErrorEnvelope {
             command: Some("nexum models install bge-m3".into()),
             rationale: "Reinstall the embedding model and retry indexing.".into(),
         }),
+        context,
+    }
+}
+
+/// Map a `MigrationError` to an `ErrorEnvelope`.
+///
+/// `IncompatibleStore` (`v_disk` > `v_code`) surfaces as `STORE_INTEGRITY` because
+/// the store cannot be recovered by any command the current binary offers —
+/// the operator needs a newer binary. Every other variant is a recoverable or
+/// structural migration failure and also routes to `STORE_INTEGRITY` with an
+/// appropriate `kind` tag so agents can discriminate without matching on the
+/// human-readable message.
+fn migration_error_envelope(err: &crate::migrate::MigrationError) -> ErrorEnvelope {
+    use crate::migrate::MigrationError;
+    let message = err.to_string();
+    let context = match err {
+        MigrationError::IncompatibleStore { v_disk, v_code } => serde_json::json!({
+            "kind": "migration",
+            "subkind": "incompatible_store",
+            "v_disk": v_disk,
+            "v_code": v_code,
+        }),
+        MigrationError::StepFailed { from, to, cause } => serde_json::json!({
+            "kind": "migration",
+            "subkind": "step_failed",
+            "from": from,
+            "to": to,
+            "cause": cause,
+        }),
+        _ => serde_json::json!({
+            "kind": "migration",
+            "message": &message,
+        }),
+    };
+    ErrorEnvelope {
+        error_code: error_codes::STORE_INTEGRITY,
+        message,
+        remediation: None,
         context,
     }
 }

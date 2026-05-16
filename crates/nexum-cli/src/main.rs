@@ -46,6 +46,8 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::trust::TrustCommand,
     },
+    /// Run pending index-DB schema migrations.
+    Migrate(commands::migrate::MigrateArgs),
 }
 
 fn main() -> ExitCode {
@@ -62,6 +64,7 @@ fn main() -> ExitCode {
         Commands::Models { cmd } => commands::models::run(&cmd),
         Commands::Project(a) => commands::project::run(&a),
         Commands::Trust { cmd } => commands::trust::run(&cmd),
+        Commands::Migrate(args) => commands::migrate::run(&args),
     }
 }
 

@@ -26,6 +26,8 @@ pub enum IndexerError {
     Trust(#[from] crate::trust::events::TrustError),
     #[error("embed error: {0}")]
     Embed(#[from] crate::embed::EmbedError),
+    #[error("migration error: {0}")]
+    Migration(#[from] crate::migrate::MigrationError),
 }
 
 /// Open an existing `index.db` for read-only access. Returns
@@ -142,8 +144,12 @@ static SQLITE_VEC_REGISTERED: Once = Once::new();
 /// onto rusqlite's via `mem::transmute` — both function-pointer types are ABI-
 /// equivalent. This is the documented sqlite-vec pattern for static linking with
 /// rusqlite (see `tests/index_schema.rs::register_sqlite_vec` for the same pattern).
+///
+/// Exposed as `pub(crate)` so callers that open a raw connection (e.g. the
+/// migration verb, which bypasses the schema-version-checking helpers) can
+/// register the extension before opening a DB that contains vec0 virtual tables.
 #[allow(unsafe_code)]
-fn register_sqlite_vec_once() {
+pub(crate) fn register_sqlite_vec_once() {
     use std::os::raw::{c_char, c_int};
     type RusqliteExtInit = unsafe extern "C" fn(
         *mut rusqlite::ffi::sqlite3,
