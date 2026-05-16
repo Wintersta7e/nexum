@@ -826,11 +826,11 @@ pub fn run_reembed_existing(
             })?
             .collect::<Result<Vec<_>, _>>()?
         };
-        if rows.is_empty() {
+        let Some(last) = rows.last() else {
             tx.commit()?;
             break;
-        }
-        let last_rowid_in_batch = rows.last().map_or(resume_rowid, |r| r.0);
+        };
+        let last_rowid_in_batch = last.0;
 
         for (rowid, title, summary, body) in &rows {
             let text = format!("{title}\n{summary}\n{body}");
