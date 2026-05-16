@@ -7,13 +7,20 @@ mod common;
 use common::TestHome;
 
 /// Write a `.reanchor_pending` sentinel with the given `phase_completed` value.
+/// The `new_pin_fp` defaults to a placeholder; for the `pin_updated` cleanup
+/// path the live config + cache file MUST match `new_pin_fp` or the resolver
+/// refuses, so callers exercising that path use [`write_sentinel_with_pin`].
 fn write_sentinel(home: &Path, phase: &str) {
+    write_sentinel_with_pin(home, phase, "SHA256:new");
+}
+
+fn write_sentinel_with_pin(home: &Path, phase: &str, new_pin_fp: &str) {
     let path = home.join(".reanchor_pending");
     let body = format!(
         r#"{{
             "case": "A",
             "old_pin_fp": "SHA256:old",
-            "new_pin_fp": "SHA256:new",
+            "new_pin_fp": "{new_pin_fp}",
             "new_pubkey": "ssh-ed25519 AAAA",
             "started_at": "2026-05-16T00:00:00Z",
             "pid": null,
@@ -21,6 +28,19 @@ fn write_sentinel(home: &Path, phase: &str) {
         }}"#,
     );
     std::fs::write(&path, body).unwrap();
+}
+
+/// Read the live bootstrap fingerprint from `config.toml` (set by `nexum init`).
+/// Used by tests that need to write a sentinel whose `new_pin_fp` matches the
+/// live state — what a real completed `pin_updated` phase looks like.
+fn live_bootstrap_fingerprint(home: &Path) -> String {
+    let cfg = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    for line in cfg.lines() {
+        if let Some(rest) = line.trim().strip_prefix("fingerprint =") {
+            return rest.trim().trim_matches('"').to_owned();
+        }
+    }
+    panic!("no [trust.bootstrap].fingerprint in config.toml: {cfg}");
 }
 
 #[test]
@@ -54,7 +74,11 @@ fn doctor_refuses_to_resolve_init_phase_via_continue() {
 #[test]
 fn doctor_resolves_pin_updated_phase_idempotently() {
     let home = TestHome::initialized_no_index();
-    write_sentinel(home.path(), "pin_updated");
+    // Stage a sentinel whose new_pin_fp matches the live bootstrap state —
+    // i.e. a real reanchor that finished the pin update and only the
+    // sentinel cleanup is left.
+    let live = live_bootstrap_fingerprint(home.path());
+    write_sentinel_with_pin(home.path(), "pin_updated", &live);
     let out = home.run(&["doctor", "--resolve-pending-reanchor"]);
     assert!(
         out.status.success(),
@@ -65,6 +89,32 @@ fn doctor_resolves_pin_updated_phase_idempotently() {
     assert!(
         !home.path().join(".reanchor_pending").exists(),
         "sentinel should be deleted after pin_updated cleanup"
+    );
+}
+
+#[test]
+fn doctor_refuses_pin_updated_cleanup_when_live_state_drifted() {
+    let home = TestHome::initialized_no_index();
+    // Sentinel claims pin was rotated to SHA256:new, but the live config
+    // still carries the bootstrap fingerprint from init — drifted state.
+    // The sentinel is the only audit signal; the resolver must refuse to
+    // delete it.
+    write_sentinel_with_pin(home.path(), "pin_updated", "SHA256:drifted");
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--json"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero when sentinel disagrees with live state"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["kind"], "doctor.reanchor.refused");
+    let msg = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("inconsistent") || msg.contains("drifted") || msg.contains("do not match"),
+        "message should flag the drift: {msg}"
+    );
+    assert!(
+        home.path().join(".reanchor_pending").exists(),
+        "sentinel must NOT be deleted on drift refusal"
     );
 }
 

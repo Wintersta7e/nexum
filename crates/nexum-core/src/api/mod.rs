@@ -1205,67 +1205,95 @@ pub fn resolve_pending_reanchor(
 ) -> Result<ReanchorResolveOutcome, ApiError> {
     use crate::trust::reanchor_pending::{Phase, delete_sentinel, read_sentinel};
 
-    let Some(sentinel) = read_sentinel(&paths.home)? else {
-        return Ok(ReanchorResolveOutcome::NoSentinel);
-    };
-    let phase = sentinel.phase_completed();
+    // Sentinel cleanup mutates `config.toml` + `~/.nexum/.bootstrap-fingerprint`
+    // + the sentinel file itself. A concurrent `keys rotate` / `migrate` /
+    // second `doctor` invocation must not race; acquire the writer lock for
+    // the dispatch the same way every other mutation verb does.
+    with_writer_lock(paths, || {
+        let Some(sentinel) = read_sentinel(&paths.home)? else {
+            return Ok(ReanchorResolveOutcome::NoSentinel);
+        };
+        let phase = sentinel.phase_completed();
 
-    match (phase, mode) {
-        (Phase::Init, Some(ReanchorResolveMode::Revert)) => {
-            delete_sentinel(&paths.home)?;
-            Ok(ReanchorResolveOutcome::Resolved {
-                from_phase: "init".into(),
-            })
+        match (phase, mode) {
+            (Phase::Init, Some(ReanchorResolveMode::Revert)) => {
+                delete_sentinel(&paths.home)?;
+                Ok(ReanchorResolveOutcome::Resolved {
+                    from_phase: "init".into(),
+                })
+            }
+            (Phase::Init, Some(ReanchorResolveMode::Continue)) => {
+                Ok(ReanchorResolveOutcome::Refused {
+                    phase: "init".into(),
+                    reason: "this release only supports cleanup of `pin_updated` and `--revert` of `init`; \
+                             phase=init recovery requires the keys-recover command (not yet available)"
+                        .into(),
+                })
+            }
+            (Phase::EventsCommitted, Some(ReanchorResolveMode::Continue)) => {
+                let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+                sentinel
+                    .new_pin_fp()
+                    .clone_into(&mut cfg.trust.bootstrap.fingerprint);
+                sentinel
+                    .new_pubkey()
+                    .clone_into(&mut cfg.trust.bootstrap.public_key);
+                crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
+                std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(
+                    |e| {
+                        ApiError::Indexer(crate::indexer::db::IndexerError::Io {
+                            path: paths.bootstrap_pin.clone(),
+                            source: e,
+                        })
+                    },
+                )?;
+                delete_sentinel(&paths.home)?;
+                Ok(ReanchorResolveOutcome::Resolved {
+                    from_phase: "events_committed".into(),
+                })
+            }
+            (Phase::EventsCommitted, Some(ReanchorResolveMode::Revert)) => {
+                Ok(ReanchorResolveOutcome::Refused {
+                    phase: "events_committed".into(),
+                    reason: "phase=events_committed already has a signed reanchor commit on HEAD; \
+                             --revert would require a manual `git revert`; only --continue is valid here"
+                        .into(),
+                })
+            }
+            (Phase::PinUpdated, _) => {
+                // Verify the live state actually matches the sentinel before
+                // discarding it. If config + pin file have drifted (e.g. the
+                // operator hand-edited or partially reverted the reanchor
+                // out-of-band), the sentinel is the only audit signal of the
+                // inconsistency — refuse rather than silently destroying it.
+                let cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+                let pin_file = std::fs::read_to_string(&paths.bootstrap_pin)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                let expected = sentinel.new_pin_fp();
+                if cfg.trust.bootstrap.fingerprint != expected || pin_file != expected {
+                    return Ok(ReanchorResolveOutcome::Refused {
+                        phase: "pin_updated".into(),
+                        reason: format!(
+                            "live bootstrap pin ({}) and cache file ({}) do not match the sentinel's \
+                             new_pin_fp ({expected}); reanchor state is inconsistent. \
+                             Investigate before re-running; do not delete the sentinel manually.",
+                            cfg.trust.bootstrap.fingerprint, pin_file
+                        ),
+                    });
+                }
+                delete_sentinel(&paths.home)?;
+                Ok(ReanchorResolveOutcome::Resolved {
+                    from_phase: "pin_updated".into(),
+                })
+            }
+            (_, None) => Ok(ReanchorResolveOutcome::Refused {
+                phase: phase.as_str().into(),
+                reason: "specify --continue or --revert".into(),
+            }),
         }
-        (Phase::Init, Some(ReanchorResolveMode::Continue)) => {
-            Ok(ReanchorResolveOutcome::Refused {
-                phase: "init".into(),
-                reason: "this release only supports cleanup of `pin_updated` and `--revert` of `init`; \
-                         phase=init recovery requires the keys-recover command (not yet available)"
-                    .into(),
-            })
-        }
-        (Phase::EventsCommitted, Some(ReanchorResolveMode::Continue)) => {
-            let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
-            sentinel
-                .new_pin_fp()
-                .clone_into(&mut cfg.trust.bootstrap.fingerprint);
-            sentinel
-                .new_pubkey()
-                .clone_into(&mut cfg.trust.bootstrap.public_key);
-            crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
-            std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(
-                |e| {
-                    ApiError::Indexer(crate::indexer::db::IndexerError::Io {
-                        path: paths.bootstrap_pin.clone(),
-                        source: e,
-                    })
-                },
-            )?;
-            delete_sentinel(&paths.home)?;
-            Ok(ReanchorResolveOutcome::Resolved {
-                from_phase: "events_committed".into(),
-            })
-        }
-        (Phase::EventsCommitted, Some(ReanchorResolveMode::Revert)) => {
-            Ok(ReanchorResolveOutcome::Refused {
-                phase: "events_committed".into(),
-                reason: "phase=events_committed already has a signed reanchor commit on HEAD; \
-                         --revert would require a manual `git revert`; only --continue is valid here"
-                    .into(),
-            })
-        }
-        (Phase::PinUpdated, _) => {
-            delete_sentinel(&paths.home)?;
-            Ok(ReanchorResolveOutcome::Resolved {
-                from_phase: "pin_updated".into(),
-            })
-        }
-        (_, None) => Ok(ReanchorResolveOutcome::Refused {
-            phase: phase.as_str().into(),
-            reason: "specify --continue or --revert".into(),
-        }),
-    }
+    })
 }
 
 fn identity_kind_for(project_id: &str) -> &'static str {
