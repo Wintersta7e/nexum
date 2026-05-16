@@ -1,0 +1,19 @@
+schema_version: 1
+id: onboarding_orientation_slides
+record_type: decision
+project_id: example
+title: Keeping orientation slides current
+body: |
+  Company-wide orientation slides decay fast: the org chart
+  changes, the holiday calendar slides forward, the security
+  policy adds a new section. Schedule a quarterly audit owned
+  by the people-ops team and a per-deck owner who signs off
+  on each refresh. A slide that lists last year's executive
+  team is worse than no slide at all, because new hires
+  cannot tell which other facts in the deck are stale.
+tags: ["hr", "documentation"]
+agent: manual
+created: 2026-04-12T00:00:00Z
+updated: 2026-04-12T00:00:00Z
+confidence: high
+outcome: working

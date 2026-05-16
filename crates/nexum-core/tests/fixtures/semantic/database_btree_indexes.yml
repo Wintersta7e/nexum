@@ -1,0 +1,19 @@
+schema_version: 1
+id: database_btree_indexes
+record_type: decision
+project_id: example
+title: Designing covering B-tree indexes for read paths
+body: |
+  A B-tree index in SQLite stores its key columns plus a row id
+  pointer back into the underlying table. When a query reads
+  columns the index does not cover, the engine pays one extra
+  random read per row to fetch the table page. Adding the
+  missing columns as trailing key entries turns the lookup into
+  a single sequential scan over the index leaves, at the cost
+  of larger index pages on write.
+tags: ["sqlite", "performance"]
+agent: manual
+created: 2026-04-08T00:00:00Z
+updated: 2026-04-08T00:00:00Z
+confidence: high
+outcome: working

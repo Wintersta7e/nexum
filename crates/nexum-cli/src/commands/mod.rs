@@ -8,6 +8,7 @@ pub mod index;
 pub mod init;
 pub(crate) mod json_emit;
 pub mod list;
+pub mod models;
 pub mod project;
 pub mod recent;
 pub mod search;

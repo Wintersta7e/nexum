@@ -1,0 +1,19 @@
+schema_version: 1
+id: onboarding_first_day_docs
+record_type: decision
+project_id: example
+title: First-day reading list for new engineers
+body: |
+  Curate a short reading list for every new engineer's first day:
+  the README of the main service, the deploy runbook, the
+  postmortem of the most recent customer-visible incident, and
+  the page that describes how the team chooses what to work on.
+  Long enough to give context, short enough to finish before lunch.
+  Pair it with a 30 minute walkthrough by the buddy assigned to
+  the hire.
+tags: ["hr", "documentation"]
+agent: manual
+created: 2026-04-10T00:00:00Z
+updated: 2026-04-10T00:00:00Z
+confidence: high
+outcome: working

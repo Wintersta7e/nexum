@@ -24,6 +24,8 @@ pub enum IndexerError {
     Config(String),
     #[error("trust error: {0}")]
     Trust(#[from] crate::trust::events::TrustError),
+    #[error("embed error: {0}")]
+    Embed(#[from] crate::embed::EmbedError),
 }
 
 /// Open an existing `index.db` for read-only access. Returns

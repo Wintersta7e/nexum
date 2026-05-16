@@ -90,6 +90,11 @@ pub mod error_codes {
     /// `events.yml` history contains tampering events. Surfaced by
     /// `nexum trust validate-events` and `nexum index --check`.
     pub const TAMPERING_DETECTED: &str = "TAMPERING_DETECTED";
+    /// Dense-embedding compute failed (ORT init, tokenizer, inference,
+    /// or output-shape mismatch). The store itself is intact; the
+    /// embedder is the broken component. Remediation: reinstall the
+    /// embedding model.
+    pub const EMBED_FAILED: &str = "EMBED_FAILED";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -219,6 +224,27 @@ fn indexer_envelope(err: &crate::indexer::IndexerError) -> ErrorEnvelope {
             remediation: None,
             context: serde_json::json!({ "kind": "config", "message": s }),
         },
+        IndexerError::Embed(e) => embed_envelope(e),
+    }
+}
+
+/// Build an `EMBED_FAILED` envelope for a `crate::embed::EmbedError`. The
+/// store remains intact; only the embedder is broken, so the suggested
+/// remediation is to reinstall the model and retry indexing.
+fn embed_envelope(err: &crate::embed::EmbedError) -> ErrorEnvelope {
+    let message = err.to_string();
+    let context = serde_json::json!({
+        "kind": "embed",
+        "message": &message,
+    });
+    ErrorEnvelope {
+        error_code: error_codes::EMBED_FAILED,
+        message,
+        remediation: Some(Remediation {
+            command: Some("nexum models install bge-m3".into()),
+            rationale: "Reinstall the embedding model and retry indexing.".into(),
+        }),
+        context,
     }
 }
 

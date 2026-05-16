@@ -33,6 +33,26 @@ pub enum QueryError {
     Trust(#[from] crate::trust::events::TrustError),
 }
 
+/// Per-query disposition of the semantic ranking branch. Agents read this
+/// from `_meta.embed_status` and branch their retry/back-off logic on the
+/// variant rather than the legacy `embed_pool_saturated` bool (which
+/// conflates four distinct failure modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbedStatus {
+    /// `embed.enabled = false`. Hybrid not attempted; FTS-only path ran.
+    #[default]
+    Disabled,
+    /// Vector branch ran and contributed candidates.
+    Ok,
+    /// Pool saturated; the vector branch was skipped for this query.
+    Saturated,
+    /// `embed.enabled = true` but the configured model is not installed.
+    ModelMissing,
+    /// Tokenizer or ORT inference failed for this query.
+    EmbedFailed,
+}
+
 /// Filter set shared across `search` / `list` / `recent` / `by_session`.
 /// Pushed into SQL before ranking.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +151,18 @@ pub struct Meta {
     pub embed_pool_saturated: bool,
     #[serde(default)]
     pub saturation_wait_ms: u32,
+    /// Why the semantic ranking did or did not contribute to this result.
+    /// Agents branch on this — `model_missing` means "run `nexum models
+    /// install bge-m3` then retry"; `embed_failed` means "log + retry";
+    /// `saturated` means "transient — back off and retry"; `ok` means "the
+    /// vector branch contributed `vector_candidates` rows".
+    #[serde(default)]
+    pub embed_status: EmbedStatus,
+    /// Number of candidates the vector branch contributed to the fused
+    /// pool. Zero when `embed_status != Ok`, or when the index has no
+    /// embeddings yet for the queried records.
+    #[serde(default)]
+    pub vector_candidates: u32,
     /// Count of rows withheld from the response because their projected
     /// `signature_status` is `Unsigned` and the active policy or
     /// `require_signed` override filters them out. Counted from the

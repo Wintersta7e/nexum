@@ -13,6 +13,7 @@
 pub mod adapter;
 pub mod api;
 pub mod config;
+pub mod embed;
 pub mod index;
 pub mod indexer;
 pub mod init;

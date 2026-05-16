@@ -1,0 +1,20 @@
+schema_version: 1
+id: database_wal_mode
+record_type: decision
+project_id: example
+title: When WAL mode is the right journal choice
+body: |
+  Write-ahead logging in SQLite trades a single rollback journal
+  for a separate append-only file plus a shared-memory index of
+  uncommitted frames. Readers see a consistent snapshot without
+  blocking the writer; the writer appends without invalidating
+  reader snapshots. The tradeoff is that the WAL file grows
+  until a checkpoint folds its frames back into the main file,
+  so long-running readers can hold the WAL open and starve
+  the checkpointer.
+tags: ["sqlite", "journal"]
+agent: manual
+created: 2026-04-07T00:00:00Z
+updated: 2026-04-07T00:00:00Z
+confidence: high
+outcome: working

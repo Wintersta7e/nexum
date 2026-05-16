@@ -37,7 +37,10 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.39", features = ["backup", "bundled", "vtab"] }
 sqlite-vec = "0.1"
 # Embeddings — `ort` is still pre-1.0 in the 2.x series.
-ort = "=2.0.0-rc.12"
+ort = { version = "=2.0.0-rc.12", features = ["download-binaries"] }
+# `ndarray` is exposed by `ort`'s public tensor API; pin to the same major
+# (`0.17`) that `ort = "=2.0.0-rc.12"` depends on to avoid version skew.
+ndarray = "0.17"
 tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
@@ -58,7 +61,9 @@ schemars = "1"
 # Git.
 git2 = "0.20"
 # HTTP / API client.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# Async stream combinators (StreamExt) for reqwest's bytes_stream.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # UUIDs for trust event_ids.
 uuid = { version = "1", features = ["v7", "serde"] }
 # SSH key generation for the trust spike and the production signer wrapper.

@@ -114,20 +114,23 @@ impl NexumServer {
         .await
     }
 
-    /// Full-text ranked search across memory records.
+    /// Hybrid ranked search across memory records.
     ///
-    /// Results are FTS-ranked, newest-first within the same score band.
-    /// Each row carries the trust contract (`signature_status`, `trust_basis`,
-    /// warnings). Optional filters narrow by `record_type`, `source`, and
-    /// `min_confidence`; `require_signed` drops unverified rows.
+    /// Reciprocal-rank-fusion over the FTS5 (BM25) and semantic (bge-m3 ONNX)
+    /// branches when embeddings are installed; FTS-only otherwise. Response
+    /// `meta.embed_status` distinguishes `ok` / `saturated` / `model_missing`
+    /// / `embed_failed`; `meta.vector_candidates` reports how many rows the
+    /// vector branch contributed. Unsigned-content penalty applies
+    /// post-fusion. Filters push into both branches before fusion.
     #[tool(
-        description = "Full-text ranked search across memory records. Results are \
-                       FTS-ranked, newest-first within the same score band. Each \
-                       row includes trust fields (signature_status, trust_basis, \
-                       warnings). Optional filters: record_type \
-                       (decision|recommendation|failure|untyped), source \
-                       (cc-native|codex-native|local), min_confidence \
-                       (high|medium|low), require_signed.",
+        description = "Hybrid ranked search: reciprocal-rank-fusion over the FTS5 \
+                       (BM25) and semantic (bge-m3 ONNX) branches when embeddings \
+                       are installed; FTS-only otherwise. Response \
+                       meta.embed_status distinguishes ok / saturated / \
+                       model_missing / embed_failed; meta.vector_candidates \
+                       reports how many rows the vector branch contributed. \
+                       Unsigned-content penalty applies post-fusion. Filters \
+                       push into both branches before fusion.",
         annotations(
             read_only_hint = true,
             idempotent_hint = true,
