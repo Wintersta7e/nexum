@@ -301,19 +301,14 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
         .collect();
     let message = "trust: regenerate signer projections from events.yml";
 
-    // The regenerate step rewrote worktree files to match the events.yml
-    // projection, but that projection may already match HEAD (e.g. a pure
-    // worktree edit on a signer file gets restored to the already-committed
-    // canonical content). Stage the candidate paths and check whether
-    // anything actually differs from HEAD — if not, the operation is a
-    // no-op per spec.
-    for path in &staged_refs {
-        let _ = std::process::Command::new("git")
-            .args(["add"])
-            .arg(path)
-            .current_dir(&paths.notebook_git)
-            .output();
-    }
+    // Regenerate may have rewritten worktree files to match HEAD (e.g. a
+    // pure worktree tamper restored to canonical content). Stage the paths
+    // and bail if nothing differs from HEAD — no empty commit.
+    let _ = std::process::Command::new("git")
+        .arg("add")
+        .args(&staged_refs)
+        .current_dir(&paths.notebook_git)
+        .output();
     let diff_status = std::process::Command::new("git")
         .args(["diff", "--cached", "--quiet"])
         .current_dir(&paths.notebook_git)
