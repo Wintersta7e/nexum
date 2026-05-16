@@ -132,3 +132,86 @@ fn doctor_events_committed_revert_refused() {
         "stderr should explain why --revert is invalid here: {stderr}"
     );
 }
+
+#[test]
+fn doctor_events_committed_continue_writes_pin_and_clears_sentinel() {
+    let home = TestHome::initialized_no_index();
+    write_sentinel(home.path(), "events_committed");
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for events_committed+--continue\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.resolved");
+    assert_eq!(payload["from_phase"], "events_committed");
+
+    // Sentinel removed.
+    assert!(
+        !home.path().join(".reanchor_pending").exists(),
+        "sentinel should be deleted after events_committed cleanup"
+    );
+    // Bootstrap pin in config.toml updated.
+    let cfg_raw = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    assert!(
+        cfg_raw.contains("SHA256:new"),
+        "config.toml should carry the new pin fingerprint: {cfg_raw}"
+    );
+    // Cache file rewritten.
+    let cached =
+        std::fs::read_to_string(home.path().join(".bootstrap-fingerprint")).unwrap_or_default();
+    assert!(
+        cached.contains("SHA256:new"),
+        ".bootstrap-fingerprint should mirror the new pin: {cached}"
+    );
+}
+
+#[test]
+fn doctor_no_flags_json_emits_ok_envelope() {
+    let home = TestHome::initialized_no_index();
+    let out = home.run(&["doctor", "--json"]);
+    assert!(out.status.success(), "expected exit 0");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.ok");
+}
+
+#[test]
+fn doctor_resolve_no_sentinel_json_emits_no_sentinel_envelope() {
+    let home = TestHome::initialized_no_index();
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--json"]);
+    assert!(out.status.success(), "expected exit 0 when no sentinel");
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.no_sentinel");
+}
+
+#[test]
+fn doctor_refused_emits_usage_exit_code() {
+    let home = TestHome::initialized_no_index();
+    write_sentinel(home.path(), "init");
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero for init+--continue"
+    );
+    // Refused is a usage error (exit code 2), not a store-integrity issue.
+    assert_eq!(out.status.code(), Some(2));
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+    assert_eq!(payload["code"], "USAGE");
+    assert_eq!(payload["kind"], "doctor.reanchor.refused");
+}

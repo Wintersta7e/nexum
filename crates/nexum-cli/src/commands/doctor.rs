@@ -76,7 +76,12 @@ fn run_resolve_pending(args: &DoctorArgs) -> ExitCode {
         Ok(p) => p,
         Err(e) => {
             if args.json {
-                println!(r#"{{"ok": false, "code": "NOT_INITIALIZED", "message": "{e}"}}"#);
+                let env = serde_json::json!({
+                    "ok": false,
+                    "code": "NOT_INITIALIZED",
+                    "message": e.to_string(),
+                });
+                println!("{env:#}");
             } else {
                 eprintln!("error: {e}");
             }
@@ -113,10 +118,14 @@ fn run_resolve_pending(args: &DoctorArgs) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(ReanchorResolveOutcome::Refused { phase, reason }) => {
+            // Refused is a usage error (wrong mode for the phase, or no
+            // mode flag), not a store-integrity violation — exit code 2
+            // so agents can distinguish recoverable input mistakes from
+            // store damage.
             if args.json {
                 let env = serde_json::json!({
                     "ok": false,
-                    "code": "STORE_INTEGRITY",
+                    "code": "USAGE",
                     "kind": "doctor.reanchor.refused",
                     "phase": phase,
                     "message": reason,
@@ -125,7 +134,7 @@ fn run_resolve_pending(args: &DoctorArgs) -> ExitCode {
             } else {
                 eprintln!("refused: {reason}");
             }
-            ExitCode::from(exit_codes::STORE_INTEGRITY)
+            ExitCode::from(exit_codes::USAGE)
         }
         Err(e) => {
             let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
