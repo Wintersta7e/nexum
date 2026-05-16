@@ -260,8 +260,8 @@ fn embed_envelope(err: &crate::embed::EmbedError) -> ErrorEnvelope {
 /// the store cannot be recovered by any command the current binary offers —
 /// the operator needs a newer binary. Every other variant is a recoverable or
 /// structural migration failure and also routes to `STORE_INTEGRITY` with an
-/// appropriate `kind` tag so agents can discriminate without matching on the
-/// human-readable message.
+/// appropriate `subkind` tag so agents can discriminate without matching on
+/// the human-readable message.
 fn migration_error_envelope(err: &crate::migrate::MigrationError) -> ErrorEnvelope {
     use crate::migrate::MigrationError;
     let message = err.to_string();
@@ -279,9 +279,26 @@ fn migration_error_envelope(err: &crate::migrate::MigrationError) -> ErrorEnvelo
             "to": to,
             "cause": cause,
         }),
-        _ => serde_json::json!({
+        MigrationError::MigrationRequired { v_disk, v_code } => serde_json::json!({
             "kind": "migration",
-            "message": &message,
+            "subkind": "migration_required",
+            "v_disk": v_disk,
+            "v_code": v_code,
+        }),
+        MigrationError::Sqlite(e) => serde_json::json!({
+            "kind": "migration",
+            "subkind": "sqlite",
+            "message": e.to_string(),
+        }),
+        MigrationError::Io(e) => serde_json::json!({
+            "kind": "migration",
+            "subkind": "io",
+            "message": e.to_string(),
+        }),
+        MigrationError::Schema(e) => serde_json::json!({
+            "kind": "migration",
+            "subkind": "schema",
+            "message": e.to_string(),
         }),
     };
     ErrorEnvelope {
