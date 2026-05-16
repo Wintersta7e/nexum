@@ -198,7 +198,16 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
         &paths.index_db,
         /* lock_held = */ true,
     )
-    .map_err(|e| ApiError::Indexer(IndexerError::Migration(e)))?;
+    .map_err(|e| match e {
+        // Unreachable in practice (lock_held = true silences the migrator's
+        // own MigrationRequired arm), but defensive: route to the dedicated
+        // ApiError::MigrationRequired so the wire keeps its exit-code-6
+        // signal if the framework ever changes shape.
+        crate::migrate::MigrationError::MigrationRequired { v_disk, v_code } => {
+            ApiError::MigrationRequired { v_disk, v_code }
+        }
+        other => ApiError::Indexer(IndexerError::Migration(other)),
+    })?;
 
     lock_file.unlock().ok();
     Ok(outcome)
