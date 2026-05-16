@@ -86,6 +86,12 @@ pub struct PerSourceOutcome {
     pub upserts: u32,
     pub deletes: u32,
     pub deferred_deletes: u32,
+    /// Count of warn-level embedder failures during this pass. The indexer
+    /// logs each failure as a warning and continues with an FTS-only insert;
+    /// this field surfaces the running count so operators can detect a
+    /// degrading embedder from the reindex summary.
+    #[serde(default)]
+    pub embed_failures: u32,
 }
 
 /// Aggregate outcome of one reindex pass across all enabled adapters.
@@ -315,6 +321,7 @@ where
         upserts: 0,
         deletes: 0,
         deferred_deletes: 0,
+        embed_failures: 0,
     };
 
     if let PassCompleteness::Failed { reason } = &pass.completeness {
@@ -572,6 +579,7 @@ where
                             ?id,
                             "embed failed; persisting record without vector",
                         );
+                        per_source.embed_failures += 1;
                         None
                     }
                 }
@@ -1048,5 +1056,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "force path bypasses the stale-threshold gate");
+    }
+
+    #[test]
+    fn per_source_outcome_carries_embed_failures() {
+        let outcome = PerSourceOutcome {
+            source: Source::CcNative,
+            completeness: PerSourceCompleteness::Authoritative,
+            ingested: 0,
+            upserts: 0,
+            deletes: 0,
+            deferred_deletes: 0,
+            embed_failures: 0,
+        };
+        assert_eq!(outcome.embed_failures, 0);
     }
 }

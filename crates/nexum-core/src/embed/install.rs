@@ -355,6 +355,14 @@ fn verify_manifest(
 /// the same streaming + `.part` rename path as the initial download so
 /// a multi-GB retry never buffers the full body in memory and a crash
 /// mid-stream cannot leave a half-written `dest` behind.
+///
+/// The retry leg uses a local `NullReporter` for byte-progress callbacks.
+/// `verify_manifest` takes both a `&mut dyn Reporter` for outer progress
+/// and a `redownload: impl FnMut(…)` closure; Rust cannot allow both to
+/// hold a mutable borrow of the same reporter simultaneously. Outer
+/// progress (hash-mismatch notice and retry announcement) still reaches
+/// the caller via `verify_manifest`'s own `reporter` argument before
+/// this closure fires.
 fn default_redownload(
     model_base_url: &str,
 ) -> impl FnMut(&ManifestEntry, &Path) -> Result<(), EmbedError> + '_ {
@@ -368,8 +376,10 @@ fn default_redownload(
                     file: entry.name().to_owned(),
                     source: e,
                 })?;
-            let mut reporter = NullReporter;
-            download_one(&client, &url, dest, entry, &mut reporter).await?;
+            // Local reporter: cannot alias the outer &mut dyn Reporter here
+            // because verify_manifest holds it for the duration of the loop.
+            let mut retry_reporter = NullReporter;
+            download_one(&client, &url, dest, entry, &mut retry_reporter).await?;
             Ok(())
         })
     }

@@ -60,14 +60,20 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                     o.upserts, o.deletes, o.deferred_deletes
                 );
                 for src in &o.per_source {
+                    let embed_col = if src.embed_failures > 0 {
+                        format!(" embed_fail={}", src.embed_failures)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  [{}] completeness={} ingested={} upserts={} deletes={} deferred={}",
+                        "  [{}] completeness={} ingested={} upserts={} deletes={} deferred={}{}",
                         src.source,
                         src.completeness,
                         src.ingested,
                         src.upserts,
                         src.deletes,
                         src.deferred_deletes,
+                        embed_col,
                     );
                 }
             }

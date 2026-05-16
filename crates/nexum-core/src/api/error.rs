@@ -285,6 +285,20 @@ fn config_envelope(err: &crate::config::ConfigError) -> ErrorEnvelope {
                 "message": format!("{e}"),
             }),
         },
+        ConfigError::Invalid { field, reason } => ErrorEnvelope {
+            error_code: error_codes::USAGE,
+            message: format!("invalid config at {field}: {reason}"),
+            remediation: Some(Remediation {
+                command: None,
+                rationale: format!("Fix the config field `{field}` and retry."),
+            }),
+            context: serde_json::json!({
+                "kind": "config",
+                "subkind": "invalid",
+                "field": field,
+                "reason": reason,
+            }),
+        },
     }
 }
 
