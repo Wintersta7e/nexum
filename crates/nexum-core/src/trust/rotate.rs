@@ -19,6 +19,27 @@ pub struct NewKey {
     pub public_key: String,
 }
 
+/// True if `payload` references `fp` in any fingerprint field.
+///
+/// The duplicate-key invariant treats every fingerprint slot as load-bearing:
+/// `BootstrapKey` / `KeyAdded` / `KeyRotatedOut` / `KeyCompromised` carry a
+/// single `fingerprint`; `BootstrapReanchor` carries both `old_fingerprint`
+/// and `new_fingerprint`. A match in any of these slots means the rotation
+/// candidate is not a fresh key and must be refused.
+fn event_mentions(payload: &EventKind, fp: &str) -> bool {
+    match payload {
+        EventKind::BootstrapKey { fingerprint, .. }
+        | EventKind::KeyAdded { fingerprint, .. }
+        | EventKind::KeyRotatedOut { fingerprint, .. }
+        | EventKind::KeyCompromised { fingerprint, .. } => fingerprint == fp,
+        EventKind::BootstrapReanchor {
+            old_fingerprint,
+            new_fingerprint,
+            ..
+        } => old_fingerprint == fp || new_fingerprint == fp,
+    }
+}
+
 /// Append a `KeyAdded` event for `new_key` to `events_yml`, then regenerate
 /// the three derived signer files. Returns the bare file names that the caller
 /// should stage with a `.trust/` prefix (`"events.yml"` is always included;
@@ -40,18 +61,7 @@ pub fn append_key_added(
     let mut log: EventLog = load_events_yml(events_yml)?;
 
     let fp = &new_key.fingerprint;
-    let duplicate = log.events.iter().any(|e| match &e.payload {
-        EventKind::BootstrapKey { fingerprint, .. }
-        | EventKind::KeyAdded { fingerprint, .. }
-        | EventKind::KeyRotatedOut { fingerprint, .. }
-        | EventKind::KeyCompromised { fingerprint, .. } => fingerprint == fp,
-        EventKind::BootstrapReanchor {
-            old_fingerprint,
-            new_fingerprint,
-            ..
-        } => old_fingerprint == fp || new_fingerprint == fp,
-    });
-    if duplicate {
+    if log.events.iter().any(|e| event_mentions(&e.payload, fp)) {
         return Err(TrustError::DuplicateKey {
             fingerprint: fp.clone(),
         });
