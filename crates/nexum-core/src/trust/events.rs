@@ -177,6 +177,11 @@ pub enum TrustError {
     /// Sqlite error during materialization.
     #[error("sqlite error during trust materialization: {0}")]
     Sqlite(#[from] rusqlite::Error),
+    /// A fingerprint that already appears in events.yml (in any role) was
+    /// supplied as the new key for a rotation. Each fingerprint must be unique
+    /// across the full event log.
+    #[error("duplicate key fingerprint in events.yml: {fingerprint}")]
+    DuplicateKey { fingerprint: String },
 }
 
 impl From<crate::index::meta::MetaError> for TrustError {

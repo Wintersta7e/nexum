@@ -1,0 +1,81 @@
+//! `nexum keys` parent + subcommands.
+
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use clap::{Args, Subcommand};
+use nexum_core::api;
+
+use super::common::resolve_runtime;
+use super::exit_codes;
+use super::json_emit;
+
+#[derive(Subcommand, Debug)]
+pub enum KeysCommand {
+    /// Add a new signing key without retiring the old one. The CURRENT key
+    /// signs the rotation commit and stays trusted; a future revocation
+    /// command retires it.
+    Rotate(RotateArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RotateArgs {
+    /// Path to the new SSH **private** key. The wrapper reads `<path>.pub`
+    /// to derive the public-key blob and fingerprint.
+    #[arg(long)]
+    pub new_key: PathBuf,
+    /// Human-readable reason recorded on the `KeyAdded` event.
+    #[arg(long, default_value = "operator-initiated rotation")]
+    pub reason: String,
+    /// Emit a structured JSON envelope to stdout.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
+pub fn run(cmd: &KeysCommand) -> ExitCode {
+    match cmd {
+        KeysCommand::Rotate(args) => run_rotate(args),
+    }
+}
+
+fn run_rotate(args: &RotateArgs) -> ExitCode {
+    let (paths, cfg) = match resolve_runtime(args.json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    match api::keys_rotate(&paths, &cfg, &args.new_key, &args.reason) {
+        Ok(outcome) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "kind": "keys.rotate.completed",
+                        "new_fingerprint": outcome.new_fingerprint,
+                        "commit": outcome.commit,
+                        "regenerated_files": outcome.regenerated_files,
+                    })
+                );
+            } else {
+                println!(
+                    "rotated in {} (commit {})",
+                    outcome.new_fingerprint, outcome.commit
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            // Inline error rendering — not route_api_error which is shaped for
+            // read verbs (hints "rerun nexum index" etc.).
+            let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
+            let code = exit_codes::for_envelope(&env);
+            if args.json {
+                json_emit::emit_error(&env, code)
+            } else {
+                eprintln!("error: {}", env.message);
+                ExitCode::from(code)
+            }
+        }
+    }
+}

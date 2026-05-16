@@ -356,6 +356,239 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
     })
 }
 
+/// Outcome of `nexum keys rotate`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeysRotateOutcome {
+    /// SSH fingerprint of the newly-added key.
+    pub new_fingerprint: String,
+    /// SHA of the signed rotation commit.
+    pub commit: String,
+    /// Bare file names that were staged and committed (events.yml + any
+    /// regenerated signer files).
+    pub regenerated_files: Vec<String>,
+}
+
+/// Append a `KeyAdded` event for the key at `new_key_path` to `events.yml`,
+/// regenerate the derived signer files, sign the rotation commit with the
+/// CURRENT (still-trusted) key, verify post-commit, and only then update
+/// `notebook.git/.git/config user.signingkey` to the new key.
+///
+/// `new_key_path` is the **private**-key path. The function reads
+/// `<path>.pub` to obtain the public-key blob and computes its fingerprint via
+/// `crate::ssh_key::compute_fingerprint`.
+///
+/// # Errors
+///
+/// `ApiError::Trust(TrustError::DuplicateKey)` if the fingerprint already
+/// appears in events.yml in any role.
+/// `ApiError::TrustRegenerateRefused` on pre-flight failure (in-progress
+/// merge, pending reanchor, or current bootstrap key already revoked).
+/// `ApiError::TrustRegenerateFailed` on commit or verify failure; the
+/// worktree is reset before this returns so no partial state lingers.
+/// `ApiError::Indexer(IndexerError::Io)` on lock failures.
+// The verb is a straight-line sequence of admin steps (lock → preconds →
+// duplicate-check → write events → regenerate → stage → diff → sign →
+// verify → rollback-on-fail → update signingkey). Each step earns its own
+// comment; splitting into sub-functions would hide the ordering that's
+// load-bearing for the trust-chain invariant.
+#[allow(clippy::too_many_lines)]
+pub fn keys_rotate(
+    paths: &Paths,
+    cfg: &Config,
+    new_key_path: &std::path::Path,
+    reason: &str,
+) -> Result<KeysRotateOutcome, ApiError> {
+    use fs2::FileExt as _;
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.lock)
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        })?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.lock.clone(),
+            source: e,
+        })
+    })?;
+
+    // Pre-flight: refuse if an in-progress merge is detected.
+    let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
+    if merge_head.exists() {
+        lock_file.unlock().ok();
+        return Err(ApiError::TrustRegenerateRefused {
+            reason: "in-progress merge detected; abort or complete it first".into(),
+        });
+    }
+
+    // Pre-flight: refuse if a reanchor sentinel is present.
+    crate::trust::reanchor_pending::check(&paths.home).map_err(|e| {
+        lock_file.unlock().ok();
+        ApiError::Trust(e)
+    })?;
+
+    // Pre-flight: the current bootstrap key must still be trusted. If it has a
+    // KeyRotatedOut or KeyCompromised event the rotation commit would be signed
+    // by an untrusted key and verify would fail. Surface a clean refusal rather
+    // than committing then rolling back.
+    let events_yml = paths.notebook_git.join(".trust/events.yml");
+    let current_fp = &cfg.trust.bootstrap.fingerprint;
+    let event_log = crate::trust::events::load_events_yml(&events_yml).map_err(|e| {
+        lock_file.unlock().ok();
+        ApiError::Trust(e)
+    })?;
+    let current_trusted = event_log.events.iter().all(|e| match &e.payload {
+        crate::trust::events::EventKind::KeyRotatedOut { fingerprint, .. }
+        | crate::trust::events::EventKind::KeyCompromised { fingerprint, .. } => {
+            fingerprint != current_fp
+        }
+        _ => true,
+    });
+    if !current_trusted {
+        lock_file.unlock().ok();
+        return Err(ApiError::TrustRegenerateRefused {
+            reason: format!(
+                "current bootstrap key {current_fp} is no longer trusted; \
+                 rotation requires a trusted signer (keys recover is the recovery path)"
+            ),
+        });
+    }
+
+    // Read the new key's public-key blob and compute its fingerprint.
+    let pub_path = {
+        let mut s = new_key_path.as_os_str().to_owned();
+        s.push(".pub");
+        std::path::PathBuf::from(s)
+    };
+    let public_key = std::fs::read_to_string(&pub_path)
+        .map_err(|e| {
+            lock_file.unlock().ok();
+            ApiError::Indexer(IndexerError::Io {
+                path: pub_path.clone(),
+                source: e,
+            })
+        })?
+        .trim()
+        .to_owned();
+    let fingerprint = crate::ssh_key::compute_fingerprint(&public_key).map_err(|e| {
+        lock_file.unlock().ok();
+        ApiError::TrustRegenerateRefused {
+            reason: format!(
+                "could not compute SSH fingerprint of {}: {e}",
+                pub_path.display()
+            ),
+        }
+    })?;
+
+    let new_key = crate::trust::rotate::NewKey {
+        fingerprint: fingerprint.clone(),
+        public_key,
+    };
+
+    let trust_dir = paths.notebook_git.join(".trust");
+    let touched = crate::trust::rotate::append_key_added(&events_yml, &trust_dir, &new_key, reason)
+        .map_err(|e| {
+            lock_file.unlock().ok();
+            ApiError::Trust(e)
+        })?;
+
+    // Stage paths with the `.trust/` prefix required by the notebook layout.
+    let staged_pathbufs: Vec<std::path::PathBuf> = touched
+        .iter()
+        .map(|name| std::path::PathBuf::from(format!(".trust/{name}")))
+        .collect();
+    let staged_refs: Vec<&std::path::Path> = staged_pathbufs
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect();
+
+    // Build a short fingerprint suffix for the commit message (last 12 hex
+    // chars of the base64 body, strip the trailing `=` padding first).
+    let short = fingerprint
+        .split(':')
+        .next_back()
+        .unwrap_or(&fingerprint)
+        .trim_end_matches('=')
+        .chars()
+        .rev()
+        .take(12)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let commit_msg = format!("trust: add signing key {short}");
+
+    // Sign with the CURRENT key (user.signingkey still points at the old key).
+    let commit = match crate::init::git_ops::git_commit_signed(
+        &paths.notebook_git,
+        &staged_refs,
+        &commit_msg,
+    ) {
+        Ok(sha) => sha,
+        Err(commit_err) => {
+            let _ = std::process::Command::new("git")
+                .args(["reset", "--hard", "HEAD"])
+                .current_dir(&paths.notebook_git)
+                .output();
+            lock_file.unlock().ok();
+            return Err(ApiError::TrustRegenerateFailed {
+                stderr: format!("git commit failed: {commit_err}"),
+            });
+        }
+    };
+
+    // Verify the rotation commit using historical_signers (which now includes
+    // the new key but was signed by the old key — the old key must still be in
+    // historical_signers for this to pass).
+    let historical = paths.notebook_git.join(".trust/historical_signers");
+    if let Err(verify_err) = crate::init::git_ops::git_verify_commit_with_signers(
+        &paths.notebook_git,
+        "HEAD",
+        &historical,
+    ) {
+        let _ = std::process::Command::new("git")
+            .args(["reset", "--hard", "HEAD~1"])
+            .current_dir(&paths.notebook_git)
+            .output();
+        lock_file.unlock().ok();
+        return Err(ApiError::TrustRegenerateFailed {
+            stderr: verify_err.to_string(),
+        });
+    }
+
+    // ONLY after verify succeeds: update user.signingkey to the new key path.
+    // A failure here is non-fatal — the commit is already signed and verified;
+    // the operator can update git config manually.
+    let update_result = std::process::Command::new("git")
+        .args(["config", "user.signingkey"])
+        .arg(new_key_path)
+        .current_dir(&paths.notebook_git)
+        .output();
+    if let Ok(out) = &update_result
+        && !out.status.success()
+    {
+        tracing::warn!(
+            target: "nexum::trust",
+            "git config user.signingkey update failed after successful rotation commit; \
+             update it manually to {}",
+            new_key_path.display(),
+        );
+    }
+
+    lock_file.unlock().ok();
+    Ok(KeysRotateOutcome {
+        new_fingerprint: fingerprint,
+        commit,
+        regenerated_files: touched,
+    })
+}
+
 /// Open the index DB and prime the trust-events view for a read verb.
 ///
 /// Read verbs share two preconditions: the DB must already exist

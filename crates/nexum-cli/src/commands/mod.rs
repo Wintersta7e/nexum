@@ -8,6 +8,7 @@ pub mod get;
 pub mod index;
 pub mod init;
 pub(crate) mod json_emit;
+pub mod keys;
 pub mod list;
 pub mod migrate;
 pub mod models;

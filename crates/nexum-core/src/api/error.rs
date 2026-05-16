@@ -476,6 +476,16 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
                 "message": format!("{e}"),
             }),
         },
+        TrustError::DuplicateKey { fingerprint } => ErrorEnvelope {
+            error_code: error_codes::STORE_INTEGRITY,
+            message: format!("duplicate key fingerprint in events.yml: {fingerprint}"),
+            remediation: None,
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "duplicate_key",
+                "fingerprint": fingerprint,
+            }),
+        },
     }
 }
 

@@ -51,6 +51,12 @@ enum Commands {
     /// Diagnose store health and (with `--resolve-pending-reanchor`) clean
     /// up a partial-reanchor sentinel.
     Doctor(commands::doctor::DoctorArgs),
+    /// Manage signing keys. M1b supports `rotate` (additive — adds a new
+    /// trusted key without retiring the old one).
+    Keys {
+        #[command(subcommand)]
+        cmd: commands::keys::KeysCommand,
+    },
 }
 
 fn main() -> ExitCode {
@@ -69,6 +75,7 @@ fn main() -> ExitCode {
         Commands::Trust { cmd } => commands::trust::run(&cmd),
         Commands::Migrate(args) => commands::migrate::run(&args),
         Commands::Doctor(args) => commands::doctor::run(&args),
+        Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
 }
 
