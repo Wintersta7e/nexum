@@ -140,10 +140,7 @@ async fn download_one(
     };
 
     // Determine how far a prior run got.
-    let existing = match tokio::fs::metadata(&temp_dest).await {
-        Ok(m) => m.len(),
-        Err(_) => 0,
-    };
+    let existing = tokio::fs::metadata(&temp_dest).await.map_or(0, |m| m.len());
 
     // Fast-path: the .part is already at the manifest's expected size, so
     // the previous run crashed between flush and rename. Rename in place;
@@ -161,55 +158,51 @@ async fn download_one(
 
     // Over-size .part is corrupt: more bytes than the manifest expected.
     // Delete and start fresh so we never silently append to a bogus file.
-    if existing > entry.size() {
+    let initial_done = if existing > entry.size() {
         let _ = tokio::fs::remove_file(&temp_dest).await;
-    }
-    let initial_done = if existing > entry.size() { 0 } else { existing };
+        0
+    } else {
+        existing
+    };
 
-    // Build a Range request when we have partial bytes; otherwise plain GET.
-    let mut req = client.get(url);
-    if initial_done > 0 {
-        req = req.header("Range", format!("bytes={initial_done}-"));
-    }
-    let resp = req.send().await.map_err(|e| EmbedError::Download {
-        file: entry.name().to_owned(),
-        source: e,
-    })?;
-    let status = resp.status();
-
-    // 416 Range Not Satisfiable: the server says we are already past EOF.
-    // The .part is bogus — delete it and retry once without Range (one
+    // First GET (with Range when resuming). On 416 the server says we are
+    // already past EOF, so wipe the .part and retry once without Range (one
     // retry max; propagate whatever the second response brings).
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && initial_done > 0 {
-        let _ = tokio::fs::remove_file(&temp_dest).await;
-        let resp2 = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| EmbedError::Download {
-                file: entry.name().to_owned(),
-                source: e,
-            })?;
-        let resp2 = resp2.error_for_status().map_err(|e| EmbedError::Download {
-            file: entry.name().to_owned(),
-            source: e,
-        })?;
-        return download_streaming(resp2, &temp_dest, dest, entry, reporter, 0).await;
-    }
-
+    let resp = send_get(client, url, entry, initial_done).await?;
+    let (resp, effective_initial) =
+        if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && initial_done > 0 {
+            let _ = tokio::fs::remove_file(&temp_dest).await;
+            (send_get(client, url, entry, 0).await?, 0)
+        } else {
+            // On 206 Partial Content append; on 200 OK (server ignoring
+            // Range) truncate and start fresh to avoid duplicating bytes.
+            let resume = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT && initial_done > 0;
+            (resp, if resume { initial_done } else { 0 })
+        };
     let resp = resp.error_for_status().map_err(|e| EmbedError::Download {
         file: entry.name().to_owned(),
         source: e,
     })?;
-    let status = resp.status();
+    download_streaming(resp, &temp_dest, dest, entry, reporter, effective_initial).await
+}
 
-    // On 206 Partial Content open in append mode; on 200 OK (server
-    // ignoring Range) truncate and start fresh to avoid duplicating bytes.
-    if status == reqwest::StatusCode::PARTIAL_CONTENT && initial_done > 0 {
-        download_streaming(resp, &temp_dest, dest, entry, reporter, initial_done).await
-    } else {
-        download_streaming(resp, &temp_dest, dest, entry, reporter, 0).await
+/// Issue a GET, optionally with `Range: bytes=<initial_done>-`. Returns the
+/// raw response without applying `error_for_status` so the caller can
+/// inspect 416 before deciding whether to retry.
+async fn send_get(
+    client: &reqwest::Client,
+    url: &str,
+    entry: &ManifestEntry,
+    initial_done: u64,
+) -> Result<reqwest::Response, EmbedError> {
+    let mut req = client.get(url);
+    if initial_done > 0 {
+        req = req.header("Range", format!("bytes={initial_done}-"));
     }
+    req.send().await.map_err(|e| EmbedError::Download {
+        file: entry.name().to_owned(),
+        source: e,
+    })
 }
 
 /// Stream `resp` body into `temp_dest`, flush, then rename to `dest`.
@@ -578,6 +571,37 @@ mod resume_tests {
     // `download_one` calls so the hash content is irrelevant.
     const DUMMY_SHA: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+    /// True when `req` carries a `Range:` header (HTTP header names are
+    /// case-insensitive; reqwest sends them lowercased).
+    fn request_has_range(req: &str) -> bool {
+        req.lines().any(|l| {
+            l.split_once(':')
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("range"))
+        })
+    }
+
+    /// Parse the start offset from a `Range: bytes=<N>-` header, defaulting
+    /// to 0 when absent or unparseable.
+    fn parse_range_start(req: &str) -> usize {
+        req.lines()
+            .find_map(|l| {
+                let (name, value) = l.split_once(':')?;
+                if !name.eq_ignore_ascii_case("range") {
+                    return None;
+                }
+                let bytes = value.trim().strip_prefix("bytes=")?;
+                bytes.split('-').next()?.parse::<usize>().ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Build the `<dest>.part` sibling path the downloader writes to.
+    fn part_path(dest: &Path) -> PathBuf {
+        let mut s = dest.as_os_str().to_owned();
+        s.push(".part");
+        PathBuf::from(s)
+    }
+
     /// Spin up a tiny async HTTP server that honours `Range: bytes=N-`
     /// requests. Returns a 206 Partial Content slice for range requests and
     /// a 200 OK for plain GETs.
@@ -601,21 +625,7 @@ mod resume_tests {
                         return;
                     }
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    // HTTP headers are case-insensitive; reqwest sends "range:" (lowercase).
-                    let range_start = req
-                        .lines()
-                        .find_map(|l| {
-                            let lower = l.to_ascii_lowercase();
-                            lower.strip_prefix("range: bytes=").map(|_| {
-                                // Offset of "bytes=" in the lowercased line is safe to
-                                // apply back to the original (all ASCII, same byte indices).
-                                let off = lower.find("bytes=").unwrap() + "bytes=".len();
-                                &l[off..]
-                            })
-                        })
-                        .and_then(|s| s.split('-').next())
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(0);
+                    let range_start = parse_range_start(&req);
                     let slice = &body[range_start..];
                     let status = if range_start > 0 {
                         "206 Partial Content"
@@ -655,10 +665,7 @@ mod resume_tests {
                         return;
                     }
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    // HTTP headers are case-insensitive; reqwest sends "range:" (lowercase).
-                    let has_range = req
-                        .lines()
-                        .any(|l| l.to_ascii_lowercase().starts_with("range: bytes="));
+                    let has_range = request_has_range(&req);
                     if has_range {
                         // Respond 416 to Range requests.
                         let _ = sock
@@ -688,12 +695,7 @@ mod resume_tests {
         let half = full[..512].to_vec();
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("model.onnx");
-        let part = {
-            let mut s = dest.as_os_str().to_owned();
-            s.push(".part");
-            PathBuf::from(s)
-        };
-        std::fs::write(&part, &half).unwrap();
+        std::fs::write(part_path(&dest), &half).unwrap();
 
         let addr = serve_with_range(full.clone()).await;
         let entry = ManifestEntry::new("model.onnx", 1024, DUMMY_SHA);
@@ -716,12 +718,7 @@ mod resume_tests {
         let body: Vec<u8> = (0u8..=255).cycle().take(64).collect();
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("ok.bin");
-        let part = {
-            let mut s = dest.as_os_str().to_owned();
-            s.push(".part");
-            PathBuf::from(s)
-        };
-        std::fs::write(&part, &body).unwrap();
+        std::fs::write(part_path(&dest), &body).unwrap();
 
         let addr = serve_with_range(body.clone()).await;
         let entry = ManifestEntry::new("ok.bin", 64, DUMMY_SHA);
@@ -743,11 +740,7 @@ mod resume_tests {
         let full: Vec<u8> = (0u8..=127).collect();
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("model.bin");
-        let part = {
-            let mut s = dest.as_os_str().to_owned();
-            s.push(".part");
-            PathBuf::from(s)
-        };
+        let part = part_path(&dest);
         // Seed a .part with half the data (to trigger a Range request).
         std::fs::write(&part, &full[..64]).unwrap();
 
@@ -773,14 +766,9 @@ mod resume_tests {
         let full: Vec<u8> = (0u8..=63).collect();
         let tmp = tempfile::tempdir().unwrap();
         let dest = tmp.path().join("corrupt.bin");
-        let part = {
-            let mut s = dest.as_os_str().to_owned();
-            s.push(".part");
-            PathBuf::from(s)
-        };
         // Write more bytes than entry.size() will declare.
         let bloated: Vec<u8> = (0u8..=127).collect();
-        std::fs::write(&part, &bloated).unwrap();
+        std::fs::write(part_path(&dest), &bloated).unwrap();
 
         let addr = serve_with_range(full.clone()).await;
         // entry.size() is 64, but the .part has 128 bytes.
