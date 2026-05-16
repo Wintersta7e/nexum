@@ -1,22 +1,23 @@
 //! The Embedder — owns the ORT session + tokenizer + the embedding-dim
 //! constant. Cheap to clone; safe to share across threads (the session
-//! lives behind `Arc<Mutex>` because `Session::run` takes `&mut self`
-//! even though `Session: Send + Sync`).
+//! lives behind `InferenceCell` which serializes callers on a mutex
+//! because `Session::run` takes `&mut self` even though `Session: Send + Sync`).
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ndarray::{Array2, Axis};
 use ort::session::Session;
 use ort::value::TensorRef;
 use tokenizers::{Tokenizer, TruncationDirection, TruncationParams, TruncationStrategy};
 
+use super::inference_cell::InferenceCell;
 use super::types::{EMBED_DIM, EmbedError};
 
 /// Dense-embedding handle. Cheap to clone; safe to share across threads.
 #[derive(Clone)]
 pub struct Embedder {
-    session: Arc<Mutex<Session>>,
+    session: InferenceCell,
     tokenizer: Arc<Tokenizer>,
 }
 
@@ -69,7 +70,7 @@ impl Embedder {
             .map_err(|e| EmbedError::Tokenize(e.to_string()))?;
 
         Ok(Self {
-            session: Arc::new(Mutex::new(session)),
+            session: InferenceCell::new(session),
             tokenizer: Arc::new(tokenizer),
         })
     }
@@ -101,32 +102,30 @@ impl Embedder {
         let attention_mask = Array2::from_shape_vec((1, seq_len), mask)
             .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
 
-        let mut session = self
-            .session
-            .lock()
-            .map_err(|_| EmbedError::OrtRun("session mutex poisoned".into()))?;
-        let outputs = session
-            .run(ort::inputs![
-                "input_ids" => TensorRef::from_array_view(&input_ids)
-                    .map_err(|e| EmbedError::OrtRun(e.to_string()))?,
-                "attention_mask" => TensorRef::from_array_view(&attention_mask)
-                    .map_err(|e| EmbedError::OrtRun(e.to_string()))?,
-            ])
-            .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
+        self.session.run(|session| {
+            let outputs = session
+                .run(ort::inputs![
+                    "input_ids" => TensorRef::from_array_view(&input_ids)
+                        .map_err(|e| EmbedError::OrtRun(e.to_string()))?,
+                    "attention_mask" => TensorRef::from_array_view(&attention_mask)
+                        .map_err(|e| EmbedError::OrtRun(e.to_string()))?,
+                ])
+                .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
 
-        let sentence = outputs["sentence_embedding"]
-            .try_extract_array::<f32>()
-            .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
+            let sentence = outputs["sentence_embedding"]
+                .try_extract_array::<f32>()
+                .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
 
-        let shape: Vec<usize> = sentence.shape().to_vec();
-        if shape.len() != 2 || shape[0] != 1 || shape[1] != EMBED_DIM {
-            return Err(EmbedError::OutputShapeMismatch {
-                expected: vec![1, EMBED_DIM],
-                actual: shape,
-            });
-        }
+            let shape: Vec<usize> = sentence.shape().to_vec();
+            if shape.len() != 2 || shape[0] != 1 || shape[1] != EMBED_DIM {
+                return Err(EmbedError::OutputShapeMismatch {
+                    expected: vec![1, EMBED_DIM],
+                    actual: shape,
+                });
+            }
 
-        Ok(sentence.index_axis(Axis(0), 0).iter().copied().collect())
+            Ok(sentence.index_axis(Axis(0), 0).iter().copied().collect())
+        })
     }
 }
 

@@ -3,6 +3,7 @@
 //! per-install by `nexum models install bge-m3`.
 
 pub mod embedder;
+mod inference_cell;
 pub mod install;
 pub mod manifest;
 pub mod reporter;
