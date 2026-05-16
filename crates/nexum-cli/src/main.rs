@@ -48,6 +48,9 @@ enum Commands {
     },
     /// Run pending index-DB schema migrations.
     Migrate(commands::migrate::MigrateArgs),
+    /// Diagnose store health and (with `--resolve-pending-reanchor`) clean
+    /// up a partial-reanchor sentinel.
+    Doctor(commands::doctor::DoctorArgs),
 }
 
 fn main() -> ExitCode {
@@ -65,6 +68,7 @@ fn main() -> ExitCode {
         Commands::Project(a) => commands::project::run(&a),
         Commands::Trust { cmd } => commands::trust::run(&cmd),
         Commands::Migrate(args) => commands::migrate::run(&args),
+        Commands::Doctor(args) => commands::doctor::run(&args),
     }
 }
 

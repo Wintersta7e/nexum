@@ -741,6 +741,130 @@ fn read_tampering_rows(conn: &rusqlite::Connection) -> Result<Vec<TamperingRow>,
         .map_err(crate::query::QueryError::from)?)
 }
 
+/// Resolution mode for `nexum doctor --resolve-pending-reanchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReanchorResolveMode {
+    /// Re-attempt the next phase. Valid in `events_committed` (writes the new
+    /// pin) and `pin_updated` (idempotent cleanup). Refused in `init` — the
+    /// keys-recover entry path is not implemented in this release.
+    Continue,
+    /// Abandon the pending reanchor and remove the sentinel. Only valid in
+    /// `init` (no signed commit exists yet). Refused in `events_committed`
+    /// (a signed commit is already on HEAD; only `--continue` is valid).
+    Revert,
+}
+
+/// Outcome of a sentinel-resolution attempt.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReanchorResolveOutcome {
+    /// No `.reanchor_pending` sentinel was found; nothing to do.
+    NoSentinel,
+    /// The sentinel was consumed and the indicated phase cleaned up.
+    Resolved {
+        /// Wire name of the phase that was resolved (`"init"`,
+        /// `"events_committed"`, or `"pin_updated"`).
+        from_phase: String,
+    },
+    /// The requested mode is not valid for the current phase.
+    Refused {
+        /// Wire name of the phase the sentinel reported.
+        phase: String,
+        /// Human-readable explanation of why the mode was refused.
+        reason: String,
+    },
+}
+
+/// Inspect `~/.nexum/.reanchor_pending` and apply the sentinel cleanup per the
+/// documented phases.
+///
+/// - `init` + `Revert` → delete the sentinel (no events were committed).
+/// - `init` + `Continue` → refuse (keys-recover path not yet available).
+/// - `events_committed` + `Continue` → write the new bootstrap pin to
+///   `paths.config` and `paths.bootstrap_pin`, then remove the sentinel.
+/// - `events_committed` + `Revert` → refuse (a signed reanchor commit is
+///   already on HEAD; only `--continue` is valid).
+/// - `pin_updated` + any mode (or `None`) → idempotent cleanup: delete the
+///   sentinel and report success.
+/// - No sentinel → `NoSentinel` outcome.
+/// - Sentinel present but `mode` is `None` → `Refused` (caller must specify
+///   `--continue` or `--revert`).
+///
+/// # Errors
+///
+/// Returns `ApiError::Trust` on sentinel I/O failures.
+/// Returns `ApiError::Config` when loading or saving `config.toml` fails
+/// (only the `events_committed + Continue` branch).
+/// Returns `ApiError::Indexer(IndexerError::Io)` when writing the bootstrap
+/// pin cache file fails (same branch).
+pub fn resolve_pending_reanchor(
+    paths: &Paths,
+    mode: Option<ReanchorResolveMode>,
+) -> Result<ReanchorResolveOutcome, ApiError> {
+    use crate::trust::reanchor_pending::{Phase, delete_sentinel, read_sentinel};
+
+    let Some(sentinel) = read_sentinel(&paths.home)? else {
+        return Ok(ReanchorResolveOutcome::NoSentinel);
+    };
+    let phase = sentinel.phase_completed();
+
+    match (phase, mode) {
+        (Phase::Init, Some(ReanchorResolveMode::Revert)) => {
+            delete_sentinel(&paths.home)?;
+            Ok(ReanchorResolveOutcome::Resolved {
+                from_phase: "init".into(),
+            })
+        }
+        (Phase::Init, Some(ReanchorResolveMode::Continue)) => {
+            Ok(ReanchorResolveOutcome::Refused {
+                phase: "init".into(),
+                reason: "this release only supports cleanup of `pin_updated` and `--revert` of `init`; \
+                         phase=init recovery requires the keys-recover command (not yet available)"
+                    .into(),
+            })
+        }
+        (Phase::EventsCommitted, Some(ReanchorResolveMode::Continue)) => {
+            let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+            sentinel
+                .new_pin_fp()
+                .clone_into(&mut cfg.trust.bootstrap.fingerprint);
+            sentinel
+                .new_pubkey()
+                .clone_into(&mut cfg.trust.bootstrap.public_key);
+            crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
+            std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(
+                |e| {
+                    ApiError::Indexer(crate::indexer::db::IndexerError::Io {
+                        path: paths.bootstrap_pin.clone(),
+                        source: e,
+                    })
+                },
+            )?;
+            delete_sentinel(&paths.home)?;
+            Ok(ReanchorResolveOutcome::Resolved {
+                from_phase: "events_committed".into(),
+            })
+        }
+        (Phase::EventsCommitted, Some(ReanchorResolveMode::Revert)) => {
+            Ok(ReanchorResolveOutcome::Refused {
+                phase: "events_committed".into(),
+                reason: "phase=events_committed already has a signed reanchor commit on HEAD; \
+                         --revert would require a manual `git revert`; only --continue is valid here"
+                    .into(),
+            })
+        }
+        (Phase::PinUpdated, _) => {
+            delete_sentinel(&paths.home)?;
+            Ok(ReanchorResolveOutcome::Resolved {
+                from_phase: "pin_updated".into(),
+            })
+        }
+        (_, None) => Ok(ReanchorResolveOutcome::Refused {
+            phase: phase.as_str().into(),
+            reason: "specify --continue or --revert".into(),
+        }),
+    }
+}
+
 fn identity_kind_for(project_id: &str) -> &'static str {
     let prefix = project_id.split(':').next().unwrap_or("");
     match prefix {
