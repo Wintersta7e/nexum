@@ -58,8 +58,7 @@ impl Embedder {
             .commit_from_file(&model_path)
             .map_err(EmbedError::ort_init)?;
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| EmbedError::tokenize_from_message(e.to_string()))?;
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(EmbedError::tokenize)?;
         tokenizer
             .with_truncation(Some(TruncationParams {
                 max_length: 8192,
@@ -67,7 +66,7 @@ impl Embedder {
                 stride: 0,
                 direction: TruncationDirection::Right,
             }))
-            .map_err(|e| EmbedError::tokenize_from_message(e.to_string()))?;
+            .map_err(EmbedError::tokenize)?;
 
         Ok(Self {
             session: InferenceCell::new(session),
@@ -88,7 +87,7 @@ impl Embedder {
         let encoding = self
             .tokenizer
             .encode(text, true)
-            .map_err(|e| EmbedError::tokenize_from_message(e.to_string()))?;
+            .map_err(EmbedError::tokenize)?;
         let ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
         let mask: Vec<i64> = encoding
             .get_attention_mask()

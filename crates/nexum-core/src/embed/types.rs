@@ -83,12 +83,20 @@ impl EmbedError {
         }
     }
 
-    /// Build a `Tokenize` from a free-form message. Tokenizer errors arrive
-    /// as a `Box<dyn Error + Send + Sync>` alias that won't sit behind a
-    /// generic `E: Error` bound, and mutex-poison / shape-mismatch sites
-    /// don't have a concrete source error either; the message is duplicated
-    /// into the source chain so the wire shape stays consistent with the
-    /// typed constructors above.
+    /// Build a `Tokenize` from a `tokenizers::Error` (already a
+    /// `Box<dyn Error + Send + Sync>`). The source flows straight into
+    /// the chain so `error.source()` walks the real underlying cause.
+    pub(crate) fn tokenize(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        Self::Tokenize {
+            message: err.to_string(),
+            source: err,
+        }
+    }
+
+    /// Build a `Tokenize` from a free-form message. Used by the cache
+    /// materializer where only the message survives the round-trip; in
+    /// that path `error.source()` returns the same text as `Display`. New
+    /// code with access to the original error should call [`Self::tokenize`].
     pub(crate) fn tokenize_from_message(message: String) -> Self {
         Self::Tokenize {
             source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
