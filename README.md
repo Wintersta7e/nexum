@@ -53,6 +53,23 @@ your memory files — and your agent will trust whatever's there.
   `path`, `signature_status`, and `matches`. Agents branch on
   `error_code` and surface remediation directly to users without
   having to regex prose.
+- **Semantic ranking** when you opt in — `nexum models install bge-m3`
+  downloads the SHA256-verified bge-m3 ONNX weights, flips the embed
+  flag on, and `nexum search` then fuses FTS BM25 with vector k-NN via
+  RRF. Search results carry `embed_status` and `vector_candidates`
+  signals so agents can tell hybrid hits from FTS-only fallback.
+- **MCP stdio server** — `nexum-mcp` exposes six read-only tools
+  (`search`, `get`, `list`, `recent`, `by_session`, `list_projects`)
+  over the rmcp stdio transport, wrapping the same core read verbs the
+  CLI uses. Drop it into any MCP-aware host.
+- **Admin / recovery commands** — `nexum keys rotate`,
+  `nexum trust regenerate-files`, `nexum doctor --resolve-pending-reanchor`,
+  `nexum index --sweep [--aggressive]`, `nexum index --reembed`, and
+  `nexum migrate` cover the operational surface (key rotation,
+  trust-file regeneration, sentinel resolution, stale-row sweep,
+  embedding backfill, schema migration). Every mutation runs under a
+  writer-process lock and rolls back on failure so the worktree
+  stays clean.
 
 ## Quick start
 
@@ -66,10 +83,20 @@ cargo build --release
 # Index your CC + Codex memory
 ./target/release/nexum index
 
+# (Optional) install the bge-m3 ONNX weights to enable semantic ranking
+./target/release/nexum models install bge-m3
+
 # Query
 ./target/release/nexum search "concurrency"
 ./target/release/nexum recent --limit 20 --json
 ./target/release/nexum trust validate-events
+```
+
+The MCP stdio server lives in the same workspace:
+
+```bash
+cargo build --release --bin nexum-mcp
+# Point your MCP-aware host at: target/release/nexum-mcp
 ```
 
 ## Reproducible end-to-end test
@@ -89,19 +116,16 @@ CC_HOME="$HOME/.claude" ./e2e/run.sh cc         # real cc install
 
 ## Status
 
-The read path is feature-complete and validated end-to-end against
-real codex + cc data via the Docker harness, including the structured
-`--json` error envelope across every read verb. Three crates compile
-clean, gate green at `cargo fmt + check + clippy -D warnings + test`.
+The read path, the write path, the trust state machine, the MCP
+stdio server, semantic ranking, and the admin / recovery command
+surface are all in `main` and validated end-to-end against real
+codex + cc data via the Docker harness. Three crates compile clean,
+gate green at `cargo fmt + check + clippy -D warnings + test`.
 
-Remaining work: the `nexum-mcp` stdio server (placeholder crate
-today; the existing `--json` envelope plugs into rmcp's tool-result
-shape directly), semantic ranking via bge-m3 ONNX (FTS-only today),
-and the admin/recovery commands (key rotation, trust
-regenerate-files, `doctor --resolve-pending-reanchor`). After that:
-typed extraction from past sessions, then a recommendation →
-decision promotion flow when matching commits land in your project
-repo.
+Remaining work: typed extraction from past sessions (Claude / Codex
+extractor frontends, prompt versioning, structured field promotion),
+then a recommendation → decision promotion flow when matching commits
+land in your project repo.
 
 ## Layout
 
@@ -109,9 +133,9 @@ repo.
 nexum/
 ├── Cargo.toml             # workspace
 ├── crates/
-│   ├── nexum-core/        # library — adapters, indexer, query, trust, projection
+│   ├── nexum-core/        # library — adapters, indexer, query, trust, embed, api facade
 │   ├── nexum-cli/         # binary "nexum"
-│   └── nexum-mcp/         # binary "nexum-mcp" (stdio MCP server, planned)
+│   └── nexum-mcp/         # binary "nexum-mcp" (stdio MCP server)
 └── e2e/                   # Docker-isolated end-to-end test harness
 ```
 
