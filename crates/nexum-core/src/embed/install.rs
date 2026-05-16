@@ -376,8 +376,6 @@ fn default_redownload(
                     file: entry.name().to_owned(),
                     source: e,
                 })?;
-            // Local reporter: cannot alias the outer &mut dyn Reporter here
-            // because verify_manifest holds it for the duration of the loop.
             let mut retry_reporter = NullReporter;
             download_one(&client, &url, dest, entry, &mut retry_reporter).await?;
             Ok(())
