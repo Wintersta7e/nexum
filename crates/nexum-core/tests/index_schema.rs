@@ -164,7 +164,7 @@ fn delete_in_correct_order_leaves_no_orphans() {
     // Application-managed: insert into record_embeddings AFTER records (the
     // schema's required ordering). Use a placeholder embedding; vec0 needs a
     // 1024-dim FLOAT[].
-    let embedding: Vec<u8> = (0..1024).flat_map(|_| 0.0_f32.to_le_bytes()).collect();
+    let embedding = nexum_core::embed::f32_slice_to_le_bytes(&[0.0_f32; 1024]);
     conn.execute(
         "INSERT INTO record_embeddings(record_rowid, embedding) VALUES (?1, ?2)",
         rusqlite::params![rowid, embedding],

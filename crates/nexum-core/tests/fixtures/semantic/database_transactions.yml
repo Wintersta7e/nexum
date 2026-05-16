@@ -1,0 +1,19 @@
+schema_version: 1
+id: database_transactions
+record_type: decision
+project_id: example
+title: Choosing the right SQLite transaction kind
+body: |
+  rusqlite exposes three transaction kinds. Deferred is the default
+  and acquires a SHARED lock on first read, escalating to RESERVED
+  on first write. Immediate grabs RESERVED up front, which is what
+  you want for writer-heavy code paths so a long-running reader
+  cannot starve the upgrade. Exclusive is rarely needed outside
+  bulk-load or schema-change windows where every other connection
+  must be paused.
+tags: ["sqlite", "rusqlite"]
+agent: manual
+created: 2026-04-06T00:00:00Z
+updated: 2026-04-06T00:00:00Z
+confidence: high
+outcome: working

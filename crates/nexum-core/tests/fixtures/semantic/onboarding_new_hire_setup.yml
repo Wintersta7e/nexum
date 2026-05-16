@@ -1,0 +1,18 @@
+schema_version: 1
+id: onboarding_new_hire_setup
+record_type: decision
+project_id: example
+title: First-week setup checklist for a new hire
+body: |
+  Day one of a new hire should never be spent waiting on IT.
+  Pre-provision the laptop, the SSO accounts, and the VPN profile
+  before the start date so the first hour is spent on introductions,
+  not on password resets. The checklist that survives contact with
+  reality has three sections: accounts and access, dev environment
+  bootstrap, and a 30-60-90 ramp plan owned by the hiring manager.
+tags: ["hr", "people-ops"]
+agent: manual
+created: 2026-04-09T00:00:00Z
+updated: 2026-04-09T00:00:00Z
+confidence: high
+outcome: working

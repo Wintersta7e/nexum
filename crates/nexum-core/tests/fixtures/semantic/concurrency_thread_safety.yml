@@ -1,0 +1,19 @@
+schema_version: 1
+id: concurrency_thread_safety
+record_type: decision
+project_id: example
+title: Thread safety in Rust async code
+summary: Notes on Send and Sync and what they mean for async runtimes.
+body: |
+  When sharing state between async tasks, the standard pattern is
+  Arc<Mutex<T>> for interior mutability or Arc<RwLock<T>> for
+  read-heavy workloads. tokio::sync vs std::sync depends on whether
+  the lock is held across an await point. Holding a std::sync::Mutex
+  across an await will block the executor thread and starve other
+  tasks; tokio::sync::Mutex is async-aware and yields cleanly.
+tags: ["rust", "async"]
+agent: manual
+created: 2026-04-01T00:00:00Z
+updated: 2026-04-01T00:00:00Z
+confidence: high
+outcome: working

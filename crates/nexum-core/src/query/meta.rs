@@ -11,7 +11,7 @@
 use rusqlite::Connection;
 
 use super::policy::PolicyOutcome;
-use super::types::{Meta, MetaSourceCounts, QueryError};
+use super::types::{EmbedStatus, Meta, MetaSourceCounts, QueryError};
 use crate::records::TrustPolicy;
 
 /// Build the `_meta` envelope for a listing-shaped query (`list` / `recent`
@@ -30,11 +30,12 @@ pub(crate) fn build_meta_listing(
     conn: &Connection,
     trust_policy: TrustPolicy,
 ) -> Result<Meta, QueryError> {
-    build_meta_inner(conn, trust_policy, false, 0)
+    build_meta_inner(conn, trust_policy, false, 0, EmbedStatus::Disabled, 0)
 }
 
 /// Build the `_meta` envelope for `search`. Carries the embedding-pool
-/// saturation surface alongside the shared listing fields.
+/// saturation surface plus the richer `embed_status` + `vector_candidates`
+/// pair alongside the shared listing fields.
 ///
 /// # Errors
 /// Returns `QueryError::Rusqlite` on DB failure.
@@ -43,18 +44,29 @@ pub(crate) fn build_meta_search(
     trust_policy: TrustPolicy,
     embed_pool_saturated: bool,
     saturation_wait_ms: u32,
+    embed_status: EmbedStatus,
+    vector_candidates: u32,
 ) -> Result<Meta, QueryError> {
-    build_meta_inner(conn, trust_policy, embed_pool_saturated, saturation_wait_ms)
+    build_meta_inner(
+        conn,
+        trust_policy,
+        embed_pool_saturated,
+        saturation_wait_ms,
+        embed_status,
+        vector_candidates,
+    )
 }
 
 /// Shared body for the two facade variants. The embedding-pool channel is
-/// always populated; the listing facade hardcodes `(false, 0)` so the
-/// channel stays falsy in JSON.
+/// always populated; the listing facade hardcodes `(false, 0, Disabled, 0)`
+/// so the channel stays falsy in JSON.
 fn build_meta_inner(
     conn: &Connection,
     trust_policy: TrustPolicy,
     embed_pool_saturated: bool,
     saturation_wait_ms: u32,
+    embed_status: EmbedStatus,
+    vector_candidates: u32,
 ) -> Result<Meta, QueryError> {
     // source_counts: one grouped query instead of three separate count(*)
     // round-trips. The schema CHECK constraint already restricts source to
@@ -82,6 +94,8 @@ fn build_meta_inner(
         trust_policy,
         embed_pool_saturated,
         saturation_wait_ms,
+        embed_status,
+        vector_candidates,
         ..Meta::default()
     })
 }

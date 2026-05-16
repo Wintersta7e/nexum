@@ -1,0 +1,18 @@
+schema_version: 1
+id: concurrency_race_conditions
+record_type: decision
+project_id: example
+title: Diagnosing data races with ThreadSanitizer
+body: |
+  Data races between two threads writing to the same memory location
+  without synchronization are undefined behavior in C and C++ and a
+  hard error to detect by hand. ThreadSanitizer instruments loads and
+  stores at compile time and prints a backtrace for every unsynchronized
+  access pair. Pair it with a stress harness that runs the suspect
+  workload across many cores so the race actually fires under test.
+tags: ["debugging", "memory-safety"]
+agent: manual
+created: 2026-04-02T00:00:00Z
+updated: 2026-04-02T00:00:00Z
+confidence: high
+outcome: working

@@ -1,0 +1,19 @@
+schema_version: 1
+id: onboarding_buddy_program
+record_type: decision
+project_id: example
+title: How the buddy program shortens ramp time
+body: |
+  Every new hire is paired with a buddy from the same team for
+  the first 90 days. The buddy answers the small questions that
+  do not warrant pinging the whole team, walks the new hire
+  through the first pull request review, and runs a weekly
+  no-agenda 1:1. Picking a buddy who joined within the last
+  year keeps the memory of being new fresh and the answers
+  honest.
+tags: ["hr", "mentorship"]
+agent: manual
+created: 2026-04-11T00:00:00Z
+updated: 2026-04-11T00:00:00Z
+confidence: high
+outcome: working

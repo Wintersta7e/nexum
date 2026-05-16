@@ -34,6 +34,11 @@ enum Commands {
     Recent(commands::recent::RecentArgs),
     /// Records associated with a session.
     BySession(commands::by_session::BySessionArgs),
+    /// Manage embedding models. The bge-m3 install is the only supported model in this release.
+    Models {
+        #[command(subcommand)]
+        cmd: commands::models::ModelsCmd,
+    },
     /// Manage the projects registry.
     Project(commands::project::ProjectArgs),
     /// Trust-events admin (`validate-events` exits 4 on tampering).
@@ -44,6 +49,7 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
+    init_tracing();
     let cli = Cli::parse();
     match cli.command {
         Commands::Init(a) => commands::init::run(&a),
@@ -53,7 +59,28 @@ fn main() -> ExitCode {
         Commands::List(a) => commands::list::run(&a),
         Commands::Recent(a) => commands::recent::run(&a),
         Commands::BySession(a) => commands::by_session::run(&a),
+        Commands::Models { cmd } => commands::models::run(&cmd),
         Commands::Project(a) => commands::project::run(&a),
         Commands::Trust { cmd } => commands::trust::run(&cmd),
     }
+}
+
+/// Initialize the tracing subscriber so warns from the core library
+/// (graceful semantic-search degradation, indexer warnings, etc.) reach
+/// the operator on stderr. Default level is `warn` to surface the
+/// degradation path without dragging in rustls / reqwest INFO noise.
+///
+/// Override via `NEXUM_LOG=...` (precedence) or the standard `RUST_LOG=...`
+/// envelope. Writer is stderr so JSON output on stdout (every read verb
+/// under `--json`) stays clean for downstream parsers.
+fn init_tracing() {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_env("NEXUM_LOG")
+        .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(env_filter)
+        .with_target(false)
+        .compact()
+        .try_init();
 }

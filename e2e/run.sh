@@ -33,7 +33,27 @@ if [ ! -x "$NEXUM_BIN" ]; then
 fi
 
 IMAGE_TAG="nexum-e2e:$ADAPTER"
-docker build -q -t "$IMAGE_TAG" "$ADAPTER_DIR" >/dev/null
+
+# On Windows + Docker Desktop, passing a /mnt/c/... context directory to
+# `docker build` makes Docker Desktop register that Windows path as a 9p
+# bind-mount source. The registration persists after the build container
+# exits and intercepts WSL's CWD translation for that path — so a
+# subsequent `wsl` launched from inside the project directory in
+# PowerShell lands at a bind-mount path instead of /mnt/c/...
+# Stream the context as a tar on stdin so docker never sees the path.
+tar -C "$ADAPTER_DIR" -cf - . | docker build -q -t "$IMAGE_TAG" - >/dev/null
+
+# Defensive cleanup. If anything else in this script (or a child) still
+# triggers a bind-mount registration, this releases it on exit. wsl.exe
+# is reachable from inside WSL via the Windows interop PATH; terminating
+# the docker-desktop helper distro discards transient bind-mounts without
+# touching the user's own distro. Best-effort; failure is non-fatal.
+__release_bind_mounts() {
+	if command -v wsl.exe >/dev/null 2>&1; then
+		wsl.exe --terminate docker-desktop >/dev/null 2>&1 || true
+	fi
+}
+trap __release_bind_mounts EXIT
 
 DOCKER_ARGS=(
 	--rm
@@ -69,4 +89,7 @@ cc)
 	;;
 esac
 
-exec docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG"
+# Run directly (not via exec) so the EXIT trap above fires after the
+# container returns, releasing any bind-mount registration Docker Desktop
+# may still be holding.
+docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG"

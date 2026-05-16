@@ -29,7 +29,12 @@ sha2 = { workspace = true }
 chrono = { workspace = true }
 ssh-key = { workspace = true }
 walkdir = { workspace = true }
-# `ort`, `tokenizers`, `rayon`, `reqwest` deferred — added when implementation hits each layer.
+ort = { workspace = true }
+ndarray = { workspace = true }
+tokenizers = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }
+# `rayon` deferred — added when implementation hits that layer.
 
 [dev-dependencies]
 insta = { workspace = true }

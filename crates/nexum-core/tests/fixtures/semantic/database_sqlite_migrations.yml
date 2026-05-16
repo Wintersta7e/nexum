@@ -1,0 +1,19 @@
+schema_version: 1
+id: database_sqlite_migrations
+record_type: decision
+project_id: example
+title: Versioning SQLite schemas with user_version
+body: |
+  The SQLite PRAGMA user_version is a single 32-bit integer the
+  application can stamp on a file and read back to decide which
+  migrations to run. The pattern is to keep each migration as a
+  pure SQL file numbered by target version, then on open: read
+  user_version, run every migration whose target is strictly
+  greater inside a single transaction, and stamp the new version
+  on commit so a crash mid-upgrade leaves the file unchanged.
+tags: ["sqlite", "schema"]
+agent: manual
+created: 2026-04-05T00:00:00Z
+updated: 2026-04-05T00:00:00Z
+confidence: high
+outcome: working
