@@ -856,11 +856,27 @@ pub fn run_reembed_existing(
         )
     })?;
 
-    let mut resume_rowid: i64 = read_str(conn, RESUME_KEY)
-        .ok()
-        .flatten()
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
+    // Discriminate the three meta-read outcomes so a transient SQL error
+    // doesn't get silently collapsed into "start from scratch" — that would
+    // re-embed every row on a large index and rack up hours of work.
+    //
+    // - SQL error: propagate (the caller's retry decides).
+    // - No row yet (first run): start from 0.
+    // - Row with unparseable value (manual edit, corruption): warn-log and
+    //   start from 0 — staying in lockstep with the previous behavior for
+    //   the only failure mode that was actually self-healing.
+    let mut resume_rowid: i64 = match read_str(conn, RESUME_KEY)? {
+        None => 0,
+        Some(raw) => raw.parse::<i64>().unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "nexum::reembed",
+                raw = %raw,
+                error = %e,
+                "reembed resume cursor unparseable; restarting from rowid 0"
+            );
+            0
+        }),
+    };
     let mut embedded: u64 = 0;
     let mut failed: u64 = 0;
 

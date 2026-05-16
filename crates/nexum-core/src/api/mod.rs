@@ -99,7 +99,18 @@ fn with_writer_lock<T>(
     lock_file.try_lock_exclusive().map_err(lock_io_err)?;
 
     let result = body();
-    lock_file.unlock().ok();
+    if let Err(unlock_err) = lock_file.unlock() {
+        // A failed unlock can leave the file lock held by the OS, blocking
+        // the next mutation verb. Surface to operators via tracing so the
+        // failure isn't silent; the verb's own result still wins because
+        // by here the body() has completed (success or its own error).
+        tracing::warn!(
+            target: "nexum::lock",
+            path = %paths.lock.display(),
+            error = %unlock_err,
+            "writer lock could not be released; next admin verb may block until the OS reclaims it"
+        );
+    }
     result
 }
 
@@ -546,6 +557,17 @@ pub struct KeysRotateOutcome {
     /// Bare file names that were staged and committed (events.yml + any
     /// regenerated signer files).
     pub regenerated_files: Vec<String>,
+    /// Whether `notebook.git/.git/config user.signingkey` was successfully
+    /// updated to the new key path. `false` means the rotation commit
+    /// landed and verified but the post-verify git-config update failed —
+    /// the next commit will still be signed by the OLD key until the
+    /// operator updates user.signingkey manually.
+    #[serde(default = "default_true")]
+    pub signingkey_updated: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Append a `KeyAdded` event for the key at `new_key_path` to `events.yml`,
@@ -734,15 +756,16 @@ pub fn keys_rotate(
 
         // ONLY after verify succeeds: update user.signingkey to the new key path.
         // A failure here is non-fatal — the commit is already signed and verified;
-        // the operator can update git config manually.
+        // the operator can update git config manually. Surface the status in the
+        // outcome so agents see whether the next commit will sign with the OLD
+        // or NEW key.
         let update_result = std::process::Command::new("git")
             .args(["config", "user.signingkey"])
             .arg(new_key_path)
             .current_dir(&paths.notebook_git)
             .output();
-        if let Ok(out) = &update_result
-            && !out.status.success()
-        {
+        let signingkey_updated = matches!(update_result, Ok(ref out) if out.status.success());
+        if !signingkey_updated {
             tracing::warn!(
                 target: "nexum::trust",
                 "git config user.signingkey update failed after successful rotation commit; \
@@ -755,6 +778,7 @@ pub fn keys_rotate(
             new_fingerprint: fingerprint,
             commit,
             regenerated_files: touched,
+            signingkey_updated,
         })
     })
 }

@@ -157,10 +157,13 @@ fn query_envelope(err: &crate::query::QueryError) -> ErrorEnvelope {
         QueryError::Trust(t) => trust_envelope(t),
         QueryError::Rusqlite(e) => store_integrity_foreign("rusqlite", e),
         QueryError::Json(e) => store_integrity_foreign("json", e),
-        // Lifted to ApiError::MigrationRequired by From<QueryError>; never
-        // reaches this path in practice.
-        QueryError::MigrationRequired { .. } => {
-            unreachable!("MigrationRequired is lifted before reaching query_envelope")
+        // Lifted to ApiError::MigrationRequired by From<QueryError> on every
+        // production path. If a future caller hand-constructs the variant and
+        // skips the lift, route through the proper migration envelope rather
+        // than panicking — agents must always see a structured envelope, not
+        // a binary crash.
+        QueryError::MigrationRequired { v_disk } => {
+            migration_required_envelope(*v_disk, crate::migrate::index_db::INDEX_DB_LATEST_VERSION)
         }
     }
 }
