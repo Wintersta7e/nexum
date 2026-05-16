@@ -3,6 +3,7 @@
 //! per-install by `nexum models install bge-m3`.
 
 pub mod embedder;
+mod inference_cell;
 pub mod install;
 pub mod manifest;
 pub mod reporter;
@@ -134,9 +135,11 @@ impl EmbedErrorKind {
             // (the message string survives the round-trip) without adding a
             // new EmbedError variant for a path that is unreachable from
             // `try_load_from_config` today.
-            Self::Tokenize(msg) | Self::Other(msg) => EmbedError::Tokenize(msg.clone()),
-            Self::OrtInit(msg) => EmbedError::OrtInit(msg.clone()),
-            Self::OrtRun(msg) => EmbedError::OrtRun(msg.clone()),
+            Self::Tokenize(msg) | Self::Other(msg) => {
+                EmbedError::tokenize_from_message(msg.clone())
+            }
+            Self::OrtInit(msg) => EmbedError::ort_init_from_message(msg.clone()),
+            Self::OrtRun(msg) => EmbedError::ort_run_from_message(msg.clone()),
         }
     }
 }
@@ -145,9 +148,9 @@ impl From<EmbedError> for EmbedErrorKind {
     fn from(err: EmbedError) -> Self {
         match err {
             EmbedError::ModelNotInstalled { reason } => Self::ModelNotInstalled(reason),
-            EmbedError::Tokenize(msg) => Self::Tokenize(msg),
-            EmbedError::OrtInit(msg) => Self::OrtInit(msg),
-            EmbedError::OrtRun(msg) => Self::OrtRun(msg),
+            EmbedError::Tokenize { message, .. } => Self::Tokenize(message),
+            EmbedError::OrtInit { message, .. } => Self::OrtInit(message),
+            EmbedError::OrtRun { message, .. } => Self::OrtRun(message),
             other => Self::Other(other.to_string()),
         }
     }

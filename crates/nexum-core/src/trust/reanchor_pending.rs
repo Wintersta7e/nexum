@@ -17,7 +17,7 @@ use crate::trust::events::TrustError;
 /// Wire form is the bare letter (`"A"` / `"B"`); deserialization rejects
 /// every other value, routing through the malformed-sentinel branch.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-pub(crate) enum Case {
+pub enum Case {
     /// Existing pin known; reanchor is rotating from a known-good fingerprint.
     A,
     /// Pin lost or unverifiable; reanchor proceeds without an old fingerprint.
@@ -25,7 +25,9 @@ pub(crate) enum Case {
 }
 
 impl Case {
-    fn as_str(self) -> &'static str {
+    /// Wire string for this case (`"A"` or `"B"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Case::A => "A",
             Case::B => "B",
@@ -39,7 +41,7 @@ impl Case {
 /// deserialization rejects every other value.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Phase {
+pub enum Phase {
     /// Sentinel created; no events committed yet.
     Init,
     /// Trust events for the new pin have been committed; pin file not yet rotated.
@@ -49,7 +51,9 @@ pub(crate) enum Phase {
 }
 
 impl Phase {
-    fn as_str(self) -> &'static str {
+    /// Wire string for this phase (`"init"`, `"events_committed"`, or `"pin_updated"`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Phase::Init => "init",
             Phase::EventsCommitted => "events_committed",
@@ -65,21 +69,41 @@ impl Phase {
 /// deserialization, which routes through the malformed-sentinel branch in
 /// [`check`].
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub(crate) struct ReanchorPending {
-    pub case: Case,
+pub struct ReanchorPending {
+    case: Case,
     /// Previous bootstrap fingerprint, `None` for case B.
-    pub old_pin_fp: Option<String>,
+    old_pin_fp: Option<String>,
     /// New bootstrap fingerprint being installed.
-    pub new_pin_fp: String,
+    new_pin_fp: String,
     /// New bootstrap public key (SSH `authorized_keys` line).
     #[serde(default)]
-    pub new_pubkey: String,
+    new_pubkey: String,
     /// RFC3339 timestamp when the reanchor was started.
     pub started_at: String,
     /// Optional PID of the process that wrote the sentinel.
     #[serde(default)]
     pub pid: Option<u64>,
-    pub phase_completed: Phase,
+    phase_completed: Phase,
+}
+
+impl ReanchorPending {
+    /// The phase at which the reanchor was last checkpointed.
+    #[must_use]
+    pub fn phase_completed(&self) -> Phase {
+        self.phase_completed
+    }
+
+    /// New bootstrap fingerprint being installed.
+    #[must_use]
+    pub fn new_pin_fp(&self) -> &str {
+        &self.new_pin_fp
+    }
+
+    /// New bootstrap public key (SSH `authorized_keys` line).
+    #[must_use]
+    pub fn new_pubkey(&self) -> &str {
+        &self.new_pubkey
+    }
 }
 
 /// Returns `Ok(())` when no `.reanchor_pending` sentinel is present.
@@ -121,6 +145,52 @@ pub(crate) fn check(home: &Path) -> Result<(), TrustError> {
             parsed.phase_completed.as_str(),
         ),
     })
+}
+
+/// Read and parse the `.reanchor_pending` sentinel, returning `None` when
+/// absent.
+///
+/// # Errors
+///
+/// - `TrustError::Io` when the file exists but cannot be read.
+/// - `TrustError::ReanchorPending` when the file is malformed JSON (callers
+///   that encounter a malformed sentinel must still refuse to proceed).
+pub fn read_sentinel(home: &Path) -> Result<Option<ReanchorPending>, TrustError> {
+    let path = home.join(".reanchor_pending");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(TrustError::Io {
+                path: path.display().to_string(),
+                source: e,
+            });
+        }
+    };
+    let parsed: ReanchorPending =
+        serde_json::from_str(&raw).map_err(|e| TrustError::ReanchorPending {
+            message: format!(".reanchor_pending is malformed: {e}"),
+        })?;
+    Ok(Some(parsed))
+}
+
+/// Delete the `.reanchor_pending` sentinel. Idempotent: returns `Ok(())` when
+/// the file does not exist.
+///
+/// # Errors
+///
+/// Returns `TrustError::Io` when deletion fails for any reason other than the
+/// file being absent.
+pub fn delete_sentinel(home: &Path) -> Result<(), TrustError> {
+    let path = home.join(".reanchor_pending");
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(TrustError::Io {
+            path: path.display().to_string(),
+            source: e,
+        }),
+    }
 }
 
 #[cfg(test)]

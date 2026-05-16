@@ -31,6 +31,10 @@ pub enum QueryError {
     /// underlying [`crate::trust::events::TrustError`].
     #[error(transparent)]
     Trust(#[from] crate::trust::events::TrustError),
+    /// The on-disk schema is older than the binary supports. The caller
+    /// should prompt the user to run `nexum migrate`.
+    #[error("index schema v{v_disk} is older than this binary; run `nexum migrate`")]
+    MigrationRequired { v_disk: u32 },
 }
 
 /// Per-query disposition of the semantic ranking branch. Agents read this

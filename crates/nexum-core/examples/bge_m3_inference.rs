@@ -56,7 +56,10 @@ const SAMPLES: usize = 100;
 
 fn percentiles(samples: &[u64]) -> (u64, u64, u64) {
     debug_assert!(samples.len() >= SAMPLES);
-    let p50 = samples[SAMPLES / 2];
+    // For SAMPLES = 100, the 50th-percentile index is 49 (the 50th element,
+    // 0-indexed). p95 and p99 already apply the -1 correction; the median
+    // calculation was the outlier.
+    let p50 = samples[(SAMPLES / 2).saturating_sub(1)];
     let p95 = samples[(SAMPLES * 95) / 100 - 1];
     let p99 = samples[(SAMPLES * 99) / 100 - 1];
     (p50, p95, p99)

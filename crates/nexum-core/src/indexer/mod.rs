@@ -10,4 +10,4 @@ pub mod run;
 pub mod state;
 
 pub use db::{IndexerError, open_or_create};
-pub use run::{IndexerOutcome, run};
+pub use run::{IndexerOpts, IndexerOutcome, run, run_with_opts};

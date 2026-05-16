@@ -49,6 +49,14 @@ impl From<IndexStateError> for IndexerError {
     }
 }
 
+impl From<crate::index::meta::MetaError> for IndexerError {
+    fn from(e: crate::index::meta::MetaError) -> Self {
+        match e {
+            crate::index::meta::MetaError::Sqlite(r) => Self::Rusqlite(r),
+        }
+    }
+}
+
 /// Completeness label for a single per-source pass. Mirrors the variants of
 /// the internal `PassCompleteness` enum but is scoped to the per-source
 /// boundary so the JSON wire format stays flat (`snake_case` strings rather than
@@ -86,6 +94,12 @@ pub struct PerSourceOutcome {
     pub upserts: u32,
     pub deletes: u32,
     pub deferred_deletes: u32,
+    /// Count of warn-level embedder failures during this pass. The indexer
+    /// logs each failure as a warning and continues with an FTS-only insert;
+    /// this field surfaces the running count so operators can detect a
+    /// degrading embedder from the reindex summary.
+    #[serde(default)]
+    pub embed_failures: u32,
 }
 
 /// Aggregate outcome of one reindex pass across all enabled adapters.
@@ -96,6 +110,20 @@ pub struct IndexerOutcome {
     pub deferred_deletes: u32,
     pub fts_rebuild_triggered: bool,
     pub per_source: Vec<PerSourceOutcome>,
+}
+
+/// Options threaded through an indexer pass.
+///
+/// Callers that need only the default behaviour construct with
+/// `IndexerOpts::default()`, which preserves the existing semantics
+/// exactly (`threshold_override: None` → use `STALE_THRESHOLD`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndexerOpts {
+    /// Override the stale-row miss threshold for this pass only. `None`
+    /// means use `STALE_THRESHOLD` (3). `Some(1)` makes every gone row
+    /// eligible for deletion on the current pass — the `--aggressive` sweep
+    /// mode.
+    pub threshold_override: Option<u32>,
 }
 
 /// Run a reindex pass over all enabled adapters.
@@ -115,8 +143,7 @@ pub fn run(
     cfg: &Config,
     paths: &Paths,
 ) -> Result<IndexerOutcome, IndexerError> {
-    apply_index_state_ddl(conn)?;
-    run_inner(conn, cfg, paths, false)
+    run_with_opts(conn, cfg, paths, IndexerOpts::default())
 }
 
 /// Force form — bypasses the staleness gate so deletes apply on the current
@@ -133,7 +160,24 @@ pub fn run_force(
     paths: &Paths,
 ) -> Result<IndexerOutcome, IndexerError> {
     apply_index_state_ddl(conn)?;
-    run_inner(conn, cfg, paths, true)
+    run_inner(conn, cfg, paths, true, IndexerOpts::default())
+}
+
+/// Full-control entry point. Accepts `IndexerOpts` so callers can adjust
+/// per-pass behaviour (e.g. `api::index_sweep` lowers the stale-row
+/// threshold). `run` is a thin shim over it.
+///
+/// # Errors
+/// Returns `IndexerError::Rusqlite` on SQL failure or
+/// `IndexerError::Adapter` when an adapter fatals.
+pub fn run_with_opts(
+    conn: &mut Connection,
+    cfg: &Config,
+    paths: &Paths,
+    opts: IndexerOpts,
+) -> Result<IndexerOutcome, IndexerError> {
+    apply_index_state_ddl(conn)?;
+    run_inner(conn, cfg, paths, false, opts)
 }
 
 fn run_inner(
@@ -141,6 +185,7 @@ fn run_inner(
     cfg: &Config,
     paths: &Paths,
     force: bool,
+    opts: IndexerOpts,
 ) -> Result<IndexerOutcome, IndexerError> {
     let mut outcome = IndexerOutcome::default();
 
@@ -174,6 +219,7 @@ fn run_inner(
             &pass,
             |id| build_cc_adapter(&cfg_for_read).read(id).ok(),
             force,
+            opts,
             embedder.as_ref(),
             &mut outcome,
         )?;
@@ -186,6 +232,7 @@ fn run_inner(
             &pass,
             |id| build_codex_adapter(&cfg_for_read).read(id).ok(),
             force,
+            opts,
             embedder.as_ref(),
             &mut outcome,
         )?;
@@ -257,6 +304,7 @@ fn run_inner(
                 Some(record)
             },
             force,
+            opts,
             embedder.as_ref(),
             &mut outcome,
         )?;
@@ -289,12 +337,17 @@ fn build_codex_adapter(cfg: &Config) -> CodexAdapter {
     )
 }
 
+// 8 args after the IndexerOpts thread-through; an args-struct would add
+// an indirection layer at every call site without simplifying any of the
+// inner logic.
+#[allow(clippy::too_many_arguments)]
 fn apply_pass<F>(
     conn: &mut Connection,
     source: Source,
     pass: &AdapterPass,
     read_full: F,
     force: bool,
+    opts: IndexerOpts,
     embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
 ) -> Result<(), IndexerError>
@@ -315,6 +368,7 @@ where
         upserts: 0,
         deletes: 0,
         deferred_deletes: 0,
+        embed_failures: 0,
     };
 
     if let PassCompleteness::Failed { reason } = &pass.completeness {
@@ -371,6 +425,7 @@ where
         pass,
         &read_full,
         force,
+        opts,
         embedder,
         outcome,
         &mut per_source,
@@ -405,6 +460,7 @@ fn apply_pass_inside_tx<F>(
     pass: &AdapterPass,
     read_full: &F,
     force: bool,
+    opts: IndexerOpts,
     embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
@@ -459,6 +515,7 @@ where
         &pass.completeness,
         &gone,
         force,
+        opts,
         outcome,
         per_source,
     )
@@ -572,6 +629,7 @@ where
                             ?id,
                             "embed failed; persisting record without vector",
                         );
+                        per_source.embed_failures += 1;
                         None
                     }
                 }
@@ -587,12 +645,17 @@ where
     Ok(())
 }
 
+// 8 args after the IndexerOpts thread-through; mirrors apply_pass's shape
+// and stays a single-purpose helper rather than a pack-and-unpack args
+// struct.
+#[allow(clippy::too_many_arguments)]
 fn apply_deletes(
     tx: &Transaction<'_>,
     source: Source,
     completeness: &PassCompleteness,
     gone: &[(String, String)],
     force: bool,
+    opts: IndexerOpts,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError> {
@@ -606,13 +669,14 @@ fn apply_deletes(
     }
     match completeness {
         PassCompleteness::Authoritative => {
+            let threshold = opts.threshold_override.unwrap_or(STALE_THRESHOLD);
             for (project_id, id) in gone {
                 // `index_state` is keyed by (source, id) only; cross-project
                 // same-id collisions in miss-tracking are deferred to a
                 // follow-up. The composite delete still scopes correctly
                 // because hard_delete uses (source, project_id, id).
                 let counter = bump_miss(tx, source, id)?;
-                if counter >= STALE_THRESHOLD {
+                if counter >= threshold {
                     hard_delete(tx, source, project_id, id)?;
                     per_source.deletes += 1;
                     outcome.deletes += 1;
@@ -750,7 +814,7 @@ fn upsert(
 /// wrapped by the `vec_f32` SQL function. Byte length must equal
 /// `EMBED_DIM * 4`; the schema enforces dimension via the `FLOAT[1024]`
 /// column declaration.
-fn insert_embedding(
+pub(crate) fn insert_embedding(
     tx: &Transaction<'_>,
     record_rowid: i64,
     embedding: &[f32],
@@ -761,6 +825,109 @@ fn insert_embedding(
         params![record_rowid, bytes.as_slice()],
     )?;
     Ok(())
+}
+
+/// Re-embed every record already in `records` against the configured embedder.
+///
+/// Iterates by `rowid` in 50-row batches and persists the resume cursor to
+/// `index.db.meta` per batch so a killed run picks up where it left off.
+/// Embedder failures on a single row are logged at `warn`, counted in the
+/// returned outcome's `failed` field, and skipped; the row keeps its existing
+/// embedding (or none).
+///
+/// # Errors
+///
+/// Returns `IndexerError::Config` when no embedder can be built from `cfg`
+/// (model not installed or configuration invalid).
+/// Returns `IndexerError::Rusqlite` on any SQL failure.
+pub fn run_reembed_existing(
+    conn: &mut Connection,
+    cfg: &Config,
+    _paths: &Paths,
+) -> Result<crate::api::ReembedOutcome, IndexerError> {
+    use crate::index::meta::{read_str, write_str};
+
+    const BATCH: i64 = 50;
+    const RESUME_KEY: &str = "reembed_resume_rowid";
+
+    let model = build_embedder_for_pass(cfg)?.ok_or_else(|| {
+        IndexerError::Config(
+            "embedder unavailable: model not installed or config invalid".to_owned(),
+        )
+    })?;
+
+    // Discriminate the three meta-read outcomes so a transient SQL error
+    // doesn't get silently collapsed into "start from scratch" — that would
+    // re-embed every row on a large index and rack up hours of work.
+    //
+    // - SQL error: propagate (the caller's retry decides).
+    // - No row yet (first run): start from 0.
+    // - Row with unparseable value (manual edit, corruption): warn-log and
+    //   start from 0 — staying in lockstep with the previous behavior for
+    //   the only failure mode that was actually self-healing.
+    let mut resume_rowid: i64 = match read_str(conn, RESUME_KEY)? {
+        None => 0,
+        Some(raw) => raw.parse::<i64>().unwrap_or_else(|e| {
+            tracing::warn!(
+                target: "nexum::reembed",
+                raw = %raw,
+                error = %e,
+                "reembed resume cursor unparseable; restarting from rowid 0"
+            );
+            0
+        }),
+    };
+    let mut embedded: u64 = 0;
+    let mut failed: u64 = 0;
+
+    loop {
+        let tx = conn.transaction()?;
+        let rows: Vec<(i64, String, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT rowid, title, COALESCE(summary, ''), COALESCE(body, '') \
+                 FROM records WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+            )?;
+            stmt.query_map(params![resume_rowid, BATCH], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+        };
+        let Some(last) = rows.last() else {
+            tx.commit()?;
+            break;
+        };
+        let last_rowid_in_batch = last.0;
+
+        for (rowid, title, summary, body) in &rows {
+            let text = crate::records::types::embed_input_for(title, summary, body);
+            match model.embed(&text) {
+                Ok(vec) => {
+                    tx.execute(
+                        "DELETE FROM record_embeddings WHERE record_rowid = ?1",
+                        params![rowid],
+                    )?;
+                    insert_embedding(&tx, *rowid, &vec)?;
+                    embedded += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(rowid = *rowid, error = %e, "reembed: embedding failed; skipping");
+                    failed += 1;
+                }
+            }
+        }
+        write_str(&tx, RESUME_KEY, &last_rowid_in_batch.to_string())?;
+        tx.commit()?;
+        resume_rowid = last_rowid_in_batch;
+    }
+
+    write_str(conn, RESUME_KEY, "")?;
+
+    Ok(crate::api::ReembedOutcome {
+        embedded,
+        failed,
+        skipped_current: 0,
+        resume_rowid: None,
+    })
 }
 
 fn update_record(
@@ -1048,5 +1215,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0, "force path bypasses the stale-threshold gate");
+    }
+
+    #[test]
+    fn per_source_outcome_carries_embed_failures() {
+        let outcome = PerSourceOutcome {
+            source: Source::CcNative,
+            completeness: PerSourceCompleteness::Authoritative,
+            ingested: 0,
+            upserts: 0,
+            deletes: 0,
+            deferred_deletes: 0,
+            embed_failures: 0,
+        };
+        assert_eq!(outcome.embed_failures, 0);
     }
 }

@@ -109,6 +109,27 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
             ApiError::Query(e) => query_envelope(e),
             ApiError::Indexer(e) => indexer_envelope(e),
             ApiError::Config(e) => config_envelope(e),
+            ApiError::Trust(e) => trust_envelope(e),
+            ApiError::TrustRegenerateRefused { reason } => ErrorEnvelope {
+                error_code: error_codes::STORE_INTEGRITY,
+                message: format!("trust regenerate refused: {reason}"),
+                remediation: None,
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "regenerate_refused",
+                    "reason": reason,
+                }),
+            },
+            ApiError::TrustRegenerateFailed { stderr } => ErrorEnvelope {
+                error_code: error_codes::STORE_INTEGRITY,
+                message: format!("trust regenerate verification failed: {stderr}"),
+                remediation: None,
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "regenerate_failed",
+                    "stderr": stderr,
+                }),
+            },
         }
     }
 }
@@ -136,6 +157,14 @@ fn query_envelope(err: &crate::query::QueryError) -> ErrorEnvelope {
         QueryError::Trust(t) => trust_envelope(t),
         QueryError::Rusqlite(e) => store_integrity_foreign("rusqlite", e),
         QueryError::Json(e) => store_integrity_foreign("json", e),
+        // Lifted to ApiError::MigrationRequired by From<QueryError> on every
+        // production path. If a future caller hand-constructs the variant and
+        // skips the lift, route through the proper migration envelope rather
+        // than panicking — agents must always see a structured envelope, not
+        // a binary crash.
+        QueryError::MigrationRequired { v_disk } => {
+            migration_required_envelope(*v_disk, crate::migrate::index_db::INDEX_DB_LATEST_VERSION)
+        }
     }
 }
 
@@ -225,6 +254,7 @@ fn indexer_envelope(err: &crate::indexer::IndexerError) -> ErrorEnvelope {
             context: serde_json::json!({ "kind": "config", "message": s }),
         },
         IndexerError::Embed(e) => embed_envelope(e),
+        IndexerError::Migration(e) => migration_error_envelope(e),
     }
 }
 
@@ -244,6 +274,61 @@ fn embed_envelope(err: &crate::embed::EmbedError) -> ErrorEnvelope {
             command: Some("nexum models install bge-m3".into()),
             rationale: "Reinstall the embedding model and retry indexing.".into(),
         }),
+        context,
+    }
+}
+
+/// Map a `MigrationError` to an `ErrorEnvelope`.
+///
+/// `IncompatibleStore` (`v_disk` > `v_code`) surfaces as `STORE_INTEGRITY` because
+/// the store cannot be recovered by any command the current binary offers —
+/// the operator needs a newer binary. Every other variant is a recoverable or
+/// structural migration failure and also routes to `STORE_INTEGRITY` with an
+/// appropriate `subkind` tag so agents can discriminate without matching on
+/// the human-readable message.
+fn migration_error_envelope(err: &crate::migrate::MigrationError) -> ErrorEnvelope {
+    use crate::migrate::MigrationError;
+    let message = err.to_string();
+    let context = match err {
+        MigrationError::IncompatibleStore { v_disk, v_code } => serde_json::json!({
+            "kind": "migration",
+            "subkind": "incompatible_store",
+            "v_disk": v_disk,
+            "v_code": v_code,
+        }),
+        MigrationError::StepFailed { from, to, cause } => serde_json::json!({
+            "kind": "migration",
+            "subkind": "step_failed",
+            "from": from,
+            "to": to,
+            "cause": cause,
+        }),
+        MigrationError::MigrationRequired { v_disk, v_code } => serde_json::json!({
+            "kind": "migration",
+            "subkind": "migration_required",
+            "v_disk": v_disk,
+            "v_code": v_code,
+        }),
+        MigrationError::Sqlite(e) => serde_json::json!({
+            "kind": "migration",
+            "subkind": "sqlite",
+            "message": e.to_string(),
+        }),
+        MigrationError::Io(e) => serde_json::json!({
+            "kind": "migration",
+            "subkind": "io",
+            "message": e.to_string(),
+        }),
+        MigrationError::Schema(e) => serde_json::json!({
+            "kind": "migration",
+            "subkind": "schema",
+            "message": e.to_string(),
+        }),
+    };
+    ErrorEnvelope {
+        error_code: error_codes::STORE_INTEGRITY,
+        message,
+        remediation: None,
         context,
     }
 }
@@ -283,6 +368,20 @@ fn config_envelope(err: &crate::config::ConfigError) -> ErrorEnvelope {
                 "kind": "config",
                 "subkind": "serialize",
                 "message": format!("{e}"),
+            }),
+        },
+        ConfigError::Invalid { field, reason } => ErrorEnvelope {
+            error_code: error_codes::USAGE,
+            message: format!("invalid config at {field}: {reason}"),
+            remediation: Some(Remediation {
+                command: None,
+                rationale: format!("Fix the config field `{field}` and retry."),
+            }),
+            context: serde_json::json!({
+                "kind": "config",
+                "subkind": "invalid",
+                "field": field,
+                "reason": reason,
             }),
         },
     }
@@ -378,6 +477,16 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
                 "kind": "trust",
                 "subkind": "sqlite",
                 "message": format!("{e}"),
+            }),
+        },
+        TrustError::DuplicateKey { fingerprint } => ErrorEnvelope {
+            error_code: error_codes::STORE_INTEGRITY,
+            message: format!("duplicate key fingerprint in events.yml: {fingerprint}"),
+            remediation: None,
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "duplicate_key",
+                "fingerprint": fingerprint,
             }),
         },
     }
@@ -729,4 +838,78 @@ mod tests {
     // synthesize cleanly (toml's serializer is permissive). Coverage for
     // this variant is provided by the exhaustive match in `config_envelope`
     // — adding the variant forces a compile error if it is ever forgotten.
+
+    // ──── MigrationError subkind dispatch ─────────────────────────────────
+    //
+    // The wire-stable `subkind` discriminator under `context.kind = "migration"`
+    // is the agent-facing branch for `nexum migrate` failures. Pin each
+    // variant's mapping so a future rename breaks the test before it breaks
+    // the contract.
+
+    #[test]
+    fn migration_incompatible_store_carries_subkind_and_versions() {
+        let err = crate::indexer::db::IndexerError::Migration(
+            crate::migrate::MigrationError::IncompatibleStore {
+                v_disk: 9,
+                v_code: 3,
+            },
+        );
+        let api_err = crate::api::ApiError::Indexer(err);
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["subkind"], "incompatible_store");
+        assert_eq!(env.context["v_disk"], 9);
+        assert_eq!(env.context["v_code"], 3);
+    }
+
+    #[test]
+    fn migration_step_failed_carries_from_to_cause() {
+        let err = crate::indexer::db::IndexerError::Migration(
+            crate::migrate::MigrationError::StepFailed {
+                from: 1,
+                to: 2,
+                cause: "synthetic step failure".into(),
+            },
+        );
+        let api_err = crate::api::ApiError::Indexer(err);
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["subkind"], "step_failed");
+        assert_eq!(env.context["from"], 1);
+        assert_eq!(env.context["to"], 2);
+        assert_eq!(env.context["cause"], "synthetic step failure");
+    }
+
+    #[test]
+    fn migration_required_via_indexer_routes_to_subkind() {
+        let err = crate::indexer::db::IndexerError::Migration(
+            crate::migrate::MigrationError::MigrationRequired {
+                v_disk: 1,
+                v_code: 2,
+            },
+        );
+        let api_err = crate::api::ApiError::Indexer(err);
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["subkind"], "migration_required");
+        assert_eq!(env.context["v_disk"], 1);
+        assert_eq!(env.context["v_code"], 2);
+    }
+
+    #[test]
+    fn query_migration_required_direct_construction_emits_migration_envelope() {
+        // From<QueryError> lifts MigrationRequired to ApiError::MigrationRequired
+        // before query_envelope ever sees it; this test bypasses the lift to
+        // confirm the safety arm in query_envelope still emits a structured
+        // envelope rather than panicking.
+        let api_err =
+            crate::api::ApiError::Query(crate::query::QueryError::MigrationRequired { v_disk: 1 });
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::MIGRATION_REQUIRED);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["v_disk"], 1);
+    }
 }
