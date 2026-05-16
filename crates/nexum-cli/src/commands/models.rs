@@ -1,7 +1,7 @@
 //! `nexum models install bge-m3` — download + verify + smoke the bge-m3
 //! ONNX export, then flip `[embed].enabled = true` in config.toml.
 
-use std::io::{stderr, Write};
+use std::io::{Write, stderr};
 use std::process::ExitCode;
 
 use clap::Subcommand;
