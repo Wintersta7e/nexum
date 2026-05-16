@@ -98,3 +98,113 @@ fn rotate_duplicate_fingerprint_returns_error() {
         "message should mention duplicate: {payload:#}"
     );
 }
+
+/// Generate a fresh ed25519 keypair at `<home>/<name>` and return the path
+/// to the private key file. `<name>.pub` ends up alongside it.
+fn fresh_keypair(home_path: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = home_path.join(name);
+    let status = std::process::Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-N", "", "-f"])
+        .arg(&path)
+        .status()
+        .expect("ssh-keygen available");
+    assert!(status.success(), "ssh-keygen did not generate a keypair");
+    path
+}
+
+#[test]
+fn rotate_refuses_during_in_progress_merge() {
+    let home = common::TestHome::initialized_no_index();
+    let new_key = fresh_keypair(home.path(), "rotation-2");
+
+    // Stage a fake in-progress merge by writing notebook.git/.git/MERGE_HEAD.
+    // The verb must refuse before any trust-state mutation.
+    let merge_head = home.path().join("notebook.git/.git/MERGE_HEAD");
+    std::fs::write(&merge_head, "deadbeef\n").unwrap();
+
+    let out = home.run(&[
+        "keys",
+        "rotate",
+        "--new-key",
+        new_key.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero with MERGE_HEAD present:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["error_code"], "STORE_INTEGRITY");
+    let msg = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("merge") || msg.contains("MERGE_HEAD"),
+        "message should flag the in-progress merge: {msg}"
+    );
+
+    // Trust state untouched.
+    let events_yml = home.path().join("notebook.git/.trust/events.yml");
+    let events = std::fs::read_to_string(&events_yml).unwrap();
+    assert!(
+        !events.contains("KeyAdded"),
+        "events.yml must NOT carry a KeyAdded after a refused rotation"
+    );
+}
+
+#[test]
+fn rotate_refuses_when_bootstrap_key_already_revoked() {
+    let home = common::TestHome::initialized_no_index();
+    let new_key = fresh_keypair(home.path(), "rotation-3");
+
+    // Read the bootstrap fingerprint from config.toml and append a
+    // KeyRotatedOut event for it to events.yml in the worktree. This
+    // simulates the operator having already revoked the current bootstrap
+    // key via some other path; rotation would commit-then-fail-verify, so
+    // the pre-flight refuses up-front.
+    let cfg_raw = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    let bootstrap_fp = cfg_raw
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("fingerprint ="))
+        .expect("[trust.bootstrap].fingerprint in config.toml")
+        .trim()
+        .trim_matches('"')
+        .to_owned();
+    let events_yml = home.path().join("notebook.git/.trust/events.yml");
+    let original = std::fs::read_to_string(&events_yml).unwrap();
+    let appended = format!(
+        "{original}\n- event_id: 0192f000-0000-7000-a000-000000000099\n  kind: KeyRotatedOut\n  fingerprint: \"{bootstrap_fp}\"\n  reason: \"test pre-revocation\"\n"
+    );
+    std::fs::write(&events_yml, appended).unwrap();
+
+    let out = home.run(&[
+        "keys",
+        "rotate",
+        "--new-key",
+        new_key.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero when bootstrap key is revoked:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["error_code"], "STORE_INTEGRITY");
+    let msg = payload["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("no longer trusted") || msg.contains("recover"),
+        "message should point at the recovery path: {msg}"
+    );
+}
+
+// TODO: rotate verify-failure rollback path is not yet covered end-to-end.
+// Triggering a verify failure deterministically from a test requires either
+// a stubbed git_verify_commit_with_signers or constructing a commit signed
+// by a key absent from historical_signers — both need harness work outside
+// the scope of these tests. The rollback helpers themselves
+// (`rollback_last_commit`, `restore_paths_from_head`, `surface_rollback_err`)
+// are exercised on the commit-failure path (the duplicate-fingerprint test)
+// and on the regenerate-failure path; only the verify-failure branch is
+// uncovered by an integration test.
