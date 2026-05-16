@@ -838,4 +838,78 @@ mod tests {
     // synthesize cleanly (toml's serializer is permissive). Coverage for
     // this variant is provided by the exhaustive match in `config_envelope`
     // — adding the variant forces a compile error if it is ever forgotten.
+
+    // ──── MigrationError subkind dispatch ─────────────────────────────────
+    //
+    // The wire-stable `subkind` discriminator under `context.kind = "migration"`
+    // is the agent-facing branch for `nexum migrate` failures. Pin each
+    // variant's mapping so a future rename breaks the test before it breaks
+    // the contract.
+
+    #[test]
+    fn migration_incompatible_store_carries_subkind_and_versions() {
+        let err = crate::indexer::db::IndexerError::Migration(
+            crate::migrate::MigrationError::IncompatibleStore {
+                v_disk: 9,
+                v_code: 3,
+            },
+        );
+        let api_err = crate::api::ApiError::Indexer(err);
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["subkind"], "incompatible_store");
+        assert_eq!(env.context["v_disk"], 9);
+        assert_eq!(env.context["v_code"], 3);
+    }
+
+    #[test]
+    fn migration_step_failed_carries_from_to_cause() {
+        let err = crate::indexer::db::IndexerError::Migration(
+            crate::migrate::MigrationError::StepFailed {
+                from: 1,
+                to: 2,
+                cause: "synthetic step failure".into(),
+            },
+        );
+        let api_err = crate::api::ApiError::Indexer(err);
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["subkind"], "step_failed");
+        assert_eq!(env.context["from"], 1);
+        assert_eq!(env.context["to"], 2);
+        assert_eq!(env.context["cause"], "synthetic step failure");
+    }
+
+    #[test]
+    fn migration_required_via_indexer_routes_to_subkind() {
+        let err = crate::indexer::db::IndexerError::Migration(
+            crate::migrate::MigrationError::MigrationRequired {
+                v_disk: 1,
+                v_code: 2,
+            },
+        );
+        let api_err = crate::api::ApiError::Indexer(err);
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::STORE_INTEGRITY);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["subkind"], "migration_required");
+        assert_eq!(env.context["v_disk"], 1);
+        assert_eq!(env.context["v_code"], 2);
+    }
+
+    #[test]
+    fn query_migration_required_direct_construction_emits_migration_envelope() {
+        // From<QueryError> lifts MigrationRequired to ApiError::MigrationRequired
+        // before query_envelope ever sees it; this test bypasses the lift to
+        // confirm the safety arm in query_envelope still emits a structured
+        // envelope rather than panicking.
+        let api_err =
+            crate::api::ApiError::Query(crate::query::QueryError::MigrationRequired { v_disk: 1 });
+        let env: ErrorEnvelope = (&api_err).into();
+        assert_eq!(env.error_code, error_codes::MIGRATION_REQUIRED);
+        assert_eq!(env.context["kind"], "migration");
+        assert_eq!(env.context["v_disk"], 1);
+    }
 }
