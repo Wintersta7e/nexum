@@ -138,14 +138,9 @@ fn run_install(model: &str, emit_json: bool, model_base_url_override: Option<&st
         }
     };
 
-    // Preserve the on-disk mirror URL — the override is one-shot.
-    // `install_bge_m3_with` clones `effective_cfg` into `next_cfg` and
-    // sets `embed.model_base_url` to whatever the override was; without
-    // this line the transient mirror URL would be written to config.toml.
-    // NOTE: if a future caller intentionally rewrites the URL (e.g. a
-    // `nexum models set-mirror` command), this line will silently undo it
-    // — add the new verb to the `Install` arm instead of calling
-    // `config::save` a second time.
+    // The `--model-base-url` override is one-shot: restore the on-disk
+    // URL before write-back so the transient value never lands in
+    // config.toml.
     next_cfg
         .embed
         .model_base_url
