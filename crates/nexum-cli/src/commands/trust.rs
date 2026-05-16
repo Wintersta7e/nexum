@@ -89,7 +89,21 @@ fn run_regenerate_files(args: &RegenerateFilesArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => super::json_emit::route_api_error(&e, args.json),
+        Err(e) => {
+            // Inline routing rather than super::json_emit::route_api_error:
+            // that helper's prose path is read-verb-shaped (it hints "rerun
+            // nexum index" on MigrationRequired etc.), which would mislead
+            // operators of this admin write verb. JSON mode is identical;
+            // prose mode just prints the envelope message and maps the code.
+            let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
+            let code = super::exit_codes::for_envelope(&env);
+            if args.json {
+                super::json_emit::emit_error(&env, code)
+            } else {
+                eprintln!("error: {}", env.message);
+                ExitCode::from(code)
+            }
+        }
     }
 }
 
