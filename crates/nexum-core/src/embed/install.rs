@@ -218,7 +218,15 @@ async fn download_streaming(
     initial_done: u64,
 ) -> Result<u64, EmbedError> {
     let total: u64 = if initial_done > 0 {
-        initial_done + resp.content_length().unwrap_or(entry.size() - initial_done)
+        // saturating_sub guards against a manifest that shrank between
+        // runs: an over-size .part is normally caught earlier, but if a
+        // server returns 206 without Content-Length against a manifest
+        // that we can no longer fully serve, falling back to 0 keeps the
+        // reporter denominator sane instead of panicking on underflow.
+        initial_done
+            + resp
+                .content_length()
+                .unwrap_or(entry.size().saturating_sub(initial_done))
     } else {
         resp.content_length().unwrap_or(entry.size())
     };
