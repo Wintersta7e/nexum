@@ -135,9 +135,18 @@ impl EmbedErrorKind {
             // (the message string survives the round-trip) without adding a
             // new EmbedError variant for a path that is unreachable from
             // `try_load_from_config` today.
-            Self::Tokenize(msg) | Self::Other(msg) => EmbedError::Tokenize(msg.clone()),
-            Self::OrtInit(msg) => EmbedError::OrtInit(msg.clone()),
-            Self::OrtRun(msg) => EmbedError::OrtRun(msg.clone()),
+            Self::Tokenize(msg) | Self::Other(msg) => EmbedError::Tokenize {
+                source: Box::<dyn std::error::Error + Send + Sync>::from(msg.clone()),
+                message: msg.clone(),
+            },
+            Self::OrtInit(msg) => EmbedError::OrtInit {
+                source: Box::<dyn std::error::Error + Send + Sync>::from(msg.clone()),
+                message: msg.clone(),
+            },
+            Self::OrtRun(msg) => EmbedError::OrtRun {
+                source: Box::<dyn std::error::Error + Send + Sync>::from(msg.clone()),
+                message: msg.clone(),
+            },
         }
     }
 }
@@ -146,9 +155,9 @@ impl From<EmbedError> for EmbedErrorKind {
     fn from(err: EmbedError) -> Self {
         match err {
             EmbedError::ModelNotInstalled { reason } => Self::ModelNotInstalled(reason),
-            EmbedError::Tokenize(msg) => Self::Tokenize(msg),
-            EmbedError::OrtInit(msg) => Self::OrtInit(msg),
-            EmbedError::OrtRun(msg) => Self::OrtRun(msg),
+            EmbedError::Tokenize { message, .. } => Self::Tokenize(message),
+            EmbedError::OrtInit { message, .. } => Self::OrtInit(message),
+            EmbedError::OrtRun { message, .. } => Self::OrtRun(message),
             other => Self::Other(other.to_string()),
         }
     }

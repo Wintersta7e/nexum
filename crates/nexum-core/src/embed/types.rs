@@ -30,14 +30,26 @@ pub enum EmbedError {
         actual: String,
     },
 
-    #[error("tokenizer error: {0}")]
-    Tokenize(String),
+    #[error("tokenizer error: {message}")]
+    Tokenize {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
-    #[error("ORT initialization failed: {0}")]
-    OrtInit(String),
+    #[error("ORT initialization failed: {message}")]
+    OrtInit {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
-    #[error("ORT inference failed: {0}")]
-    OrtRun(String),
+    #[error("ORT inference failed: {message}")]
+    OrtRun {
+        message: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("output shape mismatch: expected {expected:?}, got {actual:?}")]
     OutputShapeMismatch {
@@ -61,9 +73,9 @@ impl EmbedError {
             EmbedError::Io { .. } => 1,
             EmbedError::Download { .. } => 11,
             EmbedError::ChecksumMismatch { .. } => 12,
-            EmbedError::Tokenize(_) => 13,
-            EmbedError::OrtInit(_) => 14,
-            EmbedError::OrtRun(_) => 15,
+            EmbedError::Tokenize { .. } => 13,
+            EmbedError::OrtInit { .. } => 14,
+            EmbedError::OrtRun { .. } => 15,
             EmbedError::OutputShapeMismatch { .. } => 16,
         }
     }
@@ -78,9 +90,9 @@ impl EmbedError {
             EmbedError::Io { .. } => "io",
             EmbedError::Download { .. } => "download",
             EmbedError::ChecksumMismatch { .. } => "checksum_mismatch",
-            EmbedError::Tokenize(_) => "tokenize",
-            EmbedError::OrtInit(_) => "ort_init",
-            EmbedError::OrtRun(_) => "ort_run",
+            EmbedError::Tokenize { .. } => "tokenize",
+            EmbedError::OrtInit { .. } => "ort_init",
+            EmbedError::OrtRun { .. } => "ort_run",
             EmbedError::OutputShapeMismatch { .. } => "output_shape_mismatch",
         }
     }
@@ -89,3 +101,22 @@ impl EmbedError {
 /// Static dimension of the dense bge-m3 embedding. Mirrors the schema's
 /// `FLOAT[1024]`. If a future model bumps this, both must move together.
 pub const EMBED_DIM: usize = 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ort_run_carries_the_source_chain() {
+        use std::error::Error as _;
+        let inner: Box<dyn std::error::Error + Send + Sync> =
+            Box::<dyn std::error::Error + Send + Sync>::from("inner-cause");
+        let err = EmbedError::OrtRun {
+            message: "outer".into(),
+            source: inner,
+        };
+        assert_eq!(err.to_string(), "ORT inference failed: outer");
+        let cause = err.source().expect("source chain populated");
+        assert_eq!(cause.to_string(), "inner-cause");
+    }
+}

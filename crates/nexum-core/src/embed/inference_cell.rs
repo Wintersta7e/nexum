@@ -37,10 +37,13 @@ impl InferenceCell {
     where
         F: FnOnce(&mut Session) -> Result<T, EmbedError>,
     {
-        let mut guard = self
-            .session
-            .lock()
-            .map_err(|e| EmbedError::OrtRun(format!("inference session mutex poisoned: {e}")))?;
+        let mut guard = self.session.lock().map_err(|e| {
+            let message = format!("inference session mutex poisoned: {e}");
+            EmbedError::OrtRun {
+                source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+                message,
+            }
+        })?;
         f(&mut guard)
     }
 }

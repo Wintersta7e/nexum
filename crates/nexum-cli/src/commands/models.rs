@@ -196,8 +196,10 @@ fn embed_error_envelope(err: &EmbedError) -> serde_json::Value {
             obj.insert("expected".into(), json!(expected));
             obj.insert("actual".into(), json!(actual));
         }
-        EmbedError::Tokenize(msg) | EmbedError::OrtInit(msg) | EmbedError::OrtRun(msg) => {
-            obj.insert("detail".into(), json!(msg));
+        EmbedError::Tokenize { message, .. }
+        | EmbedError::OrtInit { message, .. }
+        | EmbedError::OrtRun { message, .. } => {
+            obj.insert("detail".into(), json!(message));
         }
         EmbedError::OutputShapeMismatch { expected, actual } => {
             obj.insert("expected".into(), json!(expected));
@@ -313,15 +315,27 @@ mod tests {
             install_exit_codes::CHECKSUM_MISMATCH
         );
         assert_eq!(
-            EmbedError::Tokenize("x".into()).install_exit_code(),
+            EmbedError::Tokenize {
+                message: "x".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from("x"),
+            }
+            .install_exit_code(),
             install_exit_codes::TOKENIZE_FAILED
         );
         assert_eq!(
-            EmbedError::OrtInit("x".into()).install_exit_code(),
+            EmbedError::OrtInit {
+                message: "x".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from("x"),
+            }
+            .install_exit_code(),
             install_exit_codes::ORT_INIT_FAILED
         );
         assert_eq!(
-            EmbedError::OrtRun("x".into()).install_exit_code(),
+            EmbedError::OrtRun {
+                message: "x".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from("x"),
+            }
+            .install_exit_code(),
             install_exit_codes::ORT_RUN_FAILED
         );
         assert_eq!(

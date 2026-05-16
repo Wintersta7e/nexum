@@ -53,13 +53,24 @@ impl Embedder {
             });
         }
 
-        let session = Session::builder()
-            .map_err(|e| EmbedError::OrtInit(e.to_string()))?
+        let mut builder = Session::builder().map_err(|e| EmbedError::OrtInit {
+            message: e.to_string(),
+            source: Box::new(e),
+        })?;
+        let session = builder
             .commit_from_file(&model_path)
-            .map_err(|e| EmbedError::OrtInit(e.to_string()))?;
+            .map_err(|e| EmbedError::OrtInit {
+                message: e.to_string(),
+                source: Box::new(e),
+            })?;
 
-        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| EmbedError::Tokenize(e.to_string()))?;
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| {
+            let message = e.to_string();
+            EmbedError::Tokenize {
+                source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+                message,
+            }
+        })?;
         tokenizer
             .with_truncation(Some(TruncationParams {
                 max_length: 8192,
@@ -67,7 +78,13 @@ impl Embedder {
                 stride: 0,
                 direction: TruncationDirection::Right,
             }))
-            .map_err(|e| EmbedError::Tokenize(e.to_string()))?;
+            .map_err(|e| {
+                let message = e.to_string();
+                EmbedError::Tokenize {
+                    source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+                    message,
+                }
+            })?;
 
         Ok(Self {
             session: InferenceCell::new(session),
@@ -85,10 +102,13 @@ impl Embedder {
     /// `EmbedError::OutputShapeMismatch` if the graph returned an
     /// unexpected shape (defense in depth against a future export drift).
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
-        let encoding = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(|e| EmbedError::Tokenize(e.to_string()))?;
+        let encoding = self.tokenizer.encode(text, true).map_err(|e| {
+            let message = e.to_string();
+            EmbedError::Tokenize {
+                source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+                message,
+            }
+        })?;
         let ids: Vec<i64> = encoding.get_ids().iter().map(|&x| i64::from(x)).collect();
         let mask: Vec<i64> = encoding
             .get_attention_mask()
@@ -97,24 +117,42 @@ impl Embedder {
             .collect();
         let seq_len = ids.len();
 
-        let input_ids = Array2::from_shape_vec((1, seq_len), ids)
-            .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
-        let attention_mask = Array2::from_shape_vec((1, seq_len), mask)
-            .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
+        let input_ids =
+            Array2::from_shape_vec((1, seq_len), ids).map_err(|e| EmbedError::OrtRun {
+                message: e.to_string(),
+                source: Box::new(e),
+            })?;
+        let attention_mask =
+            Array2::from_shape_vec((1, seq_len), mask).map_err(|e| EmbedError::OrtRun {
+                message: e.to_string(),
+                source: Box::new(e),
+            })?;
 
         self.session.run(|session| {
             let outputs = session
                 .run(ort::inputs![
                     "input_ids" => TensorRef::from_array_view(&input_ids)
-                        .map_err(|e| EmbedError::OrtRun(e.to_string()))?,
+                        .map_err(|e| EmbedError::OrtRun {
+                            message: e.to_string(),
+                            source: Box::new(e),
+                        })?,
                     "attention_mask" => TensorRef::from_array_view(&attention_mask)
-                        .map_err(|e| EmbedError::OrtRun(e.to_string()))?,
+                        .map_err(|e| EmbedError::OrtRun {
+                            message: e.to_string(),
+                            source: Box::new(e),
+                        })?,
                 ])
-                .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
+                .map_err(|e| EmbedError::OrtRun {
+                    message: e.to_string(),
+                    source: Box::new(e),
+                })?;
 
             let sentence = outputs["sentence_embedding"]
                 .try_extract_array::<f32>()
-                .map_err(|e| EmbedError::OrtRun(e.to_string()))?;
+                .map_err(|e| EmbedError::OrtRun {
+                    message: e.to_string(),
+                    source: Box::new(e),
+                })?;
 
             let shape: Vec<usize> = sentence.shape().to_vec();
             if shape.len() != 2 || shape[0] != 1 || shape[1] != EMBED_DIM {
