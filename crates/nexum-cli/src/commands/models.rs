@@ -141,20 +141,28 @@ fn run_install(model: &str, emit_json: bool) -> ExitCode {
 
     if emit_json {
         let model_path = paths.models.join("bge-m3").join("model.onnx");
+        // Flatten Option<Duration> → Option<u64> at the serialization
+        // boundary: the wire key `smoke_test_ms` stays stable for agent
+        // consumers; null signals "smoke test was skipped".
+        let smoke_test_ms: Option<u64> = report
+            .smoke_test
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let env = json!({
             "ok": true,
             "model": "bge-m3",
             "downloaded": report.downloaded,
-            "smoke_test_ms": report.smoke_test_ms,
+            "smoke_test_ms": smoke_test_ms,
             "model_path": model_path.to_string_lossy(),
         });
         println!("{env:#}");
     } else {
+        let smoke = report
+            .smoke_test
+            .map_or_else(|| "skipped".into(), |d| format!("{} ms", d.as_millis()));
         let _ = writeln!(
             stderr(),
-            "install complete: downloaded {} bytes; smoke-test {} ms; embed.enabled=true",
+            "install complete: downloaded {} bytes; smoke test: {smoke}; embed.enabled=true",
             report.downloaded,
-            report.smoke_test_ms,
         );
     }
     ExitCode::SUCCESS

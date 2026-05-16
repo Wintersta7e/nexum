@@ -178,7 +178,7 @@ fn tampered_file_is_detected_after_retry() {
     let mut reporter = NullReporter;
     let mut report = nexum_core::embed::InstallReport {
         downloaded: 0,
-        smoke_test_ms: 0,
+        smoke_test: None,
     };
     // Retry closure: write the bad bytes again to force a second-failure.
     let bad_clone = bad.clone();
@@ -232,7 +232,7 @@ fn retry_writes_good_bytes_lets_verifier_proceed() {
     let mut reporter = NullReporter;
     let mut report = nexum_core::embed::InstallReport {
         downloaded: 0,
-        smoke_test_ms: 0,
+        smoke_test: None,
     };
     let redownload = |entry: &nexum_core::embed::ManifestEntry,
                       dest: &std::path::Path|
@@ -283,7 +283,7 @@ fn clean_install_verifies_and_smokes() {
     let mut reporter = NullReporter;
     let mut report = nexum_core::embed::InstallReport {
         downloaded: 0,
-        smoke_test_ms: 0,
+        smoke_test: None,
     };
     nexum_core::embed::install::verify_and_smoke(
         temp.path(),
@@ -292,8 +292,12 @@ fn clean_install_verifies_and_smokes() {
         &mut reporter,
     )
     .expect("verify_and_smoke succeeds on a real install");
-    assert!(report.smoke_test_ms > 0);
-    assert!(report.smoke_test_ms < 60_000, "smoke shouldn't take >60s");
+    let smoke_ms = report
+        .smoke_test
+        .expect("smoke_test should be Some after verify_and_smoke")
+        .as_millis();
+    assert!(smoke_ms > 0);
+    assert!(smoke_ms < 60_000, "smoke shouldn't take >60s");
 }
 
 #[test]

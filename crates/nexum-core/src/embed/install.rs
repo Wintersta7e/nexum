@@ -27,9 +27,9 @@ const REPORT_STEP: u64 = 64 * 1024;
 pub struct InstallReport {
     /// Bytes actually pulled across the wire.
     pub downloaded: u64,
-    /// Smoke-test inference latency. Filled by the verify-and-smoke
-    /// step; zero until that step has run successfully.
-    pub smoke_test_ms: u64,
+    /// Smoke-test inference latency. `None` means the smoke test was
+    /// skipped (test-mode); `Some(d)` means it ran and took `d`.
+    pub smoke_test: Option<std::time::Duration>,
 }
 
 /// Download the four bge-m3 files from `model_base_url` into
@@ -119,7 +119,7 @@ async fn download_async(
 
     Ok(InstallReport {
         downloaded,
-        smoke_test_ms: 0,
+        smoke_test: None,
     })
 }
 
@@ -195,8 +195,8 @@ async fn download_one(
 }
 
 /// Verify each downloaded file's SHA256 against the pinned manifest and
-/// run a single ORT inference round-trip. Mutates `report.smoke_test_ms`
-/// on success.
+/// run a single ORT inference round-trip. Sets `report.smoke_test` to
+/// `Some(elapsed)` on success.
 ///
 /// On checksum mismatch: deletes the offending file and asks the network
 /// layer to re-download it once. If the replacement also fails to match,
@@ -418,9 +418,8 @@ fn run_smoke(
             actual: vec![1, vec.len()],
         });
     }
-    let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-    report.smoke_test_ms = ms;
-    reporter.progress(&format!("smoke test passed in {ms} ms"));
+    report.smoke_test = Some(elapsed);
+    reporter.progress(&format!("smoke test passed in {} ms", elapsed.as_millis()));
     Ok(())
 }
 
@@ -440,5 +439,30 @@ fn fmt_size(bytes: u64) -> String {
         format!("{:.0} KiB", b / KIB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn install_report_smoke_defaults_to_none() {
+        let r = InstallReport {
+            downloaded: 0,
+            smoke_test: None,
+        };
+        assert!(r.smoke_test.is_none());
+    }
+
+    #[test]
+    fn install_report_smoke_carries_duration() {
+        let r = InstallReport {
+            downloaded: 42,
+            smoke_test: Some(Duration::from_millis(123)),
+        };
+        assert_eq!(r.smoke_test.unwrap().as_millis(), 123);
     }
 }
