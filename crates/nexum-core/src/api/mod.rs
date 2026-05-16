@@ -30,6 +30,14 @@ pub enum ApiError {
     Config(#[from] crate::config::ConfigError),
     #[error("index schema v{v_disk} is older than this binary (v{v_code}); run `nexum migrate`")]
     MigrationRequired { v_disk: u32, v_code: u32 },
+    #[error("trust regenerate refused: {reason}")]
+    TrustRegenerateRefused { reason: String },
+    #[error("trust regenerate failed: {stderr}")]
+    TrustRegenerateFailed { stderr: String },
+    // No #[from] — kept as a manual impl below to avoid coherence collision
+    // with the existing From<QueryError> which also wraps TrustError.
+    #[error(transparent)]
+    Trust(crate::trust::events::TrustError),
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -44,14 +52,14 @@ impl From<crate::query::QueryError> for ApiError {
     }
 }
 
-// Trust-events materializer errors raised by the facade-level
-// `ensure_current` call route through the same wire shape as verb-internal
-// trust errors: `ApiError::Query(QueryError::Trust(_))`. Single canonical
-// path so callers don't have to discriminate where in the read pipeline
-// the error originated.
+// Trust errors raised directly (e.g. from admin verbs) surface as
+// `ApiError::Trust`. The read pipeline's `ensure_current` path goes through
+// `From<QueryError>` → `ApiError::Query(QueryError::Trust(_))`; that arm
+// still exists and both variants map to the same `trust_envelope` in
+// `api/error.rs`.
 impl From<crate::trust::events::TrustError> for ApiError {
     fn from(e: crate::trust::events::TrustError) -> Self {
-        ApiError::Query(crate::query::QueryError::Trust(e))
+        ApiError::Trust(e)
     }
 }
 
@@ -211,6 +219,146 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
 
     lock_file.unlock().ok();
     Ok(outcome)
+}
+
+/// Outcome of `nexum trust regenerate-files`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TrustRegenerateOutcome {
+    /// The three derived signer files already match `events.yml`; no commit.
+    NoChange,
+    /// A signed commit landed with the listed files (relative to `notebook.git/`).
+    Committed { commit: String, files: Vec<String> },
+}
+
+/// Re-derive the three OpenSSH-format signer files from
+/// `notebook.git/.trust/events.yml` and stage them in a signed commit.
+///
+/// Acquires `~/.nexum/.lock`. Refuses if `notebook.git/.git/MERGE_HEAD`
+/// exists or `~/.nexum/.reanchor_pending` is present. On either commit
+/// or verify failure the worktree is reset so a partial regeneration
+/// never lingers (per the no-dirty-worktree rule).
+///
+/// # Errors
+///
+/// `ApiError::TrustRegenerateRefused` on precondition failure (merge in
+/// progress, pending reanchor).
+/// `ApiError::TrustRegenerateFailed` on commit or verify failure (the
+/// worktree is rolled back before this returns).
+/// `ApiError::Trust` on trust-state read errors.
+/// `ApiError::Indexer(IndexerError::Io)` on lock failures.
+pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, ApiError> {
+    use fs2::FileExt as _;
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.lock)
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        })?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.lock.clone(),
+            source: e,
+        })
+    })?;
+
+    let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
+    if merge_head.exists() {
+        lock_file.unlock().ok();
+        return Err(ApiError::TrustRegenerateRefused {
+            reason: "in-progress merge detected (notebook.git/.git/MERGE_HEAD exists); abort or complete it first".into(),
+        });
+    }
+    crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
+
+    let events_yml = paths.notebook_git.join(".trust/events.yml");
+    let trust_dir = paths.notebook_git.join(".trust");
+    let outcome = crate::trust::regenerate::regenerate_files(&events_yml, &trust_dir)
+        .map_err(ApiError::Trust)?;
+
+    let touched: Vec<String> = match outcome {
+        crate::trust::regenerate::RegenerateOutcome::NoChange => {
+            lock_file.unlock().ok();
+            return Ok(TrustRegenerateOutcome::NoChange);
+        }
+        crate::trust::regenerate::RegenerateOutcome::Updated { files } => {
+            files.iter().map(|s| (*s).to_owned()).collect()
+        }
+    };
+
+    let staged_pathbufs: Vec<std::path::PathBuf> = touched
+        .iter()
+        .map(|name| std::path::PathBuf::from(format!(".trust/{name}")))
+        .collect();
+    let staged_refs: Vec<&std::path::Path> = staged_pathbufs
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect();
+    let message = "trust: regenerate signer projections from events.yml";
+
+    // The regenerate step rewrote worktree files to match the events.yml
+    // projection, but that projection may already match HEAD (e.g. a pure
+    // worktree edit on a signer file gets restored to the already-committed
+    // canonical content). Stage the candidate paths and check whether
+    // anything actually differs from HEAD — if not, the operation is a
+    // no-op per spec.
+    for path in &staged_refs {
+        let _ = std::process::Command::new("git")
+            .args(["add"])
+            .arg(path)
+            .current_dir(&paths.notebook_git)
+            .output();
+    }
+    let diff_status = std::process::Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(&paths.notebook_git)
+        .status();
+    if matches!(diff_status, Ok(s) if s.success()) {
+        lock_file.unlock().ok();
+        return Ok(TrustRegenerateOutcome::NoChange);
+    }
+
+    let commit =
+        match crate::init::git_ops::git_commit_signed(&paths.notebook_git, &staged_refs, message) {
+            Ok(sha) => sha,
+            Err(commit_err) => {
+                let _ = std::process::Command::new("git")
+                    .args(["reset", "--hard", "HEAD"])
+                    .current_dir(&paths.notebook_git)
+                    .output();
+                lock_file.unlock().ok();
+                return Err(ApiError::TrustRegenerateFailed {
+                    stderr: format!("git commit failed: {commit_err}"),
+                });
+            }
+        };
+
+    let historical = paths.notebook_git.join(".trust/historical_signers");
+    if let Err(verify_err) = crate::init::git_ops::git_verify_commit_with_signers(
+        &paths.notebook_git,
+        "HEAD",
+        &historical,
+    ) {
+        let _ = std::process::Command::new("git")
+            .args(["reset", "--hard", "HEAD~1"])
+            .current_dir(&paths.notebook_git)
+            .output();
+        lock_file.unlock().ok();
+        return Err(ApiError::TrustRegenerateFailed {
+            stderr: verify_err.to_string(),
+        });
+    }
+
+    lock_file.unlock().ok();
+    Ok(TrustRegenerateOutcome::Committed {
+        commit,
+        files: touched,
+    })
 }
 
 /// Open the index DB and prime the trust-events view for a read verb.

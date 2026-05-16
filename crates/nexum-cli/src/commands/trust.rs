@@ -1,4 +1,4 @@
-//! `nexum trust` parent + `validate-events` subcommand.
+//! `nexum trust` parent + subcommands.
 
 use std::process::ExitCode;
 
@@ -11,6 +11,11 @@ pub enum TrustCommand {
     /// `.trust/events.yml`. Exits 0 if clean, 4 (`STORE_INTEGRITY`) on
     /// detection.
     ValidateEvents(ValidateEventsArgs),
+
+    /// Re-derive the OpenSSH-format signer files from `events.yml` and
+    /// stage them in a signed commit. No-op when already consistent.
+    /// Refuses on in-progress merge or pending reanchor.
+    RegenerateFiles(RegenerateFilesArgs),
 }
 
 #[derive(Args, Debug)]
@@ -21,9 +26,17 @@ pub struct ValidateEventsArgs {
     pub json: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct RegenerateFilesArgs {
+    /// Emit a structured JSON envelope to stdout (success or failure).
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 pub fn run(cmd: &TrustCommand) -> ExitCode {
     match cmd {
         TrustCommand::ValidateEvents(args) => run_validate_events(args),
+        TrustCommand::RegenerateFiles(args) => run_regenerate_files(args),
     }
 }
 
@@ -37,6 +50,47 @@ fn run_validate_events(args: &ValidateEventsArgs) -> ExitCode {
         Err(e) => return super::json_emit::route_api_error(&e, args.json),
     };
     render_tampering(&rows, args.json)
+}
+
+fn run_regenerate_files(args: &RegenerateFilesArgs) -> ExitCode {
+    let (paths, _cfg) = match super::common::resolve_runtime(args.json) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    match api::trust_regenerate_files(&paths) {
+        Ok(api::TrustRegenerateOutcome::NoChange) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "kind": "trust.regenerate.noop",
+                        "message": "trust files already match events.yml",
+                    })
+                );
+            } else {
+                println!("trust files already match events.yml; nothing to do");
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(api::TrustRegenerateOutcome::Committed { commit, files }) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "kind": "trust.regenerate.committed",
+                        "commit": commit,
+                        "files": files,
+                    })
+                );
+            } else {
+                println!("regenerated trust files; signed commit {commit} updated {files:?}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => super::json_emit::route_api_error(&e, args.json),
+    }
 }
 
 /// Print tampering rows (human or JSON) and translate to an exit code.

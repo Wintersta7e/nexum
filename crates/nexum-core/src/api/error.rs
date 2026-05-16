@@ -109,6 +109,27 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
             ApiError::Query(e) => query_envelope(e),
             ApiError::Indexer(e) => indexer_envelope(e),
             ApiError::Config(e) => config_envelope(e),
+            ApiError::Trust(e) => trust_envelope(e),
+            ApiError::TrustRegenerateRefused { reason } => ErrorEnvelope {
+                error_code: error_codes::STORE_INTEGRITY,
+                message: format!("trust regenerate refused: {reason}"),
+                remediation: None,
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "regenerate_refused",
+                    "reason": reason,
+                }),
+            },
+            ApiError::TrustRegenerateFailed { stderr } => ErrorEnvelope {
+                error_code: error_codes::STORE_INTEGRITY,
+                message: format!("trust regenerate verification failed: {stderr}"),
+                remediation: None,
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "regenerate_failed",
+                    "stderr": stderr,
+                }),
+            },
         }
     }
 }
