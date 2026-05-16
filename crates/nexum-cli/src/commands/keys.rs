@@ -55,11 +55,19 @@ fn run_rotate(args: &RotateArgs) -> ExitCode {
                         "new_fingerprint": outcome.new_fingerprint,
                         "commit": outcome.commit,
                         "regenerated_files": outcome.regenerated_files,
+                        "signingkey_updated": outcome.signingkey_updated,
                     })
+                );
+            } else if outcome.signingkey_updated {
+                println!(
+                    "rotated in {} (commit {})",
+                    outcome.new_fingerprint, outcome.commit
                 );
             } else {
                 println!(
-                    "rotated in {} (commit {})",
+                    "rotated in {} (commit {}); user.signingkey update failed — \
+                     next commit will sign with the OLD key until you run \
+                     `git -C notebook.git config user.signingkey <new-key-path>`",
                     outcome.new_fingerprint, outcome.commit
                 );
             }

@@ -240,6 +240,17 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
         // open_existing_with_flags helper returns MigrationRequired when
         // v_disk < INDEX_DB_LATEST_VERSION, which is precisely the case we
         // are here to handle.
+        //
+        // But detect the no-file-yet case explicitly — a freshly-init'd
+        // nexum has no index.db until the first `nexum index` pass — and
+        // surface it as the standard IndexMissing envelope so the operator
+        // sees a friendly "run nexum index" hint instead of an opaque
+        // rusqlite I/O error.
+        if !paths.index_db.exists() {
+            return Err(ApiError::Query(crate::query::QueryError::IndexMissing {
+                path: paths.index_db.clone(),
+            }));
+        }
         let mut conn = rusqlite::Connection::open_with_flags(
             &paths.index_db,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
