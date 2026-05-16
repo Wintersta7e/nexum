@@ -253,6 +253,82 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
     })
 }
 
+/// Restore the given repo-relative paths from `HEAD` (both index and worktree).
+/// Returns `Ok(true)` on success, `Ok(false)` if `git checkout` exited
+/// non-zero, `Err` if the binary couldn't be spawned. Used by rollback paths
+/// that need to revert specific files without touching unrelated changes the
+/// operator may have in the worktree.
+fn restore_paths_from_head(
+    repo: &std::path::Path,
+    paths: &[&std::path::Path],
+) -> Result<bool, std::io::Error> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("checkout").arg("HEAD").arg("--");
+    for p in paths {
+        cmd.arg(p);
+    }
+    let out = cmd.current_dir(repo).output()?;
+    Ok(out.status.success())
+}
+
+/// Drop the last commit and restore the worktree to `HEAD~1`. Returns
+/// `Ok(true)` on success, `Ok(false)` on non-zero exit, `Err` if the binary
+/// couldn't be spawned. Used when a commit landed but its post-commit
+/// verification failed.
+fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
+    let out = std::process::Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(repo)
+        .output()?;
+    Ok(out.status.success())
+}
+
+/// Refuse the operation when `notebook.git` has uncommitted changes outside
+/// the paths this verb is about to touch. Protects unrelated operator state
+/// from the rollback paths' `git reset` / `git checkout`.
+///
+/// `our_paths` are repo-relative (e.g. `.trust/events.yml`). Anything dirty
+/// outside that set is treated as the operator's; we refuse the verb rather
+/// than silently destroying it.
+fn refuse_if_unrelated_dirty(
+    repo: &std::path::Path,
+    our_paths: &[&std::path::Path],
+) -> Result<(), ApiError> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-z"])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: repo.to_owned(),
+                source: e,
+            })
+        })?;
+    if !out.status.success() {
+        return Ok(()); // status failed — let the downstream git commands surface.
+    }
+    let our_set: std::collections::HashSet<&std::path::Path> = our_paths.iter().copied().collect();
+    // git status --porcelain -z output is NUL-terminated records of the shape
+    // "XY<space><path>"; rename/copy lines include a NUL-separated old path.
+    for record in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+        if record.len() < 4 {
+            continue;
+        }
+        let path_bytes = &record[3..];
+        let path = std::path::Path::new(std::str::from_utf8(path_bytes).unwrap_or(""));
+        if !our_set.contains(path) {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "notebook.git has uncommitted changes outside the paths this command \
+                     would touch ({}); commit or stash them before rerunning",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Outcome of `nexum trust regenerate-files`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TrustRegenerateOutcome {
@@ -278,6 +354,11 @@ pub enum TrustRegenerateOutcome {
 /// worktree is rolled back before this returns).
 /// `ApiError::Trust` on trust-state read errors.
 /// `ApiError::Indexer(IndexerError::Io)` on lock failures.
+// Straight-line admin verb: preconds → snapshot → regenerate → stage →
+// no-op short-circuit → sign → verify → rollback-on-fail. Each step earns
+// its own rollback envelope; splitting into sub-functions would hide the
+// recovery ordering that matters when something goes wrong mid-flight.
+#[allow(clippy::too_many_lines)]
 pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, ApiError> {
     with_writer_lock(paths, || {
         let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
@@ -288,10 +369,53 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
         }
         crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
 
+        // Refuse if the operator has uncommitted changes outside the trust
+        // file set — the rollback paths use `git checkout HEAD -- <files>`
+        // (path-scoped) but the operator's other work should still not be
+        // entangled with a trust-state mutation that might fail mid-flight.
+        let trust_file_pbs: Vec<std::path::PathBuf> = [
+            ".trust/events.yml",
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        refuse_if_unrelated_dirty(&paths.notebook_git, &trust_file_refs)?;
+
         let events_yml = paths.notebook_git.join(".trust/events.yml");
         let trust_dir = paths.notebook_git.join(".trust");
-        let outcome = crate::trust::regenerate::regenerate_files(&events_yml, &trust_dir)
-            .map_err(ApiError::Trust)?;
+
+        // Snapshot the three signer files BEFORE regenerate so a partial
+        // failure of regenerate_files (e.g. mid-loop write error) can be
+        // unwound via the trust-file restore helper.
+        let signer_pbs: Vec<std::path::PathBuf> = [
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let signer_refs: Vec<&std::path::Path> =
+            signer_pbs.iter().map(std::path::PathBuf::as_path).collect();
+        let outcome = match crate::trust::regenerate::regenerate_files(&events_yml, &trust_dir) {
+            Ok(o) => o,
+            Err(e) => {
+                // regenerate may have written one file before failing on
+                // the next; restore the three signer files from HEAD so
+                // the worktree never lingers in a partial-rewrite state.
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &signer_refs),
+                    ApiError::Trust(e),
+                ));
+            }
+        };
 
         let touched: Vec<String> = match outcome {
             crate::trust::regenerate::RegenerateOutcome::NoChange => {
@@ -312,14 +436,35 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
             .collect();
         let message = "trust: regenerate signer projections from events.yml";
 
-        // Regenerate may have rewritten worktree files to match HEAD (e.g. a
-        // pure worktree tamper restored to canonical content). Stage the paths
-        // and bail if nothing differs from HEAD — no empty commit.
-        let _ = std::process::Command::new("git")
+        // Stage the candidate paths, checking the exit status so a silent
+        // failure doesn't get misread as "no change" downstream.
+        let add_out = std::process::Command::new("git")
             .arg("add")
             .args(&staged_refs)
             .current_dir(&paths.notebook_git)
-            .output();
+            .output()
+            .map_err(|e| {
+                ApiError::Indexer(IndexerError::Io {
+                    path: paths.notebook_git.clone(),
+                    source: e,
+                })
+            })?;
+        if !add_out.status.success() {
+            // Try to restore the regenerated files before surfacing.
+            return Err(surface_rollback_err(
+                restore_paths_from_head(&paths.notebook_git, &signer_refs),
+                ApiError::TrustRegenerateFailed {
+                    stderr: format!(
+                        "git add failed: {}",
+                        String::from_utf8_lossy(&add_out.stderr).trim()
+                    ),
+                },
+            ));
+        }
+
+        // If staging produced no diff against HEAD the regeneration was a
+        // worktree-only restore (the canonical content already matched what
+        // is committed). Per the no-empty-commit rule, treat it as NoChange.
         let diff_status = std::process::Command::new("git")
             .args(["diff", "--cached", "--quiet"])
             .current_dir(&paths.notebook_git)
@@ -335,13 +480,12 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
         ) {
             Ok(sha) => sha,
             Err(commit_err) => {
-                let _ = std::process::Command::new("git")
-                    .args(["reset", "--hard", "HEAD"])
-                    .current_dir(&paths.notebook_git)
-                    .output();
-                return Err(ApiError::TrustRegenerateFailed {
-                    stderr: format!("git commit failed: {commit_err}"),
-                });
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &signer_refs),
+                    ApiError::TrustRegenerateFailed {
+                        stderr: format!("git commit failed: {commit_err}"),
+                    },
+                ));
             }
         };
 
@@ -351,13 +495,12 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
             "HEAD",
             &historical,
         ) {
-            let _ = std::process::Command::new("git")
-                .args(["reset", "--hard", "HEAD~1"])
-                .current_dir(&paths.notebook_git)
-                .output();
-            return Err(ApiError::TrustRegenerateFailed {
-                stderr: verify_err.to_string(),
-            });
+            return Err(surface_rollback_err(
+                rollback_last_commit(&paths.notebook_git),
+                ApiError::TrustRegenerateFailed {
+                    stderr: verify_err.to_string(),
+                },
+            ));
         }
 
         Ok(TrustRegenerateOutcome::Committed {
@@ -365,6 +508,32 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
             files: touched,
         })
     })
+}
+
+/// Translate a rollback-helper result + the original error into the right
+/// `ApiError`. On rollback success → return the original error. On rollback
+/// failure → return a `TrustRegenerateFailed` carrying a "rollback failed;
+/// manual intervention required" message so the operator knows the worktree
+/// is in an indeterminate state.
+fn surface_rollback_err(
+    rollback_result: Result<bool, std::io::Error>,
+    original: ApiError,
+) -> ApiError {
+    match rollback_result {
+        Ok(true) => original,
+        Ok(false) => ApiError::TrustRegenerateFailed {
+            stderr: format!(
+                "rollback exited non-zero; manual intervention required. \
+                 Underlying error: {original}"
+            ),
+        },
+        Err(e) => ApiError::TrustRegenerateFailed {
+            stderr: format!(
+                "rollback could not run (binary missing or permission denied: {e}); \
+                 manual intervention required. Underlying error: {original}"
+            ),
+        },
+    }
 }
 
 /// Outcome of `nexum keys rotate`.
@@ -474,10 +643,39 @@ pub fn keys_rotate(
             public_key,
         };
 
+        // Refuse if the operator has uncommitted changes outside the trust
+        // file set; the rollback paths must not destroy unrelated work.
+        let trust_file_pbs: Vec<std::path::PathBuf> = [
+            ".trust/events.yml",
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        refuse_if_unrelated_dirty(&paths.notebook_git, &trust_file_refs)?;
+
         let trust_dir = paths.notebook_git.join(".trust");
+        // append_key_added writes events.yml then regenerates the three
+        // signer files. If regenerate fails after events.yml was rewritten,
+        // the worktree is dirty without a commit; restore all four trust
+        // files from HEAD to bring the worktree back to canonical state.
         let touched =
-            crate::trust::rotate::append_key_added(&events_yml, &trust_dir, &new_key, reason)
-                .map_err(ApiError::Trust)?;
+            match crate::trust::rotate::append_key_added(&events_yml, &trust_dir, &new_key, reason)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err(surface_rollback_err(
+                        restore_paths_from_head(&paths.notebook_git, &trust_file_refs),
+                        ApiError::Trust(e),
+                    ));
+                }
+            };
 
         // Stage paths with the `.trust/` prefix required by the notebook layout.
         let staged_pathbufs: Vec<std::path::PathBuf> = touched
@@ -508,13 +706,12 @@ pub fn keys_rotate(
         ) {
             Ok(sha) => sha,
             Err(commit_err) => {
-                let _ = std::process::Command::new("git")
-                    .args(["reset", "--hard", "HEAD"])
-                    .current_dir(&paths.notebook_git)
-                    .output();
-                return Err(ApiError::TrustRegenerateFailed {
-                    stderr: format!("git commit failed: {commit_err}"),
-                });
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &trust_file_refs),
+                    ApiError::TrustRegenerateFailed {
+                        stderr: format!("git commit failed: {commit_err}"),
+                    },
+                ));
             }
         };
 
@@ -527,13 +724,12 @@ pub fn keys_rotate(
             "HEAD",
             &historical,
         ) {
-            let _ = std::process::Command::new("git")
-                .args(["reset", "--hard", "HEAD~1"])
-                .current_dir(&paths.notebook_git)
-                .output();
-            return Err(ApiError::TrustRegenerateFailed {
-                stderr: verify_err.to_string(),
-            });
+            return Err(surface_rollback_err(
+                rollback_last_commit(&paths.notebook_git),
+                ApiError::TrustRegenerateFailed {
+                    stderr: verify_err.to_string(),
+                },
+            ));
         }
 
         // ONLY after verify succeeds: update user.signingkey to the new key path.
