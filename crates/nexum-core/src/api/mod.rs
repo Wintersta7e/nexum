@@ -7,9 +7,12 @@ pub mod error;
 use crate::{
     config::types::Config,
     indexer::{
-        IndexerOutcome,
-        db::{open_existing, open_existing_writable, open_or_create},
-        run::{run as indexer_run, run_force as indexer_run_force},
+        IndexerOpts, IndexerOutcome,
+        db::{IndexerError, open_existing, open_existing_writable, open_or_create},
+        run::{
+            run as indexer_run, run_force as indexer_run_force,
+            run_with_opts as indexer_run_with_opts,
+        },
     },
     paths::Paths,
     query::{
@@ -25,22 +28,90 @@ pub enum ApiError {
     #[error(transparent)]
     Indexer(#[from] crate::indexer::IndexerError),
     #[error(transparent)]
-    Query(#[from] crate::query::QueryError),
+    Query(crate::query::QueryError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
     #[error("index schema v{v_disk} is older than this binary (v{v_code}); run `nexum migrate`")]
     MigrationRequired { v_disk: u32, v_code: u32 },
+    #[error("trust regenerate refused: {reason}")]
+    TrustRegenerateRefused { reason: String },
+    #[error("trust regenerate failed: {stderr}")]
+    TrustRegenerateFailed { stderr: String },
+    // No #[from] — kept as a manual impl below to avoid coherence collision
+    // with the existing From<QueryError> which also wraps TrustError.
+    #[error(transparent)]
+    Trust(crate::trust::events::TrustError),
 }
 
-// Trust-events materializer errors raised by the facade-level
-// `ensure_current` call route through the same wire shape as verb-internal
-// trust errors: `ApiError::Query(QueryError::Trust(_))`. Single canonical
-// path so callers don't have to discriminate where in the read pipeline
-// the error originated.
+impl From<crate::query::QueryError> for ApiError {
+    fn from(err: crate::query::QueryError) -> Self {
+        match err {
+            crate::query::QueryError::MigrationRequired { v_disk } => ApiError::MigrationRequired {
+                v_disk,
+                v_code: crate::index::schema::INDEX_DB_LATEST_VERSION,
+            },
+            other => ApiError::Query(other),
+        }
+    }
+}
+
+// Trust errors raised directly (e.g. from admin verbs) surface as
+// `ApiError::Trust`. The read pipeline's `ensure_current` path goes through
+// `From<QueryError>` → `ApiError::Query(QueryError::Trust(_))`; that arm
+// still exists and both variants map to the same `trust_envelope` in
+// `api/error.rs`.
 impl From<crate::trust::events::TrustError> for ApiError {
     fn from(e: crate::trust::events::TrustError) -> Self {
-        ApiError::Query(crate::query::QueryError::Trust(e))
+        ApiError::Trust(e)
     }
+}
+
+/// Acquire the exclusive writer lock at `~/.nexum/.lock`, run `body`, and
+/// release the lock unconditionally on return (success, early-return, or
+/// error inside the closure).
+///
+/// All four writer verbs (`index_reembed`, `migrate_index_db`,
+/// `trust_regenerate_files`, `keys_rotate`) share the same acquire / release
+/// shape; centralizing it removes ~50 lines of boilerplate and ensures the
+/// release happens on every error path without needing a `lock_file.unlock()`
+/// before every `return`.
+///
+/// The closure receives nothing — it just runs under the held lock and is
+/// responsible for any rollback inside its own error-handling paths.
+fn with_writer_lock<T>(
+    paths: &Paths,
+    body: impl FnOnce() -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    use fs2::FileExt as _;
+
+    let lock_io_err = |e: std::io::Error| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.lock.clone(),
+            source: e,
+        })
+    };
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&paths.lock)
+        .map_err(lock_io_err)?;
+    lock_file.try_lock_exclusive().map_err(lock_io_err)?;
+
+    let result = body();
+    if let Err(unlock_err) = lock_file.unlock() {
+        // A failed unlock can leave the file lock held by the OS, blocking
+        // the next mutation verb. Surface to operators via tracing so the
+        // failure isn't silent; the verb's own result still wins because
+        // by here the body() has completed (success or its own error).
+        tracing::warn!(
+            target: "nexum::lock",
+            path = %paths.lock.display(),
+            error = %unlock_err,
+            "writer lock could not be released; next admin verb may block until the OS reclaims it"
+        );
+    }
+    result
 }
 
 /// Run a reindex pass (default: incremental).
@@ -61,6 +132,666 @@ pub fn index_run(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, ApiError
 pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, ApiError> {
     let mut conn = open_or_create(&paths.index_db)?;
     Ok(indexer_run_force(&mut conn, cfg, paths)?)
+}
+
+/// Run an indexer pass with the stale-row sweep threshold optionally lowered.
+///
+/// The mechanism is the regular pass plus a `threshold_override` threaded
+/// through `apply_deletes`; nothing about the pass itself is "forced". When
+/// `aggressive` is `true`, the threshold drops to 1 so the check fires
+/// immediately on the first miss instead of waiting for `STALE_THRESHOLD`
+/// (3) consecutive misses. Backing verb for `nexum index --sweep
+/// [--aggressive]`.
+///
+/// Acquires `~/.nexum/.lock` via the same mechanism as the other admin verbs
+/// (`index_reembed`, `migrate_index_db`, `trust_regenerate_files`,
+/// `keys_rotate`).
+///
+/// # Errors
+///
+/// Returns `ApiError::Indexer` on any indexer failure.
+pub fn index_sweep(
+    paths: &Paths,
+    cfg: &Config,
+    aggressive: bool,
+) -> Result<IndexerOutcome, ApiError> {
+    with_writer_lock(paths, || {
+        let mut conn = open_or_create(&paths.index_db)?;
+        let opts = IndexerOpts {
+            threshold_override: aggressive.then_some(1),
+        };
+        Ok(indexer_run_with_opts(&mut conn, cfg, paths, opts)?)
+    })
+}
+
+/// Outcome of a `--reembed` pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReembedOutcome {
+    /// Number of records that received a new embedding vector.
+    pub embedded: u64,
+    /// Number of records whose embedder call failed and were left
+    /// unchanged (still logged at `warn` for the operator).
+    pub failed: u64,
+    /// Records already current (hash-stable skip — not yet implemented;
+    /// placeholder always returns 0).
+    pub skipped_current: u64,
+    /// Resume cursor after a partial run. `None` after a clean completion.
+    pub resume_rowid: Option<i64>,
+}
+
+/// Re-embed every record already in the index against the configured
+/// embedder. Refuses if `cfg.embed.enabled = false`.
+///
+/// Acquires the writer lock so two concurrent `--reembed` invocations
+/// cannot race the resume cursor. (The default `index_run` / `index_run_force`
+/// paths do not take the writer lock today, so a long-running `--reembed`
+/// against an actively-indexed store can still trail the head; the lock
+/// here only protects against duplicate reembed jobs.) Released on every
+/// return path.
+///
+/// # Errors
+///
+/// Returns `ApiError::Config(ConfigError::Invalid)` if embed is not enabled.
+/// Returns `ApiError::Indexer` on any indexer or lock failure.
+pub fn index_reembed(paths: &Paths, cfg: &Config) -> Result<ReembedOutcome, ApiError> {
+    if !cfg.embed.enabled {
+        return Err(ApiError::Config(crate::config::ConfigError::Invalid {
+            field: "embed.enabled".into(),
+            reason: "--reembed requires [embed].enabled = true".into(),
+        }));
+    }
+    with_writer_lock(paths, || {
+        let mut conn = open_existing_writable(&paths.index_db)?;
+        Ok(crate::indexer::run::run_reembed_existing(
+            &mut conn, cfg, paths,
+        )?)
+    })
+}
+
+/// Run the registered index-DB migrators under the writer lock.
+///
+/// Acquires `~/.nexum/.lock` exclusively before opening the database so no
+/// concurrent indexer or reembed pass races the migration. Opens with raw
+/// `rusqlite::Connection::open_with_flags(READ_WRITE)` rather than
+/// `open_existing_writable` because that helper rejects an under-versioned
+/// store with `MigrationRequired`, which is the exact case this verb exists
+/// to resolve.
+///
+/// # Errors
+///
+/// Returns `ApiError::Indexer(IndexerError::Io)` if the lock file cannot be
+/// opened or the exclusive lock cannot be acquired (store busy).
+/// Returns `ApiError::Indexer(IndexerError::Rusqlite)` if the DB cannot be
+/// opened. Returns `ApiError::Indexer(IndexerError::Migration)` on any
+/// migration failure (step error, incompatible store, post-apply schema
+/// verification failure).
+pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcome, ApiError> {
+    with_writer_lock(paths, || {
+        // Register the sqlite-vec auto-extension before opening the raw
+        // connection. The open_or_create / open_existing_* helpers do this
+        // internally, but migrate_index_db bypasses them intentionally
+        // (open_existing_writable rejects under-versioned stores with
+        // MigrationRequired). Without this call, a DB that contains vec0
+        // virtual tables would fail to open because the extension is not yet
+        // loaded for this process.
+        crate::indexer::db::register_sqlite_vec_once();
+
+        // Open with raw rusqlite rather than open_existing_writable: the
+        // open_existing_with_flags helper returns MigrationRequired when
+        // v_disk < INDEX_DB_LATEST_VERSION, which is precisely the case we
+        // are here to handle.
+        //
+        // But detect the no-file-yet case explicitly — a freshly-init'd
+        // nexum has no index.db until the first `nexum index` pass — and
+        // surface it as the standard IndexMissing envelope so the operator
+        // sees a friendly "run nexum index" hint instead of an opaque
+        // rusqlite I/O error.
+        if !paths.index_db.exists() {
+            return Err(ApiError::Query(crate::query::QueryError::IndexMissing {
+                path: paths.index_db.clone(),
+            }));
+        }
+        let mut conn = rusqlite::Connection::open_with_flags(
+            &paths.index_db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )
+        .map_err(|e| ApiError::Indexer(IndexerError::Rusqlite(e)))?;
+
+        crate::migrate::index_db::migrate_to_latest(
+            &mut conn,
+            &paths.index_db,
+            /* lock_held = */ true,
+        )
+        .map_err(|e| match e {
+            // Unreachable in practice (lock_held = true silences the migrator's
+            // own MigrationRequired arm), but defensive: route to the dedicated
+            // ApiError::MigrationRequired so the wire keeps its exit-code-6
+            // signal if the framework ever changes shape.
+            crate::migrate::MigrationError::MigrationRequired { v_disk, v_code } => {
+                ApiError::MigrationRequired { v_disk, v_code }
+            }
+            other => ApiError::Indexer(IndexerError::Migration(other)),
+        })
+    })
+}
+
+/// Restore the given repo-relative paths from `HEAD` (both index and worktree).
+/// Returns `Ok(true)` on success, `Ok(false)` if `git checkout` exited
+/// non-zero, `Err` if the binary couldn't be spawned. Used by rollback paths
+/// that need to revert specific files without touching unrelated changes the
+/// operator may have in the worktree.
+fn restore_paths_from_head(
+    repo: &std::path::Path,
+    paths: &[&std::path::Path],
+) -> Result<bool, std::io::Error> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("checkout").arg("HEAD").arg("--");
+    for p in paths {
+        cmd.arg(p);
+    }
+    let out = cmd.current_dir(repo).output()?;
+    Ok(out.status.success())
+}
+
+/// Drop the last commit and restore the worktree to `HEAD~1`. Returns
+/// `Ok(true)` on success, `Ok(false)` on non-zero exit, `Err` if the binary
+/// couldn't be spawned. Used when a commit landed but its post-commit
+/// verification failed.
+fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
+    let out = std::process::Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(repo)
+        .output()?;
+    Ok(out.status.success())
+}
+
+/// Refuse the operation when `notebook.git` has uncommitted changes outside
+/// the paths this verb is about to touch. Protects unrelated operator state
+/// from the rollback paths' `git reset` / `git checkout`.
+///
+/// `our_paths` are repo-relative (e.g. `.trust/events.yml`). Anything dirty
+/// outside that set is treated as the operator's; we refuse the verb rather
+/// than silently destroying it.
+fn refuse_if_unrelated_dirty(
+    repo: &std::path::Path,
+    our_paths: &[&std::path::Path],
+) -> Result<(), ApiError> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-z"])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: repo.to_owned(),
+                source: e,
+            })
+        })?;
+    if !out.status.success() {
+        return Ok(()); // status failed — let the downstream git commands surface.
+    }
+    let our_set: std::collections::HashSet<&std::path::Path> = our_paths.iter().copied().collect();
+    // git status --porcelain -z output is NUL-terminated records of the shape
+    // "XY<space><path>"; rename/copy lines include a NUL-separated old path.
+    for record in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+        if record.len() < 4 {
+            continue;
+        }
+        let path_bytes = &record[3..];
+        let path = std::path::Path::new(std::str::from_utf8(path_bytes).unwrap_or(""));
+        if !our_set.contains(path) {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "notebook.git has uncommitted changes outside the paths this command \
+                     would touch ({}); commit or stash them before rerunning",
+                    path.display()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Outcome of `nexum trust regenerate-files`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TrustRegenerateOutcome {
+    /// The three derived signer files already match `events.yml`; no commit.
+    NoChange,
+    /// A signed commit landed with the listed files (relative to `notebook.git/`).
+    Committed { commit: String, files: Vec<String> },
+}
+
+/// Re-derive the three OpenSSH-format signer files from
+/// `notebook.git/.trust/events.yml` and stage them in a signed commit.
+///
+/// Acquires `~/.nexum/.lock`. Refuses if `notebook.git/.git/MERGE_HEAD`
+/// exists or `~/.nexum/.reanchor_pending` is present. On either commit
+/// or verify failure the worktree is reset so a partial regeneration
+/// never lingers (per the no-dirty-worktree rule).
+///
+/// # Errors
+///
+/// `ApiError::TrustRegenerateRefused` on precondition failure (merge in
+/// progress, pending reanchor).
+/// `ApiError::TrustRegenerateFailed` on commit or verify failure (the
+/// worktree is rolled back before this returns).
+/// `ApiError::Trust` on trust-state read errors.
+/// `ApiError::Indexer(IndexerError::Io)` on lock failures.
+// Straight-line admin verb: preconds → snapshot → regenerate → stage →
+// no-op short-circuit → sign → verify → rollback-on-fail. Each step earns
+// its own rollback envelope; splitting into sub-functions would hide the
+// recovery ordering that matters when something goes wrong mid-flight.
+#[allow(clippy::too_many_lines)]
+pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, ApiError> {
+    with_writer_lock(paths, || {
+        let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
+        if merge_head.exists() {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: "in-progress merge detected (notebook.git/.git/MERGE_HEAD exists); abort or complete it first".into(),
+            });
+        }
+        crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
+
+        // Refuse if the operator has uncommitted changes outside the trust
+        // file set — the rollback paths use `git checkout HEAD -- <files>`
+        // (path-scoped) but the operator's other work should still not be
+        // entangled with a trust-state mutation that might fail mid-flight.
+        let trust_file_pbs: Vec<std::path::PathBuf> = [
+            ".trust/events.yml",
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        refuse_if_unrelated_dirty(&paths.notebook_git, &trust_file_refs)?;
+
+        let events_yml = paths.notebook_git.join(".trust/events.yml");
+        let trust_dir = paths.notebook_git.join(".trust");
+
+        // Snapshot the three signer files BEFORE regenerate so a partial
+        // failure of regenerate_files (e.g. mid-loop write error) can be
+        // unwound via the trust-file restore helper.
+        let signer_pbs: Vec<std::path::PathBuf> = [
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let signer_refs: Vec<&std::path::Path> =
+            signer_pbs.iter().map(std::path::PathBuf::as_path).collect();
+        let outcome = match crate::trust::regenerate::regenerate_files(&events_yml, &trust_dir) {
+            Ok(o) => o,
+            Err(e) => {
+                // regenerate may have written one file before failing on
+                // the next; restore the three signer files from HEAD so
+                // the worktree never lingers in a partial-rewrite state.
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &signer_refs),
+                    ApiError::Trust(e),
+                ));
+            }
+        };
+
+        let touched: Vec<String> = match outcome {
+            crate::trust::regenerate::RegenerateOutcome::NoChange => {
+                return Ok(TrustRegenerateOutcome::NoChange);
+            }
+            crate::trust::regenerate::RegenerateOutcome::Updated { files } => {
+                files.iter().map(|s| (*s).to_owned()).collect()
+            }
+        };
+
+        let staged_pathbufs: Vec<std::path::PathBuf> = touched
+            .iter()
+            .map(|name| std::path::PathBuf::from(format!(".trust/{name}")))
+            .collect();
+        let staged_refs: Vec<&std::path::Path> = staged_pathbufs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        let message = "trust: regenerate signer projections from events.yml";
+
+        // Stage the candidate paths, checking the exit status so a silent
+        // failure doesn't get misread as "no change" downstream.
+        let add_out = std::process::Command::new("git")
+            .arg("add")
+            .args(&staged_refs)
+            .current_dir(&paths.notebook_git)
+            .output()
+            .map_err(|e| {
+                ApiError::Indexer(IndexerError::Io {
+                    path: paths.notebook_git.clone(),
+                    source: e,
+                })
+            })?;
+        if !add_out.status.success() {
+            // Try to restore the regenerated files before surfacing.
+            return Err(surface_rollback_err(
+                restore_paths_from_head(&paths.notebook_git, &signer_refs),
+                ApiError::TrustRegenerateFailed {
+                    stderr: format!(
+                        "git add failed: {}",
+                        String::from_utf8_lossy(&add_out.stderr).trim()
+                    ),
+                },
+            ));
+        }
+
+        // If staging produced no diff against HEAD the regeneration was a
+        // worktree-only restore (the canonical content already matched what
+        // is committed). Per the no-empty-commit rule, treat it as NoChange.
+        let diff_status = std::process::Command::new("git")
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(&paths.notebook_git)
+            .status();
+        if matches!(diff_status, Ok(s) if s.success()) {
+            return Ok(TrustRegenerateOutcome::NoChange);
+        }
+
+        let commit = match crate::init::git_ops::git_commit_signed(
+            &paths.notebook_git,
+            &staged_refs,
+            message,
+        ) {
+            Ok(sha) => sha,
+            Err(commit_err) => {
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &signer_refs),
+                    ApiError::TrustRegenerateFailed {
+                        stderr: format!("git commit failed: {commit_err}"),
+                    },
+                ));
+            }
+        };
+
+        let historical = paths.notebook_git.join(".trust/historical_signers");
+        if let Err(verify_err) = crate::init::git_ops::git_verify_commit_with_signers(
+            &paths.notebook_git,
+            "HEAD",
+            &historical,
+        ) {
+            return Err(surface_rollback_err(
+                rollback_last_commit(&paths.notebook_git),
+                ApiError::TrustRegenerateFailed {
+                    stderr: verify_err.to_string(),
+                },
+            ));
+        }
+
+        Ok(TrustRegenerateOutcome::Committed {
+            commit,
+            files: touched,
+        })
+    })
+}
+
+/// Translate a rollback-helper result + the original error into the right
+/// `ApiError`. On rollback success → return the original error. On rollback
+/// failure → return a `TrustRegenerateFailed` carrying a "rollback failed;
+/// manual intervention required" message so the operator knows the worktree
+/// is in an indeterminate state.
+fn surface_rollback_err(
+    rollback_result: Result<bool, std::io::Error>,
+    original: ApiError,
+) -> ApiError {
+    match rollback_result {
+        Ok(true) => original,
+        Ok(false) => ApiError::TrustRegenerateFailed {
+            stderr: format!(
+                "rollback exited non-zero; manual intervention required. \
+                 Underlying error: {original}"
+            ),
+        },
+        Err(e) => ApiError::TrustRegenerateFailed {
+            stderr: format!(
+                "rollback could not run (binary missing or permission denied: {e}); \
+                 manual intervention required. Underlying error: {original}"
+            ),
+        },
+    }
+}
+
+/// Outcome of `nexum keys rotate`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeysRotateOutcome {
+    /// SSH fingerprint of the newly-added key.
+    pub new_fingerprint: String,
+    /// SHA of the signed rotation commit.
+    pub commit: String,
+    /// Bare file names that were staged and committed (events.yml + any
+    /// regenerated signer files).
+    pub regenerated_files: Vec<String>,
+    /// Whether `notebook.git/.git/config user.signingkey` was successfully
+    /// updated to the new key path. `false` means the rotation commit
+    /// landed and verified but the post-verify git-config update failed —
+    /// the next commit will still be signed by the OLD key until the
+    /// operator updates user.signingkey manually.
+    #[serde(default = "default_true")]
+    pub signingkey_updated: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Append a `KeyAdded` event for the key at `new_key_path` to `events.yml`,
+/// regenerate the derived signer files, sign the rotation commit with the
+/// CURRENT (still-trusted) key, verify post-commit, and only then update
+/// `notebook.git/.git/config user.signingkey` to the new key.
+///
+/// `new_key_path` is the **private**-key path. The function reads
+/// `<path>.pub` to obtain the public-key blob and computes its fingerprint via
+/// `crate::ssh_key::compute_fingerprint`.
+///
+/// # Errors
+///
+/// `ApiError::Trust(TrustError::DuplicateKey)` if the fingerprint already
+/// appears in events.yml in any role.
+/// `ApiError::TrustRegenerateRefused` on pre-flight failure (in-progress
+/// merge, pending reanchor, or current bootstrap key already revoked).
+/// `ApiError::TrustRegenerateFailed` on commit or verify failure; the
+/// worktree is reset before this returns so no partial state lingers.
+/// `ApiError::Indexer(IndexerError::Io)` on lock failures.
+// The verb is a straight-line sequence of admin steps (preconds →
+// duplicate-check → write events → regenerate → stage → diff → sign →
+// verify → rollback-on-fail → update signingkey). Each step earns its own
+// comment; splitting into sub-functions would hide the ordering that's
+// load-bearing for the trust-chain invariant.
+#[allow(clippy::too_many_lines)]
+pub fn keys_rotate(
+    paths: &Paths,
+    cfg: &Config,
+    new_key_path: &std::path::Path,
+    reason: &str,
+) -> Result<KeysRotateOutcome, ApiError> {
+    with_writer_lock(paths, || {
+        // Pre-flight: refuse if an in-progress merge is detected.
+        let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
+        if merge_head.exists() {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: "in-progress merge detected; abort or complete it first".into(),
+            });
+        }
+
+        // Pre-flight: refuse if a reanchor sentinel is present.
+        crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
+
+        // Pre-flight: the current bootstrap key must still be trusted. If it has a
+        // KeyRotatedOut or KeyCompromised event the rotation commit would be signed
+        // by an untrusted key and verify would fail. Surface a clean refusal rather
+        // than committing then rolling back.
+        let events_yml = paths.notebook_git.join(".trust/events.yml");
+        let current_fp = &cfg.trust.bootstrap.fingerprint;
+        let event_log =
+            crate::trust::events::load_events_yml(&events_yml).map_err(ApiError::Trust)?;
+        let current_trusted = event_log.events.iter().all(|e| match &e.payload {
+            crate::trust::events::EventKind::KeyRotatedOut { fingerprint, .. }
+            | crate::trust::events::EventKind::KeyCompromised { fingerprint, .. } => {
+                fingerprint != current_fp
+            }
+            _ => true,
+        });
+        if !current_trusted {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "current bootstrap key {current_fp} is no longer trusted; \
+                     rotation requires a trusted signer (keys recover is the recovery path)"
+                ),
+            });
+        }
+
+        // Read the new key's public-key blob and compute its fingerprint.
+        let pub_path = {
+            let mut s = new_key_path.as_os_str().to_owned();
+            s.push(".pub");
+            std::path::PathBuf::from(s)
+        };
+        let public_key = std::fs::read_to_string(&pub_path)
+            .map_err(|e| {
+                ApiError::Indexer(IndexerError::Io {
+                    path: pub_path.clone(),
+                    source: e,
+                })
+            })?
+            .trim()
+            .to_owned();
+        let fingerprint = crate::ssh_key::compute_fingerprint(&public_key).map_err(|e| {
+            ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "could not compute SSH fingerprint of {}: {e}",
+                    pub_path.display()
+                ),
+            }
+        })?;
+
+        let new_key = crate::trust::rotate::NewKey {
+            fingerprint: fingerprint.clone(),
+            public_key,
+        };
+
+        // Refuse if the operator has uncommitted changes outside the trust
+        // file set; the rollback paths must not destroy unrelated work.
+        let trust_file_pbs: Vec<std::path::PathBuf> = [
+            ".trust/events.yml",
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        refuse_if_unrelated_dirty(&paths.notebook_git, &trust_file_refs)?;
+
+        let trust_dir = paths.notebook_git.join(".trust");
+        // append_key_added writes events.yml then regenerates the three
+        // signer files. If regenerate fails after events.yml was rewritten,
+        // the worktree is dirty without a commit; restore all four trust
+        // files from HEAD to bring the worktree back to canonical state.
+        let touched =
+            match crate::trust::rotate::append_key_added(&events_yml, &trust_dir, &new_key, reason)
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    return Err(surface_rollback_err(
+                        restore_paths_from_head(&paths.notebook_git, &trust_file_refs),
+                        ApiError::Trust(e),
+                    ));
+                }
+            };
+
+        // Stage paths with the `.trust/` prefix required by the notebook layout.
+        let staged_pathbufs: Vec<std::path::PathBuf> = touched
+            .iter()
+            .map(|name| std::path::PathBuf::from(format!(".trust/{name}")))
+            .collect();
+        let staged_refs: Vec<&std::path::Path> = staged_pathbufs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+
+        // Build a short fingerprint suffix for the commit message: the last 12
+        // chars of the base64 body, with trailing `=` padding stripped. The
+        // body is ASCII so byte-slicing is safe.
+        let body = fingerprint
+            .split(':')
+            .next_back()
+            .unwrap_or(&fingerprint)
+            .trim_end_matches('=');
+        let short = body.get(body.len().saturating_sub(12)..).unwrap_or(body);
+        let commit_msg = format!("trust: add signing key {short}");
+
+        // Sign with the CURRENT key (user.signingkey still points at the old key).
+        let commit = match crate::init::git_ops::git_commit_signed(
+            &paths.notebook_git,
+            &staged_refs,
+            &commit_msg,
+        ) {
+            Ok(sha) => sha,
+            Err(commit_err) => {
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &trust_file_refs),
+                    ApiError::TrustRegenerateFailed {
+                        stderr: format!("git commit failed: {commit_err}"),
+                    },
+                ));
+            }
+        };
+
+        // Verify the rotation commit using historical_signers (which now includes
+        // the new key but was signed by the old key — the old key must still be in
+        // historical_signers for this to pass).
+        let historical = paths.notebook_git.join(".trust/historical_signers");
+        if let Err(verify_err) = crate::init::git_ops::git_verify_commit_with_signers(
+            &paths.notebook_git,
+            "HEAD",
+            &historical,
+        ) {
+            return Err(surface_rollback_err(
+                rollback_last_commit(&paths.notebook_git),
+                ApiError::TrustRegenerateFailed {
+                    stderr: verify_err.to_string(),
+                },
+            ));
+        }
+
+        // ONLY after verify succeeds: update user.signingkey to the new key path.
+        // A failure here is non-fatal — the commit is already signed and verified;
+        // the operator can update git config manually. Surface the status in the
+        // outcome so agents see whether the next commit will sign with the OLD
+        // or NEW key.
+        let update_result = std::process::Command::new("git")
+            .args(["config", "user.signingkey"])
+            .arg(new_key_path)
+            .current_dir(&paths.notebook_git)
+            .output();
+        let signingkey_updated = matches!(update_result, Ok(ref out) if out.status.success());
+        if !signingkey_updated {
+            tracing::warn!(
+                target: "nexum::trust",
+                "git config user.signingkey update failed after successful rotation commit; \
+                 update it manually to {}",
+                new_key_path.display(),
+            );
+        }
+
+        Ok(KeysRotateOutcome {
+            new_fingerprint: fingerprint,
+            commit,
+            regenerated_files: touched,
+            signingkey_updated,
+        })
+    })
 }
 
 /// Open the index DB and prime the trust-events view for a read verb.
@@ -446,6 +1177,158 @@ fn read_tampering_rows(conn: &rusqlite::Connection) -> Result<Vec<TamperingRow>,
     Ok(rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::query::QueryError::from)?)
+}
+
+/// Resolution mode for `nexum doctor --resolve-pending-reanchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReanchorResolveMode {
+    /// Re-attempt the next phase. Valid in `events_committed` (writes the new
+    /// pin) and `pin_updated` (idempotent cleanup). Refused in `init` — the
+    /// keys-recover entry path is not implemented in this release.
+    Continue,
+    /// Abandon the pending reanchor and remove the sentinel. Only valid in
+    /// `init` (no signed commit exists yet). Refused in `events_committed`
+    /// (a signed commit is already on HEAD; only `--continue` is valid).
+    Revert,
+}
+
+/// Outcome of a sentinel-resolution attempt.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ReanchorResolveOutcome {
+    /// No `.reanchor_pending` sentinel was found; nothing to do.
+    NoSentinel,
+    /// The sentinel was consumed and the indicated phase cleaned up.
+    Resolved {
+        /// Wire name of the phase that was resolved (`"init"`,
+        /// `"events_committed"`, or `"pin_updated"`).
+        from_phase: String,
+    },
+    /// The requested mode is not valid for the current phase.
+    Refused {
+        /// Wire name of the phase the sentinel reported.
+        phase: String,
+        /// Human-readable explanation of why the mode was refused.
+        reason: String,
+    },
+}
+
+/// Inspect `~/.nexum/.reanchor_pending` and apply the sentinel cleanup per the
+/// documented phases.
+///
+/// - `init` + `Revert` → delete the sentinel (no events were committed).
+/// - `init` + `Continue` → refuse (keys-recover path not yet available).
+/// - `events_committed` + `Continue` → write the new bootstrap pin to
+///   `paths.config` and `paths.bootstrap_pin`, then remove the sentinel.
+/// - `events_committed` + `Revert` → refuse (a signed reanchor commit is
+///   already on HEAD; only `--continue` is valid).
+/// - `pin_updated` + any mode (or `None`) → idempotent cleanup: delete the
+///   sentinel and report success.
+/// - No sentinel → `NoSentinel` outcome.
+/// - Sentinel present but `mode` is `None` → `Refused` (caller must specify
+///   `--continue` or `--revert`).
+///
+/// # Errors
+///
+/// Returns `ApiError::Trust` on sentinel I/O failures.
+/// Returns `ApiError::Config` when loading or saving `config.toml` fails
+/// (only the `events_committed + Continue` branch).
+/// Returns `ApiError::Indexer(IndexerError::Io)` when writing the bootstrap
+/// pin cache file fails (same branch).
+pub fn resolve_pending_reanchor(
+    paths: &Paths,
+    mode: Option<ReanchorResolveMode>,
+) -> Result<ReanchorResolveOutcome, ApiError> {
+    use crate::trust::reanchor_pending::{Phase, delete_sentinel, read_sentinel};
+
+    // Sentinel cleanup mutates `config.toml` + `~/.nexum/.bootstrap-fingerprint`
+    // + the sentinel file itself. A concurrent `keys rotate` / `migrate` /
+    // second `doctor` invocation must not race; acquire the writer lock for
+    // the dispatch the same way every other mutation verb does.
+    with_writer_lock(paths, || {
+        let Some(sentinel) = read_sentinel(&paths.home)? else {
+            return Ok(ReanchorResolveOutcome::NoSentinel);
+        };
+        let phase = sentinel.phase_completed();
+
+        match (phase, mode) {
+            (Phase::Init, Some(ReanchorResolveMode::Revert)) => {
+                delete_sentinel(&paths.home)?;
+                Ok(ReanchorResolveOutcome::Resolved {
+                    from_phase: "init".into(),
+                })
+            }
+            (Phase::Init, Some(ReanchorResolveMode::Continue)) => {
+                Ok(ReanchorResolveOutcome::Refused {
+                    phase: "init".into(),
+                    reason: "this release only supports cleanup of `pin_updated` and `--revert` of `init`; \
+                             phase=init recovery requires the keys-recover command (not yet available)"
+                        .into(),
+                })
+            }
+            (Phase::EventsCommitted, Some(ReanchorResolveMode::Continue)) => {
+                let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+                sentinel
+                    .new_pin_fp()
+                    .clone_into(&mut cfg.trust.bootstrap.fingerprint);
+                sentinel
+                    .new_pubkey()
+                    .clone_into(&mut cfg.trust.bootstrap.public_key);
+                crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
+                std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(
+                    |e| {
+                        ApiError::Indexer(crate::indexer::db::IndexerError::Io {
+                            path: paths.bootstrap_pin.clone(),
+                            source: e,
+                        })
+                    },
+                )?;
+                delete_sentinel(&paths.home)?;
+                Ok(ReanchorResolveOutcome::Resolved {
+                    from_phase: "events_committed".into(),
+                })
+            }
+            (Phase::EventsCommitted, Some(ReanchorResolveMode::Revert)) => {
+                Ok(ReanchorResolveOutcome::Refused {
+                    phase: "events_committed".into(),
+                    reason: "phase=events_committed already has a signed reanchor commit on HEAD; \
+                             --revert would require a manual `git revert`; only --continue is valid here"
+                        .into(),
+                })
+            }
+            (Phase::PinUpdated, _) => {
+                // Verify the live state actually matches the sentinel before
+                // discarding it. If config + pin file have drifted (e.g. the
+                // operator hand-edited or partially reverted the reanchor
+                // out-of-band), the sentinel is the only audit signal of the
+                // inconsistency — refuse rather than silently destroying it.
+                let cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+                let pin_file = std::fs::read_to_string(&paths.bootstrap_pin)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                let expected = sentinel.new_pin_fp();
+                if cfg.trust.bootstrap.fingerprint != expected || pin_file != expected {
+                    return Ok(ReanchorResolveOutcome::Refused {
+                        phase: "pin_updated".into(),
+                        reason: format!(
+                            "live bootstrap pin ({}) and cache file ({}) do not match the sentinel's \
+                             new_pin_fp ({expected}); reanchor state is inconsistent. \
+                             Investigate before re-running; do not delete the sentinel manually.",
+                            cfg.trust.bootstrap.fingerprint, pin_file
+                        ),
+                    });
+                }
+                delete_sentinel(&paths.home)?;
+                Ok(ReanchorResolveOutcome::Resolved {
+                    from_phase: "pin_updated".into(),
+                })
+            }
+            (_, None) => Ok(ReanchorResolveOutcome::Refused {
+                phase: phase.as_str().into(),
+                reason: "specify --continue or --revert".into(),
+            }),
+        }
+    })
 }
 
 fn identity_kind_for(project_id: &str) -> &'static str {

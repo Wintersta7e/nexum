@@ -1,4 +1,4 @@
-//! `nexum index [--force | --incremental]` — build / update the index.
+//! `nexum index [--force | --incremental | --reembed]` — build / update the index.
 
 use std::process::ExitCode;
 
@@ -22,6 +22,26 @@ pub struct IndexArgs {
     /// tampering. Exits 4 if any tampering is detected.
     #[arg(long, default_value_t = false, conflicts_with = "incremental")]
     pub check: bool,
+    /// Re-embed every record already in the index against the configured
+    /// embedder. Refuses if `[embed].enabled = false`. Idempotent — a kill
+    /// mid-run resumes from where it stopped.
+    #[arg(long, default_value_t = false, conflicts_with_all = ["force", "check"])]
+    pub reembed: bool,
+    /// Run a stale-row sweep pass over all enabled sources. Functions like
+    /// an Authoritative pass so the `STALE_THRESHOLD` deferred-delete loop
+    /// can fire; pair with `--aggressive` to lower the threshold to 1 for
+    /// this pass. Mutually exclusive with --force, --check, and --reembed.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["force", "check", "reembed"]
+    )]
+    pub sweep: bool,
+    /// Lower the sweep threshold to 1 so the current pass's gone set is
+    /// deleted immediately (one Authoritative pass is enough). Requires
+    /// --sweep.
+    #[arg(long, default_value_t = false, requires = "sweep")]
+    pub aggressive: bool,
     /// Print the per-source summary as JSON.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -29,6 +49,12 @@ pub struct IndexArgs {
 
 /// Run `nexum index`.
 pub fn run(args: &IndexArgs) -> ExitCode {
+    if args.sweep {
+        return run_sweep(args.json, args.aggressive);
+    }
+    if args.reembed {
+        return run_reembed(args.json);
+    }
     let (paths, cfg) = match super::common::resolve_runtime(args.json) {
         Ok(v) => v,
         Err(c) => return c,
@@ -60,14 +86,20 @@ pub fn run(args: &IndexArgs) -> ExitCode {
                     o.upserts, o.deletes, o.deferred_deletes
                 );
                 for src in &o.per_source {
+                    let embed_col = if src.embed_failures > 0 {
+                        format!(" embed_fail={}", src.embed_failures)
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  [{}] completeness={} ingested={} upserts={} deletes={} deferred={}",
+                        "  [{}] completeness={} ingested={} upserts={} deletes={} deferred={}{}",
                         src.source,
                         src.completeness,
                         src.ingested,
                         src.upserts,
                         src.deletes,
                         src.deferred_deletes,
+                        embed_col,
                     );
                 }
             }
@@ -78,6 +110,71 @@ pub fn run(args: &IndexArgs) -> ExitCode {
             }
         }
         Err(e) => super::json_emit::route_api_error(&e, args.json && !args.check),
+    }
+}
+
+/// Run `nexum index --reembed`: re-embed all records in the existing index.
+fn run_reembed(emit_json: bool) -> ExitCode {
+    let (paths, cfg) = match super::common::resolve_runtime(emit_json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match api::index_reembed(&paths, &cfg) {
+        Ok(outcome) => {
+            if emit_json {
+                let env = serde_json::json!({
+                    "ok": true,
+                    "kind": "index.reembed.completed",
+                    "embedded": outcome.embedded,
+                    "failed": outcome.failed,
+                });
+                println!("{env:#}");
+            } else if outcome.failed == 0 {
+                println!("re-embedded {} records", outcome.embedded);
+            } else {
+                println!(
+                    "re-embedded {} records; {} failed (see warn logs)",
+                    outcome.embedded, outcome.failed,
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => super::json_emit::route_api_error(&e, emit_json),
+    }
+}
+
+/// Run `nexum index --sweep [--aggressive]`.
+///
+/// Executes one indexer pass under the writer lock with the stale-row
+/// threshold optionally overridden. When `aggressive` is true the threshold
+/// drops to 1 so every gone record is deleted on this pass; otherwise the
+/// default `STALE_THRESHOLD` (3) applies and the gone set defers until 3
+/// consecutive misses confirm the deletion.
+fn run_sweep(emit_json: bool, aggressive: bool) -> ExitCode {
+    let (paths, cfg) = match super::common::resolve_runtime(emit_json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match api::index_sweep(&paths, &cfg, aggressive) {
+        Ok(outcome) => {
+            if emit_json {
+                let env = serde_json::json!({
+                    "ok": true,
+                    "kind": "index.sweep.completed",
+                    "deletes": outcome.deletes,
+                    "deferred_deletes": outcome.deferred_deletes,
+                    "aggressive": aggressive,
+                });
+                println!("{env:#}");
+            } else {
+                println!(
+                    "sweep complete: deleted={}, deferred={}",
+                    outcome.deletes, outcome.deferred_deletes,
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => super::json_emit::route_api_error(&e, emit_json),
     }
 }
 

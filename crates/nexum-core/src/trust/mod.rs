@@ -13,6 +13,7 @@ pub mod git_history;
 pub mod pin;
 pub mod reanchor_pending;
 pub mod regenerate;
+pub mod rotate;
 
 pub use events::{Event, EventKind, EventLog, TrustError, load_events_yml, write_seed_yaml};
 pub use pin::{BootstrapPin, read_pin};

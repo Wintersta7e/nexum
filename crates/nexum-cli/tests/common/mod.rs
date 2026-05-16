@@ -180,12 +180,11 @@ impl TestHome {
     /// Initialize a nexum home and run `nexum index` so `index.db` exists
     /// and is fully populated, then overwrite it with a few non-magic
     /// bytes so the `SQLite` header is no longer recognizable. The next
-    /// read verb opens the path (existence check passes), then the first
-    /// SQL issued by `events_view::ensure_current` fails with "file is
-    /// not a database". That `rusqlite::Error` is wrapped as
-    /// `TrustError::Sqlite` and routes through `trust_envelope` to a
-    /// `STORE_INTEGRITY` envelope with `context.kind = "trust"` /
-    /// `subkind = "sqlite"`. Used by the corrupt-index e2e test.
+    /// read verb opens the path (existence check passes), then the
+    /// `PRAGMA user_version` read in `open_existing_with_flags` fails with
+    /// "file is not a database". That `rusqlite::Error` routes through
+    /// `query_envelope` to a `STORE_INTEGRITY` envelope with
+    /// `context.kind = "rusqlite"`. Used by the corrupt-index e2e test.
     pub fn initialized_with_corrupt_index_db() -> Self {
         let home = Self::initialized_no_index();
         let out = home.run(&["index"]);

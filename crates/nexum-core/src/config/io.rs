@@ -30,6 +30,11 @@ pub enum ConfigError {
     /// TOML serialization error (write path).
     #[error("config serialize error: {0}")]
     Serialize(#[from] toml::ser::Error),
+    /// A config file that parsed cleanly violates a cross-field invariant.
+    /// `field` is the dotted TOML path (e.g. `"embed.model_path"`); `reason`
+    /// is the actionable message for the operator.
+    #[error("invalid config at {field}: {reason}")]
+    Invalid { field: String, reason: String },
 }
 
 /// Write the seed `config.toml`.
@@ -58,15 +63,33 @@ pub fn write_seed(path: &Path, config: &Config, force: bool) -> Result<(), Confi
 ///
 /// Returns `ConfigError::Io` if the file cannot be read.
 /// Returns `ConfigError::Parse` if TOML deserialization fails.
+/// Returns `ConfigError::Invalid` if the parsed config violates a cross-field
+/// invariant (e.g. `embed.enabled = true` with an empty `embed.model_path`).
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let raw = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
         path: path.display().to_string(),
         source: e,
     })?;
-    toml::from_str(&raw).map_err(|e| ConfigError::Parse {
+    let cfg: Config = toml::from_str(&raw).map_err(|e| ConfigError::Parse {
         path: path.display().to_string(),
         source: e,
-    })
+    })?;
+    validate_embed(&cfg)?;
+    Ok(cfg)
+}
+
+/// Validate cross-field `[embed]` invariants that TOML deserialization cannot
+/// enforce on its own. Called by `load` after a successful parse.
+fn validate_embed(cfg: &Config) -> Result<(), ConfigError> {
+    if cfg.embed.enabled && cfg.embed.model_path.is_empty() {
+        return Err(ConfigError::Invalid {
+            field: "embed.model_path".to_owned(),
+            reason: "embed.enabled = true but embed.model_path is empty \
+                     (run `nexum models install bge-m3`)"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// Unconditionally write `cfg` to `path` (TOML pretty-printed). Used by the
@@ -89,6 +112,22 @@ mod tests {
     use super::*;
     use crate::config::types::Config;
     use tempfile::tempdir;
+
+    #[test]
+    fn load_rejects_enabled_with_empty_model_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Start from the valid seed, flip embed on, leave model_path empty.
+        let mut cfg = Config::seed();
+        cfg.embed.enabled = true;
+        cfg.embed.model_path = String::new();
+        write_seed(&path, &cfg, false).unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Invalid { ref field, .. } if field == "embed.model_path"),
+            "expected ConfigError::Invalid for embed.model_path, got: {err:?}",
+        );
+    }
 
     #[test]
     fn write_and_load_round_trips() {

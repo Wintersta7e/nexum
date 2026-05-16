@@ -45,6 +45,11 @@ pub enum ModelsCmd {
         /// the `--json` flag on the read verbs.
         #[arg(long, default_value_t = false)]
         json: bool,
+        /// Override the model base URL for this run only (defaults to the
+        /// value in `[embed].model_base_url`). Useful for HF mirrors or
+        /// air-gapped staging. Not persisted to `config.toml`.
+        #[arg(long)]
+        model_base_url: Option<String>,
     },
 }
 
@@ -52,11 +57,15 @@ pub enum ModelsCmd {
 #[must_use]
 pub fn run(cmd: &ModelsCmd) -> ExitCode {
     match cmd {
-        ModelsCmd::Install { model, json } => run_install(model, *json),
+        ModelsCmd::Install {
+            model,
+            json,
+            model_base_url,
+        } => run_install(model, *json, model_base_url.as_deref()),
     }
 }
 
-fn run_install(model: &str, emit_json: bool) -> ExitCode {
+fn run_install(model: &str, emit_json: bool, model_base_url_override: Option<&str>) -> ExitCode {
     if model != "bge-m3" {
         if emit_json {
             let env = json!({
@@ -99,19 +108,24 @@ fn run_install(model: &str, emit_json: bool) -> ExitCode {
         }
     };
 
+    let mut effective_cfg = cfg.clone();
+    if let Some(url) = model_base_url_override {
+        url.clone_into(&mut effective_cfg.embed.model_base_url);
+    }
+
     let mut reporter = StderrReporter::new();
     let install_result = match test_manifest_from_env() {
         Some(fixture) => install_bge_m3_with(
             &paths.models,
-            &cfg,
+            &effective_cfg,
             &mut reporter,
             &fixture.entries,
             /* skip_smoke = */ true,
         ),
-        None => install_bge_m3(&paths.models, &cfg, &mut reporter),
+        None => install_bge_m3(&paths.models, &effective_cfg, &mut reporter),
     };
 
-    let (report, next_cfg): (InstallReport, _) = match install_result {
+    let (report, mut next_cfg): (InstallReport, _) = match install_result {
         Ok(v) => v,
         Err(err) => {
             let exit = err.install_exit_code();
@@ -123,6 +137,19 @@ fn run_install(model: &str, emit_json: bool) -> ExitCode {
             return ExitCode::from(exit);
         }
     };
+
+    // Preserve the on-disk mirror URL — the override is one-shot.
+    // `install_bge_m3_with` clones `effective_cfg` into `next_cfg` and
+    // sets `embed.model_base_url` to whatever the override was; without
+    // this line the transient mirror URL would be written to config.toml.
+    // NOTE: if a future caller intentionally rewrites the URL (e.g. a
+    // `nexum models set-mirror` command), this line will silently undo it
+    // — add the new verb to the `Install` arm instead of calling
+    // `config::save` a second time.
+    next_cfg
+        .embed
+        .model_base_url
+        .clone_from(&cfg.embed.model_base_url);
 
     if let Err(err) = config::save(&paths.config, &next_cfg) {
         if emit_json {
@@ -139,25 +166,39 @@ fn run_install(model: &str, emit_json: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    render_install_success(&report, &paths.models, emit_json);
+    ExitCode::SUCCESS
+}
+
+/// Emit the install-success output — JSON envelope to stdout or prose
+/// summary to stderr depending on `emit_json`.
+fn render_install_success(report: &InstallReport, models_dir: &std::path::Path, emit_json: bool) {
     if emit_json {
-        let model_path = paths.models.join("bge-m3").join("model.onnx");
+        let model_path = models_dir.join("bge-m3").join("model.onnx");
+        // Flatten Option<Duration> → Option<u64> at the serialization
+        // boundary: the wire key `smoke_test_ms` stays stable for agent
+        // consumers; null signals "smoke test was skipped".
+        let smoke_test_ms: Option<u64> = report
+            .smoke_test
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let env = json!({
             "ok": true,
             "model": "bge-m3",
             "downloaded": report.downloaded,
-            "smoke_test_ms": report.smoke_test_ms,
+            "smoke_test_ms": smoke_test_ms,
             "model_path": model_path.to_string_lossy(),
         });
         println!("{env:#}");
     } else {
+        let smoke = report
+            .smoke_test
+            .map_or_else(|| "skipped".into(), |d| format!("{} ms", d.as_millis()));
         let _ = writeln!(
             stderr(),
-            "install complete: downloaded {} bytes; smoke-test {} ms; embed.enabled=true",
+            "install complete: downloaded {} bytes; smoke test: {smoke}; embed.enabled=true",
             report.downloaded,
-            report.smoke_test_ms,
         );
     }
-    ExitCode::SUCCESS
 }
 
 /// Build a structured failure envelope for an `EmbedError`. The `code` is
@@ -196,8 +237,10 @@ fn embed_error_envelope(err: &EmbedError) -> serde_json::Value {
             obj.insert("expected".into(), json!(expected));
             obj.insert("actual".into(), json!(actual));
         }
-        EmbedError::Tokenize(msg) | EmbedError::OrtInit(msg) | EmbedError::OrtRun(msg) => {
-            obj.insert("detail".into(), json!(msg));
+        EmbedError::Tokenize { message, .. }
+        | EmbedError::OrtInit { message, .. }
+        | EmbedError::OrtRun { message, .. } => {
+            obj.insert("detail".into(), json!(message));
         }
         EmbedError::OutputShapeMismatch { expected, actual } => {
             obj.insert("expected".into(), json!(expected));
@@ -226,16 +269,16 @@ fn test_manifest_from_env() -> Option<TestFixture> {
         let name = v.get("name")?.as_str()?.to_owned();
         let size = v.get("size")?.as_u64()?;
         let sha256 = v.get("sha256")?.as_str()?.to_owned();
-        entries.push(ManifestEntry {
+        entries.push(ManifestEntry::new(
             // The install pipeline reads `name` and `sha256` as `&'static
             // str` — for the test path we leak the owned strings so the
             // `ManifestEntry` borrow remains satisfied for the lifetime of
             // the process. Acceptable in a one-shot CLI invocation gated
             // behind a test env var.
-            name: Box::leak(name.into_boxed_str()),
+            Box::leak(name.into_boxed_str()),
             size,
-            sha256: Box::leak(sha256.into_boxed_str()),
-        });
+            Box::leak(sha256.into_boxed_str()),
+        ));
     }
     Some(TestFixture { entries })
 }
@@ -313,15 +356,27 @@ mod tests {
             install_exit_codes::CHECKSUM_MISMATCH
         );
         assert_eq!(
-            EmbedError::Tokenize("x".into()).install_exit_code(),
+            EmbedError::Tokenize {
+                message: "x".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from("x"),
+            }
+            .install_exit_code(),
             install_exit_codes::TOKENIZE_FAILED
         );
         assert_eq!(
-            EmbedError::OrtInit("x".into()).install_exit_code(),
+            EmbedError::OrtInit {
+                message: "x".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from("x"),
+            }
+            .install_exit_code(),
             install_exit_codes::ORT_INIT_FAILED
         );
         assert_eq!(
-            EmbedError::OrtRun("x".into()).install_exit_code(),
+            EmbedError::OrtRun {
+                message: "x".into(),
+                source: Box::<dyn std::error::Error + Send + Sync>::from("x"),
+            }
+            .install_exit_code(),
             install_exit_codes::ORT_RUN_FAILED
         );
         assert_eq!(
@@ -331,6 +386,36 @@ mod tests {
             }
             .install_exit_code(),
             install_exit_codes::OUTPUT_SHAPE_MISMATCH
+        );
+    }
+
+    #[test]
+    fn install_mirror_override_passes_url_to_core() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(subcommand)]
+            cmd: ModelsCmd,
+        }
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "install",
+            "bge-m3",
+            "--model-base-url",
+            "https://mirror.example.com/bge-m3",
+        ])
+        .unwrap();
+        let ModelsCmd::Install {
+            model_base_url,
+            model,
+            ..
+        } = cli.cmd;
+        assert_eq!(model, "bge-m3");
+        assert_eq!(
+            model_base_url.as_deref(),
+            Some("https://mirror.example.com/bge-m3")
         );
     }
 

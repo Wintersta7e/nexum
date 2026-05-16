@@ -46,6 +46,17 @@ enum Commands {
         #[command(subcommand)]
         cmd: commands::trust::TrustCommand,
     },
+    /// Run pending index-DB schema migrations.
+    Migrate(commands::migrate::MigrateArgs),
+    /// Diagnose store health and (with `--resolve-pending-reanchor`) clean
+    /// up a partial-reanchor sentinel.
+    Doctor(commands::doctor::DoctorArgs),
+    /// Manage signing keys. This release supports `rotate` (additive —
+    /// adds a new trusted key without retiring the old one).
+    Keys {
+        #[command(subcommand)]
+        cmd: commands::keys::KeysCommand,
+    },
 }
 
 fn main() -> ExitCode {
@@ -62,6 +73,9 @@ fn main() -> ExitCode {
         Commands::Models { cmd } => commands::models::run(&cmd),
         Commands::Project(a) => commands::project::run(&a),
         Commands::Trust { cmd } => commands::trust::run(&cmd),
+        Commands::Migrate(args) => commands::migrate::run(&args),
+        Commands::Doctor(args) => commands::doctor::run(&args),
+        Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
 }
 

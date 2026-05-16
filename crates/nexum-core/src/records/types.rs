@@ -767,17 +767,25 @@ pub struct UnifiedRecord {
     pub content_hash: ContentHash,
 }
 
+/// Build the embedding input from raw title / summary / body strings.
+/// Used by both `UnifiedRecord::embed_input` and the SQL-driven `--reembed`
+/// path that loads only the three columns it needs — both routes call this
+/// helper so the index-time and re-embed-time formats stay byte-identical.
+#[must_use]
+pub fn embed_input_for(title: &str, summary: &str, body: &str) -> String {
+    format!("{title}\n{summary}\n{body}")
+}
+
 impl UnifiedRecord {
     /// Embedding input is title + newline + summary (empty if absent) +
-    /// newline + body. Any re-embed path must call this to stay
-    /// consistent with index-time embeddings.
+    /// newline + body. Any re-embed path must call this (or
+    /// [`embed_input_for`]) to stay consistent with index-time embeddings.
     #[must_use]
     pub fn embed_input(&self) -> String {
-        format!(
-            "{}\n{}\n{}",
-            self.title,
+        embed_input_for(
+            &self.title,
             self.summary.as_deref().unwrap_or(""),
-            self.body
+            &self.body,
         )
     }
 }
