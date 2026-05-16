@@ -241,22 +241,17 @@ fn recent_emits_invalid_filter_envelope_for_unknown_source() {
 fn search_emits_store_integrity_envelope_on_corrupt_index() {
     // Truncate `index.db` to a few non-magic bytes so any SQL issued
     // through the connection fails with "file is not a database". The
-    // first SQL the read pipeline issues is a `count(*)` from `meta`
-    // inside `events_view::ensure_current`, so the rusqlite error is
-    // wrapped as `TrustError::Sqlite` and routes through
-    // `trust_envelope` to a `STORE_INTEGRITY` envelope with
-    // `context.kind = "trust"` / `subkind = "sqlite"`. The wire shape
-    // (error_code + exit code) is identical to the `kind = "rusqlite"`
-    // arm covered by the unit tests in `error.rs`; this test asserts
-    // the e2e path through the read pipeline.
+    // read-open helper now reads `PRAGMA user_version` before handing
+    // the connection to the query layer, so the rusqlite error surfaces
+    // there and routes through `query_envelope` as `context.kind =
+    // "rusqlite"`. The `error_code` and exit code are unchanged.
     let home = TestHome::initialized_with_corrupt_index_db();
     let out = home.run(&["search", "anything", "--json"]);
     let env: Value =
         serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
     assert_eq!(env["error_code"], "STORE_INTEGRITY");
     assert_eq!(out.status.code().unwrap_or(-1), 4);
-    assert_eq!(env["context"]["kind"], "trust");
-    assert_eq!(env["context"]["subkind"], "sqlite");
+    assert_eq!(env["context"]["kind"], "rusqlite");
     assert!(env["context"]["message"].as_str().is_some());
 }
 

@@ -25,11 +25,23 @@ pub enum ApiError {
     #[error(transparent)]
     Indexer(#[from] crate::indexer::IndexerError),
     #[error(transparent)]
-    Query(#[from] crate::query::QueryError),
+    Query(crate::query::QueryError),
     #[error("config error: {0}")]
     Config(#[from] crate::config::ConfigError),
     #[error("index schema v{v_disk} is older than this binary (v{v_code}); run `nexum migrate`")]
     MigrationRequired { v_disk: u32, v_code: u32 },
+}
+
+impl From<crate::query::QueryError> for ApiError {
+    fn from(err: crate::query::QueryError) -> Self {
+        match err {
+            crate::query::QueryError::MigrationRequired { v_disk } => ApiError::MigrationRequired {
+                v_disk,
+                v_code: crate::index::schema::INDEX_DB_LATEST_VERSION,
+            },
+            other => ApiError::Query(other),
+        }
+    }
 }
 
 // Trust-events materializer errors raised by the facade-level

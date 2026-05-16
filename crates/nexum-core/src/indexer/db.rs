@@ -83,6 +83,10 @@ fn open_existing_with_flags(
     register_sqlite_vec_once();
     let conn = Connection::open_with_flags(path, flags)?;
     conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
+    let v_disk = crate::index::schema::read_user_version(&conn)?;
+    if v_disk < crate::index::schema::INDEX_DB_LATEST_VERSION {
+        return Err(crate::query::QueryError::MigrationRequired { v_disk });
+    }
     Ok(conn)
 }
 
