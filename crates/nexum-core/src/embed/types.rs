@@ -59,6 +59,61 @@ pub enum EmbedError {
 }
 
 impl EmbedError {
+    /// Build an `OrtInit` from any concrete error, capturing it as the
+    /// `#[source]` chain and reusing its `Display` as the human message.
+    pub(crate) fn ort_init<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::OrtInit {
+            message: err.to_string(),
+            source: Box::new(err),
+        }
+    }
+
+    /// Build an `OrtRun` from any concrete error. Same shape as
+    /// [`Self::ort_init`].
+    pub(crate) fn ort_run<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::OrtRun {
+            message: err.to_string(),
+            source: Box::new(err),
+        }
+    }
+
+    /// Build a `Tokenize` from a free-form message. Tokenizer errors arrive
+    /// as a `Box<dyn Error + Send + Sync>` alias that won't sit behind a
+    /// generic `E: Error` bound, and mutex-poison / shape-mismatch sites
+    /// don't have a concrete source error either; the message is duplicated
+    /// into the source chain so the wire shape stays consistent with the
+    /// typed constructors above.
+    pub(crate) fn tokenize_from_message(message: String) -> Self {
+        Self::Tokenize {
+            source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+            message,
+        }
+    }
+
+    /// Build an `OrtRun` from a free-form message. See
+    /// [`Self::tokenize_from_message`] for the rationale.
+    pub(crate) fn ort_run_from_message(message: String) -> Self {
+        Self::OrtRun {
+            source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+            message,
+        }
+    }
+
+    /// Build an `OrtInit` from a free-form message. See
+    /// [`Self::tokenize_from_message`] for the rationale.
+    pub(crate) fn ort_init_from_message(message: String) -> Self {
+        Self::OrtInit {
+            source: Box::<dyn std::error::Error + Send + Sync>::from(message.clone()),
+            message,
+        }
+    }
+
     /// Stable per-variant exit code for the model install command. Agents
     /// orchestrating the install branch on these to decide retry policy
     /// without parsing stderr (e.g. checksum mismatch -> retry, ORT init

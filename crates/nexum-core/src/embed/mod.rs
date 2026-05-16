@@ -135,18 +135,11 @@ impl EmbedErrorKind {
             // (the message string survives the round-trip) without adding a
             // new EmbedError variant for a path that is unreachable from
             // `try_load_from_config` today.
-            Self::Tokenize(msg) | Self::Other(msg) => EmbedError::Tokenize {
-                source: Box::<dyn std::error::Error + Send + Sync>::from(msg.clone()),
-                message: msg.clone(),
-            },
-            Self::OrtInit(msg) => EmbedError::OrtInit {
-                source: Box::<dyn std::error::Error + Send + Sync>::from(msg.clone()),
-                message: msg.clone(),
-            },
-            Self::OrtRun(msg) => EmbedError::OrtRun {
-                source: Box::<dyn std::error::Error + Send + Sync>::from(msg.clone()),
-                message: msg.clone(),
-            },
+            Self::Tokenize(msg) | Self::Other(msg) => {
+                EmbedError::tokenize_from_message(msg.clone())
+            }
+            Self::OrtInit(msg) => EmbedError::ort_init_from_message(msg.clone()),
+            Self::OrtRun(msg) => EmbedError::ort_run_from_message(msg.clone()),
         }
     }
 }
