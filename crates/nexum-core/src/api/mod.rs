@@ -7,9 +7,12 @@ pub mod error;
 use crate::{
     config::types::Config,
     indexer::{
-        IndexerOutcome,
+        IndexerOpts, IndexerOutcome,
         db::{IndexerError, open_existing, open_existing_writable, open_or_create},
-        run::{run as indexer_run, run_force as indexer_run_force},
+        run::{
+            run as indexer_run, run_force as indexer_run_force,
+            run_with_opts as indexer_run_with_opts,
+        },
     },
     paths::Paths,
     query::{
@@ -118,6 +121,33 @@ pub fn index_run(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, ApiError
 pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, ApiError> {
     let mut conn = open_or_create(&paths.index_db)?;
     Ok(indexer_run_force(&mut conn, cfg, paths)?)
+}
+
+/// Run a forced Authoritative pass with the stale-row sweep semantics.
+///
+/// When `aggressive` is `true`, the threshold check fires immediately on the
+/// first miss instead of waiting for `STALE_THRESHOLD` (3) consecutive
+/// misses. This is the backing verb for `nexum index --sweep [--aggressive]`.
+///
+/// Acquires `~/.nexum/.lock` via the same mechanism as the other admin verbs
+/// (`index_reembed`, `migrate_index_db`, `trust_regenerate_files`,
+/// `keys_rotate`).
+///
+/// # Errors
+///
+/// Returns `ApiError::Indexer` on any indexer failure.
+pub fn index_sweep(
+    paths: &Paths,
+    cfg: &Config,
+    aggressive: bool,
+) -> Result<IndexerOutcome, ApiError> {
+    with_writer_lock(paths, || {
+        let mut conn = open_or_create(&paths.index_db)?;
+        let opts = IndexerOpts {
+            threshold_override: aggressive.then_some(1),
+        };
+        Ok(indexer_run_with_opts(&mut conn, cfg, paths, opts)?)
+    })
 }
 
 /// Outcome of a `--reembed` pass.

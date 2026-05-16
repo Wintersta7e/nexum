@@ -27,6 +27,20 @@ pub struct IndexArgs {
     /// mid-run resumes from where it stopped.
     #[arg(long, default_value_t = false, conflicts_with_all = ["force", "check"])]
     pub reembed: bool,
+    /// Run a stale-row sweep pass. Executes a forced Authoritative pass so
+    /// the `STALE_THRESHOLD` deferred-delete loop can fire over the full
+    /// corpus. Mutually exclusive with --force, --check, and --reembed.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["force", "check", "reembed"]
+    )]
+    pub sweep: bool,
+    /// Lower the sweep threshold to 1 so the current pass's gone set is
+    /// deleted immediately (one Authoritative pass is enough). Requires
+    /// --sweep.
+    #[arg(long, default_value_t = false, requires = "sweep")]
+    pub aggressive: bool,
     /// Print the per-source summary as JSON.
     #[arg(long, default_value_t = false)]
     pub json: bool,
@@ -34,6 +48,9 @@ pub struct IndexArgs {
 
 /// Run `nexum index`.
 pub fn run(args: &IndexArgs) -> ExitCode {
+    if args.sweep {
+        return run_sweep(args.json, args.aggressive);
+    }
     if args.reembed {
         return run_reembed(args.json);
     }
@@ -117,6 +134,40 @@ fn run_reembed(emit_json: bool) -> ExitCode {
                 println!(
                     "re-embedded {} records; {} failed (see warn logs)",
                     outcome.embedded, outcome.failed,
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => super::json_emit::route_api_error(&e, emit_json),
+    }
+}
+
+/// Run `nexum index --sweep [--aggressive]`.
+///
+/// Executes one forced Authoritative pass under the writer lock. When
+/// `aggressive` is true, the stale-row threshold is lowered to 1 so every
+/// gone record is deleted on this pass rather than waiting for 3 consecutive
+/// misses.
+fn run_sweep(emit_json: bool, aggressive: bool) -> ExitCode {
+    let (paths, cfg) = match super::common::resolve_runtime(emit_json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match api::index_sweep(&paths, &cfg, aggressive) {
+        Ok(outcome) => {
+            if emit_json {
+                let env = serde_json::json!({
+                    "ok": true,
+                    "kind": "index.sweep.completed",
+                    "deletes": outcome.deletes,
+                    "deferred_deletes": outcome.deferred_deletes,
+                    "aggressive": aggressive,
+                });
+                println!("{env:#}");
+            } else {
+                println!(
+                    "sweep complete: deleted={}, deferred={}",
+                    outcome.deletes, outcome.deferred_deletes,
                 );
             }
             ExitCode::SUCCESS

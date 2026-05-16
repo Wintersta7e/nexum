@@ -112,6 +112,20 @@ pub struct IndexerOutcome {
     pub per_source: Vec<PerSourceOutcome>,
 }
 
+/// Options threaded through an indexer pass.
+///
+/// Callers that need only the default behaviour construct with
+/// `IndexerOpts::default()`, which preserves the existing semantics
+/// exactly (`threshold_override: None` → use `STALE_THRESHOLD`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IndexerOpts {
+    /// Override the stale-row miss threshold for this pass only. `None`
+    /// means use `STALE_THRESHOLD` (3). `Some(1)` makes every gone row
+    /// eligible for deletion on the current pass — the `--aggressive` sweep
+    /// mode.
+    pub threshold_override: Option<u32>,
+}
+
 /// Run a reindex pass over all enabled adapters.
 ///
 /// Ensures the `index_state` table exists, then for each adapter (`cc`,
@@ -129,8 +143,7 @@ pub fn run(
     cfg: &Config,
     paths: &Paths,
 ) -> Result<IndexerOutcome, IndexerError> {
-    apply_index_state_ddl(conn)?;
-    run_inner(conn, cfg, paths, false)
+    run_with_opts(conn, cfg, paths, IndexerOpts::default())
 }
 
 /// Force form — bypasses the staleness gate so deletes apply on the current
@@ -146,8 +159,37 @@ pub fn run_force(
     cfg: &Config,
     paths: &Paths,
 ) -> Result<IndexerOutcome, IndexerError> {
+    run_with_opts_force(conn, cfg, paths, IndexerOpts::default())
+}
+
+/// Full-control entry point. Accepts both the `force` flag and
+/// `IndexerOpts`. External callers (e.g. `api::index_sweep`) use this
+/// directly; `run` and `run_force` are thin shims over it.
+///
+/// # Errors
+/// Returns `IndexerError::Rusqlite` on SQL failure or
+/// `IndexerError::Adapter` when an adapter fatals.
+pub fn run_with_opts(
+    conn: &mut Connection,
+    cfg: &Config,
+    paths: &Paths,
+    opts: IndexerOpts,
+) -> Result<IndexerOutcome, IndexerError> {
     apply_index_state_ddl(conn)?;
-    run_inner(conn, cfg, paths, true)
+    run_inner(conn, cfg, paths, false, opts)
+}
+
+/// `run_force` variant that also accepts `IndexerOpts`. Not currently
+/// exposed as a public API verb — kept private so the force + opts
+/// combination stays internal until there is a real caller.
+fn run_with_opts_force(
+    conn: &mut Connection,
+    cfg: &Config,
+    paths: &Paths,
+    opts: IndexerOpts,
+) -> Result<IndexerOutcome, IndexerError> {
+    apply_index_state_ddl(conn)?;
+    run_inner(conn, cfg, paths, true, opts)
 }
 
 fn run_inner(
@@ -155,6 +197,7 @@ fn run_inner(
     cfg: &Config,
     paths: &Paths,
     force: bool,
+    opts: IndexerOpts,
 ) -> Result<IndexerOutcome, IndexerError> {
     let mut outcome = IndexerOutcome::default();
 
@@ -188,6 +231,7 @@ fn run_inner(
             &pass,
             |id| build_cc_adapter(&cfg_for_read).read(id).ok(),
             force,
+            opts,
             embedder.as_ref(),
             &mut outcome,
         )?;
@@ -200,6 +244,7 @@ fn run_inner(
             &pass,
             |id| build_codex_adapter(&cfg_for_read).read(id).ok(),
             force,
+            opts,
             embedder.as_ref(),
             &mut outcome,
         )?;
@@ -271,6 +316,7 @@ fn run_inner(
                 Some(record)
             },
             force,
+            opts,
             embedder.as_ref(),
             &mut outcome,
         )?;
@@ -303,12 +349,14 @@ fn build_codex_adapter(cfg: &Config) -> CodexAdapter {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_pass<F>(
     conn: &mut Connection,
     source: Source,
     pass: &AdapterPass,
     read_full: F,
     force: bool,
+    opts: IndexerOpts,
     embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
 ) -> Result<(), IndexerError>
@@ -386,6 +434,7 @@ where
         pass,
         &read_full,
         force,
+        opts,
         embedder,
         outcome,
         &mut per_source,
@@ -420,6 +469,7 @@ fn apply_pass_inside_tx<F>(
     pass: &AdapterPass,
     read_full: &F,
     force: bool,
+    opts: IndexerOpts,
     embedder: Option<&Embedder>,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
@@ -474,6 +524,7 @@ where
         &pass.completeness,
         &gone,
         force,
+        opts,
         outcome,
         per_source,
     )
@@ -603,12 +654,14 @@ where
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_deletes(
     tx: &Transaction<'_>,
     source: Source,
     completeness: &PassCompleteness,
     gone: &[(String, String)],
     force: bool,
+    opts: IndexerOpts,
     outcome: &mut IndexerOutcome,
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError> {
@@ -622,13 +675,14 @@ fn apply_deletes(
     }
     match completeness {
         PassCompleteness::Authoritative => {
+            let threshold = opts.threshold_override.unwrap_or(STALE_THRESHOLD);
             for (project_id, id) in gone {
                 // `index_state` is keyed by (source, id) only; cross-project
                 // same-id collisions in miss-tracking are deferred to a
                 // follow-up. The composite delete still scopes correctly
                 // because hard_delete uses (source, project_id, id).
                 let counter = bump_miss(tx, source, id)?;
-                if counter >= STALE_THRESHOLD {
+                if counter >= threshold {
                     hard_delete(tx, source, project_id, id)?;
                     per_source.deletes += 1;
                     outcome.deletes += 1;
