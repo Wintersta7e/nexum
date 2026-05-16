@@ -106,12 +106,12 @@ async fn download_async(
 
     let mut downloaded: u64 = 0;
     for entry in manifest {
-        let url = format!("{base}/{}", entry.name);
-        let dest = bge_dir.join(entry.name);
+        let url = format!("{base}/{}", entry.name());
+        let dest = bge_dir.join(entry.name());
         reporter.progress(&format!(
             "downloading {} ({})…",
-            entry.name,
-            fmt_size(entry.size)
+            entry.name(),
+            fmt_size(entry.size())
         ));
         let bytes = download_one(&client, &url, &dest, entry, reporter).await?;
         downloaded += bytes;
@@ -135,14 +135,14 @@ async fn download_one(
         .send()
         .await
         .map_err(|e| EmbedError::Download {
-            file: entry.name.to_owned(),
+            file: entry.name().to_owned(),
             source: e,
         })?;
     let resp = resp.error_for_status().map_err(|e| EmbedError::Download {
-        file: entry.name.to_owned(),
+        file: entry.name().to_owned(),
         source: e,
     })?;
-    let total: u64 = resp.content_length().unwrap_or(entry.size);
+    let total: u64 = resp.content_length().unwrap_or(entry.size());
 
     // Stream to a `.part` sibling, then rename atomically once `flush`
     // succeeds. A crash mid-stream leaves the `.part` file behind; the
@@ -165,7 +165,7 @@ async fn download_one(
     let mut last_reported: u64 = 0;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| EmbedError::Download {
-            file: entry.name.to_owned(),
+            file: entry.name().to_owned(),
             source: e,
         })?;
         file.write_all(&chunk).await.map_err(|e| EmbedError::Io {
@@ -313,21 +313,21 @@ fn verify_manifest(
 ) -> Result<(), EmbedError> {
     let bge_dir = models_dir.join("bge-m3");
     for entry in manifest {
-        let path = bge_dir.join(entry.name);
-        reporter.progress(&format!("verifying {}…", entry.name));
+        let path = bge_dir.join(entry.name());
+        reporter.progress(&format!("verifying {}…", entry.name()));
 
         let first = sha256_hex_of_file(&path).map_err(|e| EmbedError::Io {
             path: path.clone(),
             source: e,
         })?;
-        if first == entry.sha256 {
+        if first == entry.sha256() {
             continue;
         }
 
         // First-try mismatch. Delete + re-download once + re-hash.
         reporter.progress(&format!(
             "{}: hash mismatch on first download; retrying once…",
-            entry.name
+            entry.name()
         ));
         let _ = std::fs::remove_file(&path);
         redownload(entry, &path)?;
@@ -335,15 +335,15 @@ fn verify_manifest(
             path: path.clone(),
             source: e,
         })?;
-        if second == entry.sha256 {
+        if second == entry.sha256() {
             continue;
         }
 
         // Second mismatch — give up.
         let _ = std::fs::remove_file(&path);
         return Err(EmbedError::ChecksumMismatch {
-            file: entry.name.to_owned(),
-            expected: entry.sha256.to_owned(),
+            file: entry.name().to_owned(),
+            expected: entry.sha256().to_owned(),
             actual: second,
         });
     }
@@ -361,11 +361,11 @@ fn default_redownload(
     move |entry: &ManifestEntry, dest: &Path| -> Result<(), EmbedError> {
         let runtime = build_blocking_runtime(dest)?;
         runtime.block_on(async move {
-            let url = format!("{}/{}", model_base_url.trim_end_matches('/'), entry.name);
+            let url = format!("{}/{}", model_base_url.trim_end_matches('/'), entry.name());
             let client = reqwest::Client::builder()
                 .build()
                 .map_err(|e| EmbedError::Download {
-                    file: entry.name.to_owned(),
+                    file: entry.name().to_owned(),
                     source: e,
                 })?;
             let mut reporter = NullReporter;

@@ -1,7 +1,7 @@
 //! `nexum models install bge-m3` — download + verify + smoke the bge-m3
 //! ONNX export, then flip `[embed].enabled = true` in config.toml.
 
-use std::io::{Write, stderr};
+use std::io::{stderr, Write};
 use std::process::ExitCode;
 
 use clap::Subcommand;
@@ -226,16 +226,16 @@ fn test_manifest_from_env() -> Option<TestFixture> {
         let name = v.get("name")?.as_str()?.to_owned();
         let size = v.get("size")?.as_u64()?;
         let sha256 = v.get("sha256")?.as_str()?.to_owned();
-        entries.push(ManifestEntry {
+        entries.push(ManifestEntry::new(
             // The install pipeline reads `name` and `sha256` as `&'static
             // str` — for the test path we leak the owned strings so the
             // `ManifestEntry` borrow remains satisfied for the lifetime of
             // the process. Acceptable in a one-shot CLI invocation gated
             // behind a test env var.
-            name: Box::leak(name.into_boxed_str()),
+            Box::leak(name.into_boxed_str()),
             size,
-            sha256: Box::leak(sha256.into_boxed_str()),
-        });
+            Box::leak(sha256.into_boxed_str()),
+        ));
     }
     Some(TestFixture { entries })
 }

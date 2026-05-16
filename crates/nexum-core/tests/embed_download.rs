@@ -127,26 +127,26 @@ impl nexum_core::embed::reporter::Reporter for TestReporter {
 /// `tests/fixtures/embed_install/`. Hashes are the `sha256sum` of each
 /// fixture's bytes.
 const TEST_MANIFEST: &[nexum_core::embed::ManifestEntry; 4] = &[
-    nexum_core::embed::ManifestEntry {
-        name: "model.onnx",
-        size: 5,
-        sha256: "f6aac9d445ab169b1fd359463aaaed95faee7808a97d9f840f63273314397708",
-    },
-    nexum_core::embed::ManifestEntry {
-        name: "model.onnx_data",
-        size: 8,
-        sha256: "44df6bfb223b6a881a58274f56bbbbe35909725f3fc09f6896f0c9154857e134",
-    },
-    nexum_core::embed::ManifestEntry {
-        name: "Constant_7_attr__value",
-        size: 5,
-        sha256: "3b5d28caea5749e89cc6dd0d73f0a622abeca96772b8680a47b4604ee0f93383",
-    },
-    nexum_core::embed::ManifestEntry {
-        name: "tokenizer.json",
-        size: 9,
-        sha256: "b8513f1a0c28d8dd9b3b175bee09eabca97c4819614ec9a2df7442a5b4eff8d7",
-    },
+    nexum_core::embed::ManifestEntry::new(
+        "model.onnx",
+        5,
+        "f6aac9d445ab169b1fd359463aaaed95faee7808a97d9f840f63273314397708",
+    ),
+    nexum_core::embed::ManifestEntry::new(
+        "model.onnx_data",
+        8,
+        "44df6bfb223b6a881a58274f56bbbbe35909725f3fc09f6896f0c9154857e134",
+    ),
+    nexum_core::embed::ManifestEntry::new(
+        "Constant_7_attr__value",
+        5,
+        "3b5d28caea5749e89cc6dd0d73f0a622abeca96772b8680a47b4604ee0f93383",
+    ),
+    nexum_core::embed::ManifestEntry::new(
+        "tokenizer.json",
+        9,
+        "b8513f1a0c28d8dd9b3b175bee09eabca97c4819614ec9a2df7442a5b4eff8d7",
+    ),
 ];
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
@@ -168,7 +168,7 @@ fn tampered_file_is_detected_after_retry() {
     let bge_dir = temp.path().join("bge-m3");
     std::fs::create_dir_all(&bge_dir).unwrap();
     for entry in TEST_MANIFEST {
-        std::fs::write(bge_dir.join(entry.name), fixture_bytes(entry.name)).unwrap();
+        std::fs::write(bge_dir.join(entry.name()), fixture_bytes(entry.name())).unwrap();
     }
     let tampered = bge_dir.join("Constant_7_attr__value");
     let mut bad = fixture_bytes("Constant_7_attr__value");
@@ -222,7 +222,7 @@ fn retry_writes_good_bytes_lets_verifier_proceed() {
     let bge_dir = temp.path().join("bge-m3");
     std::fs::create_dir_all(&bge_dir).unwrap();
     for entry in TEST_MANIFEST {
-        std::fs::write(bge_dir.join(entry.name), fixture_bytes(entry.name)).unwrap();
+        std::fs::write(bge_dir.join(entry.name()), fixture_bytes(entry.name())).unwrap();
     }
     let tampered = bge_dir.join("Constant_7_attr__value");
     let mut bad = fixture_bytes("Constant_7_attr__value");
@@ -237,7 +237,7 @@ fn retry_writes_good_bytes_lets_verifier_proceed() {
     let redownload = |entry: &nexum_core::embed::ManifestEntry,
                       dest: &std::path::Path|
      -> Result<(), nexum_core::embed::EmbedError> {
-        std::fs::write(dest, fixture_bytes(entry.name)).map_err(|e| {
+        std::fs::write(dest, fixture_bytes(entry.name())).map_err(|e| {
             nexum_core::embed::EmbedError::Io {
                 path: dest.to_owned(),
                 source: e,
@@ -277,7 +277,7 @@ fn clean_install_verifies_and_smokes() {
     let bge_dir = temp.path().join("bge-m3");
     std::fs::create_dir_all(&bge_dir).unwrap();
     for entry in nexum_core::embed::BGE_M3_FILES {
-        std::fs::copy(real_dir.join(entry.name), bge_dir.join(entry.name)).unwrap();
+        std::fs::copy(real_dir.join(entry.name()), bge_dir.join(entry.name())).unwrap();
     }
 
     let mut reporter = NullReporter;
