@@ -27,9 +27,10 @@ pub struct IndexArgs {
     /// mid-run resumes from where it stopped.
     #[arg(long, default_value_t = false, conflicts_with_all = ["force", "check"])]
     pub reembed: bool,
-    /// Run a stale-row sweep pass. Executes a forced Authoritative pass so
-    /// the `STALE_THRESHOLD` deferred-delete loop can fire over the full
-    /// corpus. Mutually exclusive with --force, --check, and --reembed.
+    /// Run a stale-row sweep pass over all enabled sources. Functions like
+    /// an Authoritative pass so the `STALE_THRESHOLD` deferred-delete loop
+    /// can fire; pair with `--aggressive` to lower the threshold to 1 for
+    /// this pass. Mutually exclusive with --force, --check, and --reembed.
     #[arg(
         long,
         default_value_t = false,
@@ -144,10 +145,11 @@ fn run_reembed(emit_json: bool) -> ExitCode {
 
 /// Run `nexum index --sweep [--aggressive]`.
 ///
-/// Executes one forced Authoritative pass under the writer lock. When
-/// `aggressive` is true, the stale-row threshold is lowered to 1 so every
-/// gone record is deleted on this pass rather than waiting for 3 consecutive
-/// misses.
+/// Executes one indexer pass under the writer lock with the stale-row
+/// threshold optionally overridden. When `aggressive` is true the threshold
+/// drops to 1 so every gone record is deleted on this pass; otherwise the
+/// default `STALE_THRESHOLD` (3) applies and the gone set defers until 3
+/// consecutive misses confirm the deletion.
 fn run_sweep(emit_json: bool, aggressive: bool) -> ExitCode {
     let (paths, cfg) = match super::common::resolve_runtime(emit_json) {
         Ok(rt) => rt,

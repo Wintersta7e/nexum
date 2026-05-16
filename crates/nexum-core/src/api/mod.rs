@@ -123,11 +123,14 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
     Ok(indexer_run_force(&mut conn, cfg, paths)?)
 }
 
-/// Run a forced Authoritative pass with the stale-row sweep semantics.
+/// Run an indexer pass with the stale-row sweep threshold optionally lowered.
 ///
-/// When `aggressive` is `true`, the threshold check fires immediately on the
-/// first miss instead of waiting for `STALE_THRESHOLD` (3) consecutive
-/// misses. This is the backing verb for `nexum index --sweep [--aggressive]`.
+/// The mechanism is the regular pass plus a `threshold_override` threaded
+/// through `apply_deletes`; nothing about the pass itself is "forced". When
+/// `aggressive` is `true`, the threshold drops to 1 so the check fires
+/// immediately on the first miss instead of waiting for `STALE_THRESHOLD`
+/// (3) consecutive misses. Backing verb for `nexum index --sweep
+/// [--aggressive]`.
 ///
 /// Acquires `~/.nexum/.lock` via the same mechanism as the other admin verbs
 /// (`index_reembed`, `migrate_index_db`, `trust_regenerate_files`,

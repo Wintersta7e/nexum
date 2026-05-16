@@ -337,6 +337,9 @@ fn build_codex_adapter(cfg: &Config) -> CodexAdapter {
     )
 }
 
+// 8 args after the IndexerOpts thread-through; an args-struct would add
+// an indirection layer at every call site without simplifying any of the
+// inner logic.
 #[allow(clippy::too_many_arguments)]
 fn apply_pass<F>(
     conn: &mut Connection,
@@ -642,6 +645,9 @@ where
     Ok(())
 }
 
+// 8 args after the IndexerOpts thread-through; mirrors apply_pass's shape
+// and stays a single-purpose helper rather than a pack-and-unpack args
+// struct.
 #[allow(clippy::too_many_arguments)]
 fn apply_deletes(
     tx: &Transaction<'_>,
