@@ -783,8 +783,9 @@ pub(crate) fn insert_embedding(
 ///
 /// Iterates by `rowid` in 50-row batches and persists the resume cursor to
 /// `index.db.meta` per batch so a killed run picks up where it left off.
-/// Embedder failures on a single row are logged at `warn` and skipped; the row
-/// keeps its existing embedding (or none).
+/// Embedder failures on a single row are logged at `warn`, counted in the
+/// returned outcome's `failed` field, and skipped; the row keeps its existing
+/// embedding (or none).
 ///
 /// # Errors
 ///
@@ -801,7 +802,7 @@ pub fn run_reembed_existing(
     const BATCH: i64 = 50;
     const RESUME_KEY: &str = "reembed_resume_rowid";
 
-    let embedder = build_embedder_for_pass(cfg)?.ok_or_else(|| {
+    let model = build_embedder_for_pass(cfg)?.ok_or_else(|| {
         IndexerError::Config(
             "embedder unavailable: model not installed or config invalid".to_owned(),
         )
@@ -812,7 +813,8 @@ pub fn run_reembed_existing(
         .flatten()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
-    let mut count: u64 = 0;
+    let mut embedded: u64 = 0;
+    let mut failed: u64 = 0;
 
     loop {
         let tx = conn.transaction()?;
@@ -833,18 +835,19 @@ pub fn run_reembed_existing(
         let last_rowid_in_batch = last.0;
 
         for (rowid, title, summary, body) in &rows {
-            let text = format!("{title}\n{summary}\n{body}");
-            match embedder.embed(&text) {
+            let text = crate::records::types::embed_input_for(title, summary, body);
+            match model.embed(&text) {
                 Ok(vec) => {
                     tx.execute(
                         "DELETE FROM record_embeddings WHERE record_rowid = ?1",
                         params![rowid],
                     )?;
                     insert_embedding(&tx, *rowid, &vec)?;
-                    count += 1;
+                    embedded += 1;
                 }
                 Err(e) => {
                     tracing::warn!(rowid = *rowid, error = %e, "reembed: embedding failed; skipping");
+                    failed += 1;
                 }
             }
         }
@@ -856,7 +859,8 @@ pub fn run_reembed_existing(
     write_str(conn, RESUME_KEY, "")?;
 
     Ok(crate::api::ReembedOutcome {
-        embedded: count,
+        embedded,
+        failed,
         skipped_current: 0,
         resume_rowid: None,
     })

@@ -108,10 +108,16 @@ fn run_reembed(emit_json: bool) -> ExitCode {
                     "ok": true,
                     "kind": "index.reembed.completed",
                     "embedded": outcome.embedded,
+                    "failed": outcome.failed,
                 });
                 println!("{env:#}");
-            } else {
+            } else if outcome.failed == 0 {
                 println!("re-embedded {} records", outcome.embedded);
+            } else {
+                println!(
+                    "re-embedded {} records; {} failed (see warn logs)",
+                    outcome.embedded, outcome.failed,
+                );
             }
             ExitCode::SUCCESS
         }

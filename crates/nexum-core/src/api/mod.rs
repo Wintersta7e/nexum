@@ -68,6 +68,9 @@ pub fn index_run_force(paths: &Paths, cfg: &Config) -> Result<IndexerOutcome, Ap
 pub struct ReembedOutcome {
     /// Number of records that received a new embedding vector.
     pub embedded: u64,
+    /// Number of records whose embedder call failed and were left
+    /// unchanged (still logged at `warn` for the operator).
+    pub failed: u64,
     /// Records already current (hash-stable skip — not yet implemented;
     /// placeholder always returns 0).
     pub skipped_current: u64,
@@ -78,8 +81,12 @@ pub struct ReembedOutcome {
 /// Re-embed every record already in the index against the configured
 /// embedder. Refuses if `cfg.embed.enabled = false`.
 ///
-/// Acquires the writer lock so a concurrent `nexum index` pass cannot race
-/// the resume cursor. The lock is released on every return path.
+/// Acquires the writer lock so two concurrent `--reembed` invocations
+/// cannot race the resume cursor. (The default `index_run` / `index_run_force`
+/// paths do not take the writer lock today, so a long-running `--reembed`
+/// against an actively-indexed store can still trail the head; the lock
+/// here only protects against duplicate reembed jobs.) Released on every
+/// return path.
 ///
 /// # Errors
 ///
