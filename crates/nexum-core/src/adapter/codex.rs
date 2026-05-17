@@ -96,7 +96,12 @@ impl CodexAdapter {
         ThreadIndexResult::Ok(by_rollout)
     }
 
-    fn collect_memory_md(&self, records: &mut Vec<RecordSummary>, skipped: &mut Vec<SkipReason>) {
+    fn collect_memory_md(
+        &self,
+        records: &mut Vec<RecordSummary>,
+        skipped: &mut Vec<SkipReason>,
+        thread_index: &HashMap<String, ThreadRow>,
+    ) {
         let memory_md = self.memories_dir.join("MEMORY.md");
         if !memory_md.exists() {
             return;
@@ -104,7 +109,7 @@ impl CodexAdapter {
         match read_stable(&memory_md) {
             Ok(raw) => {
                 let parsed = parse_memory_md(&raw);
-                push_record_summaries(&parsed.records, "", records);
+                push_record_summaries(&parsed.records, "", records, thread_index);
                 if parsed.malformed_count > 0 {
                     skipped.push(SkipReason {
                         path: memory_md,
@@ -162,6 +167,7 @@ impl CodexAdapter {
         &self,
         records: &mut Vec<RecordSummary>,
         skipped: &mut Vec<SkipReason>,
+        thread_index: &HashMap<String, ThreadRow>,
     ) {
         if !self.read_raw_memories {
             return;
@@ -173,7 +179,7 @@ impl CodexAdapter {
         match read_stable(&raw_path) {
             Ok(raw) => {
                 let parsed = parse_memory_md(&raw);
-                push_record_summaries(&parsed.records, "raw_", records);
+                push_record_summaries(&parsed.records, "raw_", records, thread_index);
                 if parsed.malformed_count > 0 {
                     skipped.push(SkipReason {
                         path: raw_path,
@@ -250,14 +256,25 @@ impl Adapter for CodexAdapter {
         let mut records: Vec<RecordSummary> = Vec::new();
         let mut skipped: Vec<SkipReason> = Vec::new();
 
-        self.collect_memory_md(&mut records, &mut skipped);
+        // Read the thread index BEFORE collecting per-file summaries.
+        // `push_record_summaries` needs it to compute the same content
+        // hash that `build_record` computes at read time — otherwise the
+        // indexer's unchanged-record fast path never hits for Codex
+        // MEMORY.md records and every pass re-embeds them.
+        let thread_status = self.read_thread_index();
+        let thread_index: HashMap<String, ThreadRow> = match &thread_status {
+            ThreadIndexResult::Ok(idx) => idx.clone(),
+            _ => HashMap::new(),
+        };
+
+        self.collect_memory_md(&mut records, &mut skipped, &thread_index);
         self.collect_rollout_summaries(&mut records, &mut skipped);
-        self.collect_raw_memories(&mut records, &mut skipped);
+        self.collect_raw_memories(&mut records, &mut skipped, &thread_index);
 
         // Track state_db status. Don't fail the whole pass; surface as a
         // Partial-pass entry so the indexer suppresses delete computation
         // for this source.
-        match self.read_thread_index() {
+        match thread_status {
             ThreadIndexResult::Locked => {
                 skipped.push(SkipReason {
                     path: self.state_db_path.clone(),
@@ -495,9 +512,16 @@ fn push_record_summaries(
     parsed: &[ParsedSection],
     id_prefix: &str,
     records: &mut Vec<RecordSummary>,
+    thread_index: &HashMap<String, ThreadRow>,
 ) {
     for s in parsed {
-        let hash = content_hash(&s.title, None, &s.body);
+        // The hash MUST match what `build_record` later computes for the
+        // same record at read time — otherwise the indexer's
+        // unchanged-record fast path never fires and every pass re-reads
+        // and re-embeds the section. `build_record` includes the chosen
+        // thread title as the summary when present; mirror that here.
+        let summary = section_thread_summary(s, thread_index);
+        let hash = content_hash(&s.title, summary.as_deref(), &s.body);
         let id = if id_prefix.is_empty() {
             s.id.clone()
         } else {
@@ -508,6 +532,24 @@ fn push_record_summaries(
             content_hash: hash,
         });
     }
+}
+
+/// Derive the section's "summary" input for `content_hash` from the
+/// thread index — the title of the last matching thread row, normalized
+/// to `None` when the title is empty. Shared between `push_record_summaries`
+/// (list-time hashing) and `build_record` (read-time hashing) so the two
+/// hashes always agree.
+fn section_thread_summary(
+    sec: &ParsedSection,
+    thread_index: &HashMap<String, ThreadRow>,
+) -> Option<String> {
+    let mut chosen: Option<String> = None;
+    for rollout in &sec.rollout_summary_files {
+        if let Some(row) = thread_index.get(rollout) {
+            chosen = Some(row.title.clone());
+        }
+    }
+    chosen.filter(|t| !t.is_empty())
 }
 
 fn build_record(
@@ -543,9 +585,7 @@ fn build_record(
         .and_then(|t| Utc.timestamp_opt(t.created_at, 0).single())
         .unwrap_or(updated);
 
-    let summary: Option<String> = chosen_thread
-        .map(|t| t.title.clone())
-        .filter(|t| !t.is_empty());
+    let summary = section_thread_summary(&sec, thread_index);
     let hash = content_hash(&sec.title, summary.as_deref(), &sec.body);
 
     let mut extras: HashMap<String, serde_json::Value> = HashMap::new();
@@ -792,6 +832,32 @@ mod tests {
         }
         // Records still extracted; project_id falls through to "codex-no-state".
         assert_eq!(pass.records.len(), 1);
+    }
+
+    #[test]
+    fn list_time_content_hash_matches_read_time_for_thread_joined_section() {
+        // When MEMORY.md references a rollout that the state_5.sqlite
+        // thread index knows, build_record (read path) feeds the
+        // thread's title as the section's summary into content_hash.
+        // push_record_summaries (list path) must compute the same hash
+        // — otherwise the indexer's unchanged-record fast path never
+        // hits and every pass re-embeds the unchanged section.
+        let dir = TempDir::new().unwrap();
+        let memories = dir.path().join("memories");
+        write_file(
+            &memories.join("MEMORY.md"),
+            "## Task 1\nbody\n### rollout_summary_files\n\
+             - sessions/2026/04/01/rollout-2026-04-01T10-05-00-thread-aaa.jsonl\n",
+        );
+        let adapter = CodexAdapter::new(memories, fixture_state_db(), false);
+        let pass = adapter.list().expect("list ok");
+        assert_eq!(pass.records.len(), 1);
+        let list_hash = pass.records[0].content_hash.clone();
+        let record = adapter.read(&pass.records[0].id).expect("read ok");
+        assert_eq!(
+            list_hash, record.content_hash,
+            "list-time and read-time content hashes must agree (thread-joined section)"
+        );
     }
 
     #[test]
