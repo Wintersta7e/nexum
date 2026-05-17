@@ -111,7 +111,11 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
             ApiError::Config(e) => config_envelope(e),
             ApiError::Trust(e) => trust_envelope(e),
             ApiError::TrustRegenerateRefused { reason } => ErrorEnvelope {
-                error_code: error_codes::STORE_INTEGRITY,
+                // Refusals (merge in progress, dirty worktree, pending
+                // reanchor) are operator-fixable conditions — they belong
+                // in the USAGE bucket, not STORE_INTEGRITY which the spec
+                // reserves for actual store damage.
+                error_code: error_codes::USAGE,
                 message: format!("trust regenerate refused: {reason}"),
                 remediation: None,
                 context: serde_json::json!({

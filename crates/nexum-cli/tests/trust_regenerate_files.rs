@@ -63,7 +63,9 @@ fn regenerate_files_refuses_during_in_progress_merge() {
         String::from_utf8_lossy(&out.stderr)
     );
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
-    assert_eq!(payload["error_code"], "STORE_INTEGRITY");
+    // Operator-fixable refusal (commit/abort the merge first) → USAGE,
+    // not STORE_INTEGRITY (which the spec reserves for actual store damage).
+    assert_eq!(payload["error_code"], "USAGE");
     let msg = payload["message"].as_str().unwrap_or_default();
     assert!(
         msg.contains("merge") || msg.contains("MERGE_HEAD"),
