@@ -30,6 +30,7 @@ mod install_exit_codes {
     pub(super) const ORT_INIT_FAILED: u8 = 14;
     pub(super) const ORT_RUN_FAILED: u8 = 15;
     pub(super) const OUTPUT_SHAPE_MISMATCH: u8 = 16;
+    pub(super) const OVERSIZE_STREAM: u8 = 17;
 }
 
 /// `nexum models …` subcommands. Reserved for future model-management
@@ -246,6 +247,15 @@ fn embed_error_envelope(err: &EmbedError) -> serde_json::Value {
             obj.insert("expected".into(), json!(expected));
             obj.insert("actual".into(), json!(actual));
         }
+        EmbedError::OversizeStream {
+            file,
+            expected_bytes,
+            observed_bytes,
+        } => {
+            obj.insert("file".into(), json!(file));
+            obj.insert("expected_bytes".into(), json!(expected_bytes));
+            obj.insert("observed_bytes".into(), json!(observed_bytes));
+        }
     }
     env
 }
@@ -386,6 +396,15 @@ mod tests {
             }
             .install_exit_code(),
             install_exit_codes::OUTPUT_SHAPE_MISMATCH
+        );
+        assert_eq!(
+            EmbedError::OversizeStream {
+                file: "any.onnx".into(),
+                expected_bytes: 100,
+                observed_bytes: 200,
+            }
+            .install_exit_code(),
+            install_exit_codes::OVERSIZE_STREAM
         );
     }
 

@@ -22,6 +22,22 @@ use crate::config::Config;
 /// 1–16 KiB chunks.
 const REPORT_STEP: u64 = 64 * 1024;
 
+/// Tolerance over the manifest size in the streaming download. A
+/// server that reports a slightly larger `Content-Length` than the
+/// payload (a few KB of HTTP framing slop) keeps working; beyond this
+/// the download aborts so a misbehaving or malicious server cannot
+/// stream unbounded bytes to disk.
+const OVERSIZE_HEADROOM_BYTES: u64 = 64 * 1024;
+
+/// Overall request timeout for one downloaded file. Generous enough for
+/// a multi-GB asset on a slow connection, bounded so a server that opens
+/// the socket and never sends bytes cannot wedge the install.
+const HTTP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(30);
+
+/// Connect-handshake timeout. Tolerates a slow TLS handshake but does
+/// not let the install stall indefinitely on an unreachable mirror.
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Summary of one install run. The CLI command surfaces this on success.
 #[derive(Debug, Clone, Copy)]
 pub struct InstallReport {
@@ -98,6 +114,13 @@ async fn download_async(
 
     let base = model_base_url.trim_end_matches('/');
     let client = reqwest::Client::builder()
+        // A connect handshake should not stall the install indefinitely;
+        // 30 s tolerates slow networks without hanging forever. The
+        // overall request timeout is generous enough for a 2 GB asset
+        // on a slow connection but bounded so a server that opens the
+        // socket and never sends bytes cannot wedge the install.
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_REQUEST_TIMEOUT)
         .build()
         .map_err(|e| EmbedError::Download {
             file: String::new(),
@@ -250,6 +273,13 @@ async fn download_streaming(
             })?
     };
 
+    // Headroom past `total` tolerates a few KB of HTTP framing slop on
+    // servers that report a slightly-larger Content-Length than the
+    // payload; beyond that, abort so a misbehaving server can't fill
+    // disk or hang on `flush`. The downstream checksum step would catch
+    // a too-small response; the streaming-size guard is the only line
+    // of defence against a too-large one.
+    let oversize_limit = total.saturating_add(OVERSIZE_HEADROOM_BYTES);
     let mut stream = resp.bytes_stream();
     let mut done: u64 = initial_done;
     let mut last_reported: u64 = initial_done;
@@ -263,6 +293,13 @@ async fn download_streaming(
             source: e,
         })?;
         done += chunk.len() as u64;
+        if done > oversize_limit {
+            return Err(EmbedError::OversizeStream {
+                file: entry.name().to_owned(),
+                expected_bytes: total,
+                observed_bytes: done,
+            });
+        }
         if done - last_reported >= REPORT_STEP || done == total {
             reporter.bytes(done, total);
             last_reported = done;
