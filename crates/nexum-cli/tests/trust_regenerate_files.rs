@@ -103,43 +103,35 @@ fn regenerate_files_refuses_when_reanchor_pending() {
 }
 
 #[test]
-fn regenerate_files_after_uncommitted_events_emits_a_signed_commit() {
+fn regenerate_files_refuses_when_events_yml_is_dirty() {
     let home = common::TestHome::initialized_no_index();
 
-    // Append a new event to events.yml in the worktree (uncommitted). The
-    // re-derived signer files will differ from HEAD (which was derived from
-    // events.yml WITHOUT the new event), so regenerate-files lands a signed
-    // commit covering the signer files. events.yml itself stays uncommitted
-    // in the worktree — out of scope here; the spec covers signer-file
-    // regeneration only.
+    // Append a new event to events.yml in the worktree without committing.
+    // Deriving signer files from this uncommitted source and signing a
+    // commit over the projections would land a non-self-contained mutation
+    // — the commit would reference content (the new event) that is not
+    // part of any commit. The operator must commit events.yml first.
     let events_yml = home.path().join("notebook.git/.trust/events.yml");
     let original = std::fs::read_to_string(&events_yml).unwrap();
-    // Use a synthetic event_id distinct from any init-time one. We don't
-    // need the event to be semantically realistic — just to alter the
-    // events.yml-derived signer content.
     let appended = format!(
-        "{original}\n- event_id: 0192f000-0000-7000-a000-0000000000aa\n  kind: KeyAdded\n  fingerprint: \"SHA256:test-fp-for-regenerate-coverage\"\n  public_key: \"ssh-ed25519 AAAAFakeKeyForTest test@example.invalid\"\n  reason: \"test setup for regenerate Committed-arm coverage\"\n"
+        "{original}\n- event_id: 0192f000-0000-7000-a000-0000000000aa\n  kind: KeyAdded\n  fingerprint: \"SHA256:test-fp-for-regenerate-coverage\"\n  public_key: \"ssh-ed25519 AAAAFakeKeyForTest test@example.invalid\"\n  reason: \"test setup\"\n"
     );
     std::fs::write(&events_yml, appended).unwrap();
 
     let out = home.run(&["trust", "regenerate-files", "--json"]);
     assert!(
-        out.status.success(),
-        "expected exit 0 for Committed arm:\nstdout={}\nstderr={}",
+        !out.status.success(),
+        "expected non-zero exit when events.yml is dirty:\nstdout={}\nstderr={}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
-    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
-    assert_eq!(payload["kind"], "trust.regenerate.committed");
+    assert_eq!(payload["context"]["subkind"], "regenerate_refused");
+    let reason = payload["context"]["reason"]
+        .as_str()
+        .expect("reason field present");
     assert!(
-        payload["commit"].as_str().is_some_and(|s| !s.is_empty()),
-        "Committed envelope must carry a commit sha: {payload:#}"
-    );
-    let files = payload["files"].as_array().expect("files array");
-    assert!(
-        files.iter().any(|f| f == "historical_signers")
-            || files.iter().any(|f| f == "allowed_signers"),
-        "Committed envelope should list the regenerated signer files: {payload:#}"
+        reason.contains("events.yml") || reason.contains("uncommitted"),
+        "refusal reason should mention events.yml or uncommitted state: {reason}",
     );
 }

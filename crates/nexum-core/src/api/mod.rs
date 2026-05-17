@@ -391,12 +391,14 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
         }
         crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
 
-        // Refuse if the operator has uncommitted changes outside the trust
-        // file set — the rollback paths use `git checkout HEAD -- <files>`
-        // (path-scoped) but the operator's other work should still not be
-        // entangled with a trust-state mutation that might fail mid-flight.
+        // Refuse if the operator has uncommitted changes outside the
+        // signer-projection file set. `events.yml` is deliberately NOT in
+        // the allowlist: this command derives the three signer projections
+        // from `events.yml`, and a dirty `events.yml` would mean the signed
+        // commit captures projections of an uncommitted source — a
+        // non-self-contained mutation. Operators must commit `events.yml`
+        // first.
         let trust_file_pbs: Vec<std::path::PathBuf> = [
-            ".trust/events.yml",
             ".trust/historical_signers",
             ".trust/allowed_signers",
             ".trust/revoked_signers",
