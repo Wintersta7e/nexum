@@ -100,6 +100,14 @@ pub struct PerSourceOutcome {
     /// degrading embedder from the reindex summary.
     #[serde(default)]
     pub embed_failures: u32,
+    /// Count of duplicate record ids the adapter pass surfaced — two records
+    /// with the same `id` (typically across CC project slugs when two
+    /// projects share a memory filename). The indexer keeps the last
+    /// observed copy and counts the rest here; operators see the running
+    /// total in the summary and a `tracing::warn` per pass with the
+    /// colliding ids.
+    #[serde(default)]
+    pub duplicate_ids_skipped: u32,
 }
 
 /// Aggregate outcome of one reindex pass across all enabled adapters.
@@ -369,6 +377,7 @@ where
         deletes: 0,
         deferred_deletes: 0,
         embed_failures: 0,
+        duplicate_ids_skipped: 0,
     };
 
     if let PassCompleteness::Failed { reason } = &pass.completeness {
@@ -473,22 +482,39 @@ where
     // The candidate key is just `id` because adapters cannot universally
     // resolve `project_id` at list time without doing the read-full work
     // (e.g., Codex derives it from the threads index inside
-    // `build_record`). Cross-project same-id collisions WITHIN a single
-    // source are improbable in practice (CC: id derived from per-slug
-    // path; Codex: id includes section identity; Local: single-project
-    // notebook), and the composite UNIQUE on the records table still
-    // prevents silent overwrite at upsert time.
+    // `build_record`). The composite UNIQUE on the records table prevents
+    // silent overwrite at upsert time, but within a single pass two list
+    // entries that share an id collapse here. The two records compete on
+    // the same `read_full(id)` call: the adapter's first-match-wins
+    // behaviour returns one and silently drops the other.
     //
-    // TODO: when adapters can cheaply surface `project_id` at list time,
-    // key `candidates` by `(project_id, id)` to correctly handle same-id
-    // / different-project records within a single source. Until then a
-    // multi-project local adapter could silently drop one of two
-    // colliding records inside a single pass.
-    let candidates: std::collections::HashMap<String, String> = pass
-        .records
-        .iter()
-        .map(|r| (r.id.clone(), r.content_hash.clone()))
-        .collect();
+    // Surface the collision via a warn + a `SkipReason` so operators
+    // notice that one of their records is being shadowed. Renaming one
+    // of the colliding files is the documented workaround until the
+    // adapter / indexer plumb a composite `(project_id, id)` key end to
+    // end.
+    let mut candidates: std::collections::HashMap<String, String> =
+        std::collections::HashMap::with_capacity(pass.records.len());
+    let mut duplicate_ids: Vec<String> = Vec::new();
+    for r in &pass.records {
+        if candidates
+            .insert(r.id.clone(), r.content_hash.clone())
+            .is_some()
+        {
+            duplicate_ids.push(r.id.clone());
+        }
+    }
+    if !duplicate_ids.is_empty() {
+        warn!(
+            target: "nexum::indexer",
+            ?source,
+            ?duplicate_ids,
+            "adapter pass contained duplicate record ids across projects; the indexer keeps the last \
+             observed copy for each id and skips the others. Rename one of the colliding files to \
+             avoid silent shadowing."
+        );
+        per_source.duplicate_ids_skipped += u32::try_from(duplicate_ids.len()).unwrap_or(u32::MAX);
+    }
 
     apply_upserts(
         tx,
@@ -1227,7 +1253,23 @@ mod tests {
             deletes: 0,
             deferred_deletes: 0,
             embed_failures: 0,
+            duplicate_ids_skipped: 0,
         };
         assert_eq!(outcome.embed_failures, 0);
+    }
+
+    #[test]
+    fn per_source_outcome_carries_duplicate_ids_skipped() {
+        let outcome = PerSourceOutcome {
+            source: Source::CcNative,
+            completeness: PerSourceCompleteness::Authoritative,
+            ingested: 2,
+            upserts: 1,
+            deletes: 0,
+            deferred_deletes: 0,
+            embed_failures: 0,
+            duplicate_ids_skipped: 1,
+        };
+        assert_eq!(outcome.duplicate_ids_skipped, 1);
     }
 }
