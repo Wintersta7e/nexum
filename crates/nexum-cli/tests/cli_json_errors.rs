@@ -238,6 +238,66 @@ fn recent_emits_invalid_filter_envelope_for_unknown_source() {
 }
 
 #[test]
+fn search_emits_invalid_filter_envelope_for_unknown_source() {
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(
+        &home,
+        &["search", "anything", "--source", "not-a-source", "--json"],
+    );
+    assert_eq!(env["error_code"], "INVALID_FILTER");
+    assert_eq!(code, 4);
+    assert_eq!(env["context"]["detail"], "--source=not-a-source");
+}
+
+#[test]
+fn search_emits_invalid_filter_envelope_for_unknown_type() {
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(
+        &home,
+        &["search", "anything", "--type", "no-such-type", "--json"],
+    );
+    assert_eq!(env["error_code"], "INVALID_FILTER");
+    assert_eq!(code, 4);
+    assert_eq!(env["context"]["detail"], "--type=no-such-type");
+}
+
+#[test]
+fn search_emits_invalid_filter_envelope_for_unknown_min_confidence() {
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(
+        &home,
+        &[
+            "search",
+            "anything",
+            "--min-confidence",
+            "very-high",
+            "--json",
+        ],
+    );
+    assert_eq!(env["error_code"], "INVALID_FILTER");
+    assert_eq!(code, 4);
+    assert_eq!(env["context"]["detail"], "--min-confidence=very-high");
+}
+
+#[test]
+fn list_emits_invalid_filter_envelope_for_unknown_source() {
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(&home, &["list", "--source", "not-a-source", "--json"]);
+    assert_eq!(env["error_code"], "INVALID_FILTER");
+    assert_eq!(code, 4);
+    assert_eq!(env["context"]["detail"], "--source=not-a-source");
+}
+
+#[test]
+fn list_emits_invalid_filter_envelope_for_unknown_type() {
+    let home = TestHome::initialized_with_seeded_index();
+    let (env, code) = run_json(&home, &["list", "--type", "no-such-type", "--json"]);
+    assert_eq!(env["error_code"], "INVALID_FILTER");
+    assert_eq!(code, 4);
+    assert_eq!(env["context"]["detail"], "--type=no-such-type");
+}
+
+#[test]
 fn search_emits_store_integrity_envelope_on_corrupt_index() {
     // Truncate `index.db` to a few non-magic bytes so any SQL issued
     // through the connection fails with "file is not a database". The

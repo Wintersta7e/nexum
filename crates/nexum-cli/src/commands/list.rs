@@ -39,19 +39,11 @@ pub fn run(args: &ListArgs) -> ExitCode {
         Err(c) => return c,
     };
 
-    let filters = Filters {
-        record_type: args
-            .r#type
-            .as_deref()
-            .and_then(RecordType::try_from_user_str),
-        project_id: args.project.clone(),
-        source: args.source.as_deref().and_then(Source::try_from_user_str),
-        tags: args.tag.clone(),
-        since_iso: args.since.clone(),
-        min_confidence: None,
-        require_signed: args.require_signed,
-        strict_revocation: args.strict_revocation,
-        no_unsigned_penalty: false,
+    let filters = match build_filters(args) {
+        Ok(f) => f,
+        Err(invalid) => {
+            return super::json_emit::emit_invalid_filter(args.json, invalid.flag, &invalid.value);
+        }
     };
 
     let rs = match api::list(&paths, &cfg, &filters, args.limit, args.cursor.as_deref()) {
@@ -72,4 +64,23 @@ pub fn run(args: &ListArgs) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn build_filters(args: &ListArgs) -> Result<Filters, super::common::InvalidFilter> {
+    use super::common::parse_enum_filter;
+    Ok(Filters {
+        record_type: parse_enum_filter(
+            "type",
+            args.r#type.as_deref(),
+            RecordType::try_from_user_str,
+        )?,
+        project_id: args.project.clone(),
+        source: parse_enum_filter("source", args.source.as_deref(), Source::try_from_user_str)?,
+        tags: args.tag.clone(),
+        since_iso: args.since.clone(),
+        min_confidence: None,
+        require_signed: args.require_signed,
+        strict_revocation: args.strict_revocation,
+        no_unsigned_penalty: false,
+    })
 }

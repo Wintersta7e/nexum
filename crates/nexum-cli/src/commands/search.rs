@@ -52,7 +52,12 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     let mut opts = SearchOpts::new(args.query.clone());
     opts.top_k = args.top_k;
     opts.trust_policy = cfg.trust.unsigned_default;
-    opts.filters = build_filters(args);
+    opts.filters = match build_filters(args) {
+        Ok(f) => f,
+        Err(invalid) => {
+            return super::json_emit::emit_invalid_filter(args.json, invalid.flag, &invalid.value);
+        }
+    };
     let res = match api::search(&paths, &cfg, &opts) {
         Ok(r) => r,
         Err(e) => return super::json_emit::route_api_error(&e, args.json),
@@ -78,24 +83,27 @@ pub fn run(args: &SearchArgs) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn build_filters(args: &SearchArgs) -> Filters {
-    Filters {
-        record_type: args
-            .r#type
-            .as_deref()
-            .and_then(RecordType::try_from_user_str),
+fn build_filters(args: &SearchArgs) -> Result<Filters, super::common::InvalidFilter> {
+    use super::common::parse_enum_filter;
+    Ok(Filters {
+        record_type: parse_enum_filter(
+            "type",
+            args.r#type.as_deref(),
+            RecordType::try_from_user_str,
+        )?,
         project_id: args.project.clone(),
-        source: args.source.as_deref().and_then(Source::try_from_user_str),
+        source: parse_enum_filter("source", args.source.as_deref(), Source::try_from_user_str)?,
         tags: args.tag.clone(),
         since_iso: args.since.clone(),
-        min_confidence: args
-            .min_confidence
-            .as_deref()
-            .and_then(Confidence::try_from_user_str),
+        min_confidence: parse_enum_filter(
+            "min-confidence",
+            args.min_confidence.as_deref(),
+            Confidence::try_from_user_str,
+        )?,
         require_signed: args.require_signed,
         strict_revocation: args.strict_revocation,
         no_unsigned_penalty: args.no_unsigned_penalty,
-    }
+    })
 }
 
 const BODY_INDENT: &str = "    ";
