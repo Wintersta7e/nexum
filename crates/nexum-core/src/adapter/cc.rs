@@ -390,17 +390,30 @@ fn has_md_extension(file_name: &str) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
 }
 
-/// Pull the YAML frontmatter block (between leading `---\n` and the next
-/// `---\n` line) out of a markdown file. Returns `(Some(frontmatter), body)`
-/// when both lines are present, or `(None, full)` when no frontmatter found.
+/// Pull the YAML frontmatter block (between a leading `---` line and the
+/// next `---` line) out of a markdown file. Accepts either LF or CRLF
+/// line endings on the open or close markers, so files written by Windows
+/// editors round-trip the same as Unix ones. Returns
+/// `(Some(frontmatter), body)` when both delimiters are present, or
+/// `(None, full)` when no frontmatter is found.
 fn split_frontmatter(raw: &str) -> (Option<&str>, Option<&str>) {
-    if !raw.starts_with("---\n") && !raw.starts_with("---\r\n") {
-        return (None, Some(raw));
-    }
-    let after_open = raw.split_once("---\n").map_or(raw, |(_, rest)| rest);
-    let Some((frontmatter, body)) = after_open.split_once("\n---\n") else {
+    let after_open = if let Some(rest) = raw.strip_prefix("---\n") {
+        rest
+    } else if let Some(rest) = raw.strip_prefix("---\r\n") {
+        rest
+    } else {
         return (None, Some(raw));
     };
+    let close_variants = ["\n---\n", "\n---\r\n", "\r\n---\r\n", "\r\n---\n"];
+    let close = close_variants
+        .iter()
+        .filter_map(|delim| after_open.find(delim).map(|idx| (idx, delim.len())))
+        .min_by_key(|(idx, _)| *idx);
+    let Some((idx, delim_len)) = close else {
+        return (None, Some(raw));
+    };
+    let frontmatter = &after_open[..idx];
+    let body = &after_open[idx + delim_len..];
     (Some(frontmatter), Some(body))
 }
 
@@ -635,5 +648,46 @@ mod tests {
             Some(true),
             "type: Reference (mixed case) must still set is_reference"
         );
+    }
+
+    #[test]
+    fn split_frontmatter_handles_lf_endings() {
+        let raw = "---\nname: x\ntype: feedback\n---\nbody text\n";
+        let (fm, body) = super::split_frontmatter(raw);
+        assert_eq!(fm, Some("name: x\ntype: feedback"));
+        assert_eq!(body, Some("body text\n"));
+    }
+
+    #[test]
+    fn split_frontmatter_handles_crlf_endings() {
+        let raw = "---\r\nname: x\r\ntype: feedback\r\n---\r\nbody text\r\n";
+        let (fm, body) = super::split_frontmatter(raw);
+        assert_eq!(fm, Some("name: x\r\ntype: feedback"));
+        assert_eq!(body, Some("body text\r\n"));
+    }
+
+    #[test]
+    fn split_frontmatter_handles_mixed_endings() {
+        // Open marker uses LF, close marker uses CRLF.
+        let raw = "---\nname: x\ntype: feedback\r\n---\nbody\n";
+        let (fm, body) = super::split_frontmatter(raw);
+        assert!(fm.is_some(), "mixed-endings frontmatter must still split");
+        assert!(body.is_some());
+    }
+
+    #[test]
+    fn split_frontmatter_without_close_returns_none() {
+        let raw = "---\nname: x\ntype: feedback\n";
+        let (fm, body) = super::split_frontmatter(raw);
+        assert!(fm.is_none());
+        assert_eq!(body, Some(raw));
+    }
+
+    #[test]
+    fn split_frontmatter_without_open_returns_none() {
+        let raw = "no frontmatter here\n";
+        let (fm, body) = super::split_frontmatter(raw);
+        assert!(fm.is_none());
+        assert_eq!(body, Some(raw));
     }
 }
