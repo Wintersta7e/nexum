@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use super::types::{
     BuildDigestError, MessageTurn, SessionDigest, SessionId, SessionKind, SessionMetadata,
-    ToolCallSummary, TurnRole,
+    ToolCallSummary, TurnRole, parse_exit_code,
 };
 
 /// Parse a CC transcript JSONL file at `path` into a `SessionDigest`.
@@ -259,35 +259,4 @@ fn content_as_string(v: &serde_json::Value) -> Option<String> {
         return Some(parts.join("\n"));
     }
     None
-}
-
-fn parse_exit_code(output: &str) -> Option<i32> {
-    output.lines().rev().find_map(|line| {
-        line.trim()
-            .strip_prefix("Process exited with code ")
-            .and_then(|rest| rest.parse().ok())
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_exit_code;
-
-    #[test]
-    fn parse_exit_code_typical() {
-        assert_eq!(
-            parse_exit_code("stuff\nProcess exited with code 7\n"),
-            Some(7)
-        );
-    }
-
-    #[test]
-    fn parse_exit_code_zero() {
-        assert_eq!(parse_exit_code("Process exited with code 0\n"), Some(0));
-    }
-
-    #[test]
-    fn parse_exit_code_missing() {
-        assert_eq!(parse_exit_code("no exit\n"), None);
-    }
 }

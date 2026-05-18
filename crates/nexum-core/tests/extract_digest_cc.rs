@@ -19,6 +19,8 @@ const EMPTY_UUID: &str = "00000000-0000-4000-8000-000000000000";
 
 #[test]
 fn empty_session_returns_empty_error() {
+    // `empty.jsonl` holds only a `last-prompt` and a `permission-mode` line.
+    // Both must be skipped by the parser, leaving nothing to digest.
     let uuid = Uuid::from_str(EMPTY_UUID).unwrap();
     let err = build_cc_digest(&fixture("empty.jsonl"), uuid).unwrap_err();
     assert!(matches!(err, BuildDigestError::Empty));
@@ -90,14 +92,6 @@ fn rich_session_populates_started_and_ended() {
     assert!(digest.metadata.started.is_some());
     assert!(digest.metadata.ended.is_some());
     assert!(digest.metadata.started.unwrap() <= digest.metadata.ended.unwrap());
-}
-
-#[test]
-fn ignores_permission_mode_and_last_prompt_lines() {
-    // Verified implicitly by empty.jsonl above — those two lines alone produce Empty.
-    let uuid = Uuid::from_str(EMPTY_UUID).unwrap();
-    let err = build_cc_digest(&fixture("empty.jsonl"), uuid).unwrap_err();
-    assert!(matches!(err, BuildDigestError::Empty));
 }
 
 #[test]

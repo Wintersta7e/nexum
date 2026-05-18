@@ -153,6 +153,45 @@ pub enum BuildDigestError {
     Empty,
 }
 
+/// Extract the trailing process exit code from a tool-output excerpt.
+///
+/// Both Codex and CC report shell-process tool results in the form
+/// `"...\nProcess exited with code N\n"`. The last occurrence wins, so a
+/// final-line scan from the bottom up is the right heuristic.
+pub(super) fn parse_exit_code(output: &str) -> Option<i32> {
+    output.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix("Process exited with code ")
+            .and_then(|rest| rest.parse().ok())
+    })
+}
+
+#[cfg(test)]
+mod parse_exit_code_tests {
+    use super::parse_exit_code;
+
+    #[test]
+    fn typical() {
+        let output = "stdout\nstderr\nProcess exited with code 1\n";
+        assert_eq!(parse_exit_code(output), Some(1));
+    }
+
+    #[test]
+    fn zero() {
+        assert_eq!(parse_exit_code("Process exited with code 0\n"), Some(0));
+    }
+
+    #[test]
+    fn negative() {
+        assert_eq!(parse_exit_code("Process exited with code -1\n"), Some(-1));
+    }
+
+    #[test]
+    fn absent_returns_none() {
+        assert_eq!(parse_exit_code("no exit line\n"), None);
+    }
+}
+
 #[cfg(test)]
 mod truncate_tests {
     use super::ToolCallSummary;

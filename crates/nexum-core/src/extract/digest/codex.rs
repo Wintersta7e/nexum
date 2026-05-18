@@ -16,7 +16,7 @@ use serde::Deserialize;
 
 use super::types::{
     BuildDigestError, MessageTurn, PlanFinal, PlanStep, ProjectHint, SessionDigest, SessionId,
-    SessionKind, SessionMetadata, ToolCallSummary, TurnRole,
+    SessionKind, SessionMetadata, ToolCallSummary, TurnRole, parse_exit_code,
 };
 
 /// Parse a Codex rollout JSONL file at `path` into a `SessionDigest`.
@@ -253,16 +253,6 @@ fn apply_function_call_output(
     }
 }
 
-fn parse_exit_code(output: &str) -> Option<i32> {
-    // Format observed in real Codex sessions:
-    //   "...\nProcess exited with code N\n"
-    output.lines().rev().find_map(|line| {
-        let line = line.trim();
-        line.strip_prefix("Process exited with code ")
-            .and_then(|rest| rest.parse().ok())
-    })
-}
-
 #[derive(Deserialize)]
 struct UpdatePlanArgs {
     plan: Vec<UpdatePlanStep>,
@@ -286,26 +276,4 @@ fn parse_update_plan_args(args: &str) -> Option<PlanFinal> {
             })
             .collect(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_exit_code;
-
-    #[test]
-    fn parse_exit_code_typical() {
-        let output = "stdout\nstderr\nProcess exited with code 1\n";
-        assert_eq!(parse_exit_code(output), Some(1));
-    }
-
-    #[test]
-    fn parse_exit_code_negative() {
-        let output = "Process exited with code -1\n";
-        assert_eq!(parse_exit_code(output), Some(-1));
-    }
-
-    #[test]
-    fn parse_exit_code_absent_returns_none() {
-        assert_eq!(parse_exit_code("no exit line\n"), None);
-    }
 }
