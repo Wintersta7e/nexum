@@ -1104,4 +1104,70 @@ mod tests {
         assert_eq!(env.error_code, error_codes::EXTRACT_MODEL_ERROR);
         assert_eq!(env.context.get("kind").and_then(|v| v.as_str()), Some("io"));
     }
+
+    #[test]
+    fn extract_envelope_not_acknowledged_has_session_command() {
+        let api_err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::NotAcknowledged);
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_NOT_ACKNOWLEDGED);
+        let rem = env.remediation.expect("remediation");
+        assert!(rem.rationale.contains("consent") || rem.command.is_some());
+    }
+
+    #[test]
+    fn extract_envelope_no_sessions_routes_cleanly() {
+        let api_err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::NoSessions);
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_NO_SESSIONS);
+    }
+
+    #[test]
+    fn extract_envelope_provider_unsupported_names_provider() {
+        let api_err = crate::api::ApiError::Extraction(
+            crate::extract::model::ExtractError::ProviderUnsupported {
+                provider: "openai".into(),
+            },
+        );
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_PROVIDER_UNSUPPORTED);
+        assert!(env.message.contains("openai"));
+    }
+
+    #[test]
+    fn extract_envelope_dry_run_required_suggests_dry_run() {
+        let api_err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::DryRunRequired);
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_DRY_RUN_REQUIRED);
+    }
+
+    #[test]
+    fn extract_envelope_http_carries_status_in_context() {
+        let api_err = crate::api::ApiError::Extraction(crate::extract::model::ExtractError::Http {
+            status: 429,
+            body: "Rate limited".into(),
+        });
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_MODEL_ERROR);
+        assert_eq!(
+            env.context
+                .get("status")
+                .and_then(serde_json::Value::as_u64),
+            Some(429)
+        );
+    }
+
+    #[test]
+    fn extract_envelope_malformed_response_routes_to_extract_parse() {
+        let api_err = crate::api::ApiError::Extraction(
+            crate::extract::model::ExtractError::MalformedResponse {
+                reason: "expected mapping".into(),
+            },
+        );
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_PARSE);
+        assert!(env.message.contains("expected mapping"));
+    }
 }
