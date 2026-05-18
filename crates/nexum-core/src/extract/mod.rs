@@ -7,4 +7,5 @@ pub mod digest;
 pub mod model;
 pub mod pricing;
 pub mod prompts;
+pub mod record_io;
 pub mod redaction;
