@@ -1,7 +1,13 @@
 //! The frozen default pattern set. Order matters when patterns can match
-//! overlapping substrings — `env_secret_assignment` runs after the typed
-//! key patterns so a typed key embedded in `API_KEY=...` keeps its named
-//! redaction label rather than being subsumed.
+//! overlapping substrings: typed-key patterns run first, then
+//! `env_secret_assignment` runs over the partially-redacted text. A typed
+//! key inside `API_KEY=…` is redacted by its specific pattern first, then
+//! the wrapping `API_KEY=[REDACTED:aws_access_key]` is itself subsumed by
+//! the env pattern into `[REDACTED:env_secret_assignment]`. The event log
+//! retains both records, but the rendered text shows only the outer
+//! `env_secret_assignment` label. This is the conservative choice: wider
+//! redactions hide more incidental context for downstream `ModelClient`
+//! consumers.
 
 use regex::Regex;
 

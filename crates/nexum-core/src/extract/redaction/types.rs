@@ -75,6 +75,12 @@ pub struct RedactedText {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RedactionEvent {
     pub pattern_name: String,
+    /// `sha256:` prefix + 64 hex chars over the matched substring AS SEEN
+    /// by the firing pattern. For patterns that fire on already-redacted
+    /// text in overlap cases (e.g. `env_secret_assignment` running after
+    /// `aws_access_key`), this hash is over the partially-redacted
+    /// intermediate, not the original input. Acceptable forensic signal
+    /// for first-pass events; not authoritative for subsequent passes.
     pub before_hash: String,
     pub context_window_hash: String,
 }
