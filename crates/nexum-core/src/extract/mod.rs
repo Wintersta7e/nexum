@@ -5,6 +5,7 @@
 
 pub mod consent;
 pub mod digest;
+pub mod discovery;
 pub mod model;
 pub mod pipeline;
 pub mod pricing;

@@ -544,7 +544,14 @@ fn store_integrity_foreign(kind: &'static str, e: &dyn std::fmt::Display) -> Err
 
 // ───── ExtractError variant dispatch ────────────────────────────────────────
 
-fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope {
+/// Build the [`ErrorEnvelope`] for an [`ExtractError`]. Exposed so the
+/// `nexum extract` CLI verb can render envelopes from a borrowed
+/// `ExtractError` without first having to wrap it in an owned
+/// `ApiError::Extraction` (`ExtractError` is not `Clone`, so a borrow is
+/// the only available carrier at the CLI's error-emission site).
+///
+/// [`ExtractError`]: crate::extract::model::ExtractError
+pub fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope {
     use crate::extract::model::ExtractError as E;
     match err {
         E::NoApiKey { env_var } => ErrorEnvelope {
