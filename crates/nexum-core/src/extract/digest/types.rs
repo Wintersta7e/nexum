@@ -106,7 +106,7 @@ impl ToolCallSummary {
     pub const OUTPUT_EXCERPT_MAX_CHARS: usize = 500;
 
     /// Truncate `s` to `max` chars, appending `…` if and only if the input
-    /// exceeded `max` chars (not bytes — Rust's `char_indices` is the unit).
+    /// exceeded `max` Unicode scalar values (not bytes).
     #[must_use]
     pub fn truncate_chars(s: &str, max: usize) -> String {
         let mut out = String::new();

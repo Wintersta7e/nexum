@@ -5,8 +5,8 @@
 mod types;
 
 pub use types::{
-    BuildDigestError, MessageTurn, PlanFinal, PlanStep, SessionDigest, SessionId, SessionKind,
-    SessionMetadata, ToolCallSummary, TurnRole,
+    BuildDigestError, MessageTurn, PlanFinal, PlanStep, ProjectHint, SessionDigest, SessionId,
+    SessionKind, SessionMetadata, ToolCallSummary, TurnRole,
 };
 
 #[cfg(test)]
