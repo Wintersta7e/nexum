@@ -11,6 +11,7 @@ pub use anthropic::AnthropicClient;
 pub use codex_phase1::CodexPhase1Reader;
 pub use ollama_stub::OllamaClient;
 pub use openai_stub::OpenAiClient;
+pub(crate) use render::render_digest;
 pub use types::{ExtractError, ExtractionOutput, ModelClient, Provider, RawRecord};
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use crate::extract::digest::{MessageTurn, SessionDigest, SessionKind, ToolCallSummary};
 
 #[must_use]
-pub fn render_digest(digest: &SessionDigest) -> String {
+pub(crate) fn render_digest(digest: &SessionDigest) -> String {
     let mut out = String::with_capacity(8192);
     out.push_str("# Session digest\n\n");
     render_session_id(&mut out, digest);

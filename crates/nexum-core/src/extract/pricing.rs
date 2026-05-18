@@ -1,5 +1,11 @@
 //! Pricing table + cost estimation.
 
+/// RFC3339 timestamp pinning the current pricing snapshot. The dry-run
+/// manifest stores this as `pricing_snapshot_at`, and `compute_dry_run_id`
+/// folds it into the hash so the id flips whenever the table is bumped.
+/// Bump alongside any row in [`default_pricing_table`].
+pub const PRICING_SNAPSHOT_AT_RFC3339: &str = "2026-05-18T00:00:00Z";
+
 const MAX_OUTPUT_TOKENS: u32 = 8192;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,5 +135,13 @@ mod tests {
         assert_eq!(estimate_output_tokens(4000), 1000);
         // 100_000 input -> would estimate 25_000, capped at 8192
         assert_eq!(estimate_output_tokens(100_000), 8192);
+    }
+
+    #[test]
+    fn pricing_snapshot_at_rfc3339_const_parses() {
+        // A malformed const here would silently corrupt every dry-run id;
+        // the gate catches it instead.
+        chrono::DateTime::parse_from_rfc3339(PRICING_SNAPSHOT_AT_RFC3339)
+            .expect("PRICING_SNAPSHOT_AT_RFC3339 must parse as RFC3339");
     }
 }

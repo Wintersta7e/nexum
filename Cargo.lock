@@ -1620,6 +1620,7 @@ dependencies = [
 name = "nexum-cli"
 version = "0.0.0-dev"
 dependencies = [
+ "chrono",
  "clap",
  "nexum-core",
  "rusqlite",
@@ -1628,9 +1629,12 @@ dependencies = [
  "sqlite-vec",
  "ssh-key",
  "tempfile",
+ "tokio",
  "toml",
  "tracing-subscriber",
  "uuid",
+ "walkdir",
+ "wiremock",
 ]
 
 [[package]]

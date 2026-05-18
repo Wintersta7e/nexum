@@ -1346,6 +1346,216 @@ fn identity_kind_for(project_id: &str) -> &'static str {
     }
 }
 
+/// Run the backfill dry-run pass. Discovers every candidate session under
+/// the configured CC and Codex adapters, builds each digest, counts input
+/// tokens via `client.count_input_tokens`, estimates output tokens and
+/// per-session cost via the pinned pricing table, and writes a
+/// [`crate::extract::state::Manifest`] under `<out_dir>/dry-run-<ts>.json`.
+///
+/// The manifest carries a deterministic `dry_run_id` (hash of
+/// `provider` + `model` + `pricing_snapshot_at` + sorted per-session
+/// (id, tokens, `digest_hash`) tuples), so two consecutive dry-run
+/// passes against the same corpus produce the same id. Candidate
+/// digests whose builder
+/// surfaces an error are skipped — one unreadable transcript must not
+/// abort the batch — but the failure is left implicit (a future
+/// `--explain` flag could surface a per-candidate summary).
+///
+/// # Errors
+///
+/// Returns `ApiError::Extraction` if the pricing table has no row for the
+/// configured `(provider, model)`, if `client.count_input_tokens` fails for
+/// a candidate, or if the manifest cannot be serialized / written.
+///
+/// # Panics
+///
+/// Panics only if the embedded `PRICING_SNAPSHOT_AT_RFC3339` const fails
+/// to parse as RFC3339 — that is a build-time invariant covered by a unit
+/// test, so this branch is unreachable in practice.
+pub fn extract_backfill_dry_run(
+    paths: &Paths,
+    cfg: &Config,
+    client: &dyn crate::extract::model::ModelClient,
+    out_dir: &std::path::Path,
+) -> Result<crate::extract::state::Manifest, ApiError> {
+    use chrono::{DateTime, Utc};
+    use sha2::{Digest as _, Sha256};
+
+    use crate::extract::digest::{SessionId, build_cc_digest, build_codex_digest};
+    use crate::extract::discovery::{discover_cc_sessions, discover_codex_sessions};
+    use crate::extract::model::{ExtractError, render_digest};
+    use crate::extract::pricing::{
+        PRICING_SNAPSHOT_AT_RFC3339, default_pricing_table, estimate_cost_usd,
+        estimate_output_tokens,
+    };
+    use crate::extract::state::{Manifest, PerSourceManifest, SourceBreakdown, compute_dry_run_id};
+
+    let provider_name = client.provider_name().to_owned();
+    let model = cfg.extractor.model.clone();
+
+    let pricing = default_pricing_table();
+    let row = pricing
+        .lookup(&provider_name, &model)
+        .ok_or_else(|| ExtractError::Validation {
+            reason: format!(
+                "no pricing row for (provider={provider_name}, model={model}); update pricing.rs"
+            ),
+        })?
+        .clone();
+
+    let pricing_snapshot_at: DateTime<Utc> =
+        DateTime::parse_from_rfc3339(PRICING_SNAPSHOT_AT_RFC3339)
+            .expect("PRICING_SNAPSHOT_AT_RFC3339 const must parse")
+            .with_timezone(&Utc);
+
+    // Discover every candidate (no --since cutoff for a full backfill).
+    let mut candidates = Vec::new();
+    if cfg.adapters.cc.enabled {
+        candidates.extend(
+            discover_cc_sessions(std::path::Path::new(&cfg.adapters.cc.projects_dir), None)
+                .map_err(ApiError::from)?,
+        );
+    }
+    if cfg.adapters.codex.enabled {
+        candidates.extend(
+            discover_codex_sessions(std::path::Path::new(&cfg.adapters.codex.state_db), None)
+                .map_err(ApiError::from)?,
+        );
+    }
+
+    let mut per_session: Vec<(String, u32, String)> = Vec::with_capacity(candidates.len());
+    let mut candidate_ids: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut per_session_cost: Vec<f64> = Vec::with_capacity(candidates.len());
+    let mut cc_breakdown = SourceBreakdown::default();
+    let mut codex_breakdown = SourceBreakdown::default();
+    let mut total_cost: f64 = 0.0;
+
+    for candidate in candidates {
+        let digest_result = match &candidate.session_id {
+            SessionId::Cc(uuid) => build_cc_digest(&candidate.source_path, *uuid),
+            SessionId::CodexThread(_) | SessionId::CodexRolloutPath(_) => {
+                build_codex_digest(&candidate.source_path)
+            }
+        };
+        // Skip an unreadable transcript; one bad file must not abort the
+        // batch. Future work could collect these into a `--explain` summary.
+        let Ok(digest) = digest_result else {
+            continue;
+        };
+        let input_tokens = client.count_input_tokens(&digest).map_err(ApiError::from)?;
+        let output_tokens = estimate_output_tokens(input_tokens);
+        let cost = estimate_cost_usd(input_tokens, output_tokens, &row);
+
+        let rendered = render_digest(&digest);
+        let digest_bytes = Sha256::digest(rendered.as_bytes());
+        let digest_hash = format!("sha256:{}", bytes_to_hex(digest_bytes.as_slice()));
+
+        let id_str = match &digest.session_id {
+            SessionId::Cc(uuid) => uuid.to_string(),
+            SessionId::CodexRolloutPath(p) => p.display().to_string(),
+            SessionId::CodexThread(t) => t.clone(),
+        };
+
+        match &candidate.session_id {
+            SessionId::Cc(_) => {
+                cc_breakdown.candidate_count = cc_breakdown.candidate_count.saturating_add(1);
+                cc_breakdown.estimated_cost_usd += cost;
+            }
+            SessionId::CodexThread(_) | SessionId::CodexRolloutPath(_) => {
+                codex_breakdown.candidate_count = codex_breakdown.candidate_count.saturating_add(1);
+                codex_breakdown.estimated_cost_usd += cost;
+            }
+        }
+
+        per_session.push((id_str.clone(), input_tokens, digest_hash));
+        candidate_ids.push(id_str);
+        per_session_cost.push(cost);
+        total_cost += cost;
+    }
+
+    let candidate_count = u32::try_from(per_session.len()).unwrap_or(u32::MAX);
+    let p95 = p95_cost(&per_session_cost);
+
+    let dry_run_id = compute_dry_run_id(&provider_name, &model, pricing_snapshot_at, &per_session);
+
+    let manifest = Manifest {
+        dry_run_id,
+        provider: provider_name,
+        model,
+        pricing_snapshot_at,
+        candidate_count,
+        total_estimated_cost_usd: total_cost,
+        p95_per_session_cost_usd: p95,
+        per_source: PerSourceManifest {
+            cc: cc_breakdown,
+            codex: codex_breakdown,
+        },
+        candidate_ids,
+    };
+
+    write_dry_run_manifest(paths, out_dir, &manifest)?;
+
+    Ok(manifest)
+}
+
+/// Nearest-rank p95 of a per-session cost list. Returns `0.0` for an empty
+/// list (the manifest under zero candidates has no percentile to report).
+fn p95_cost(costs: &[f64]) -> f64 {
+    if costs.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = costs.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    // Nearest-rank p95 via integer math: idx = ceil((95 * n) / 100) - 1.
+    // Operating on `usize` sidesteps the f64-as-i64 truncation lint.
+    let one_indexed = (n.saturating_mul(95)).div_ceil(100).max(1);
+    let idx = one_indexed - 1;
+    sorted[idx.min(n - 1)]
+}
+
+/// Write the dry-run manifest atomically to
+/// `<out_dir>/dry-run-<unix-ts>.json`. The unix-ts suffix lets a series of
+/// dry-runs accumulate without overwriting earlier passes.
+fn write_dry_run_manifest(
+    _paths: &Paths,
+    out_dir: &std::path::Path,
+    manifest: &crate::extract::state::Manifest,
+) -> Result<(), ApiError> {
+    use crate::extract::model::ExtractError;
+
+    std::fs::create_dir_all(out_dir).map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    let ts = chrono::Utc::now().timestamp();
+    let path = out_dir.join(format!("dry-run-{ts}.json"));
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| ApiError::Extraction(ExtractError::Json(e)))?;
+    std::fs::write(&tmp, json).map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    std::fs::rename(&tmp, &path).map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    Ok(())
+}
+
+/// Lowercase-hex encoder. `sha2::Sha256::digest` returns an opaque
+/// `Output` type that does not implement `LowerHex`, so the
+/// `format!("{:x}", ..)` shortcut from the older `sha2` API is not
+/// available here.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(nibble_char(b >> 4));
+        s.push(nibble_char(b & 0x0f));
+    }
+    s
+}
+
+fn nibble_char(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + n - 10) as char,
+        _ => '0',
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

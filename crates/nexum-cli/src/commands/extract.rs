@@ -108,9 +108,13 @@ pub fn run(args: &ExtractArgs) -> ExitCode {
         return run_since(&paths, &cfg, since, client.as_ref(), args.json);
     }
     if args.backfill {
-        // Follow-up tasks own the actual backfill path; surface a
-        // structured "dry-run required" so callers (agents in particular)
-        // get the same envelope they would once the verb is implemented.
+        if args.dry_run {
+            return run_backfill_dry_run(&paths, &cfg, client.as_ref(), args.json);
+        }
+        // The commit path (`--backfill` alone) and the
+        // `--dry-run-id`-supplied commit path land in a follow-up task;
+        // until then, surface the same `DRY_RUN_REQUIRED` envelope so the
+        // contract stays stable.
         return emit_error(&ExtractError::DryRunRequired, args.json);
     }
     emit_error(
@@ -309,6 +313,47 @@ fn run_since(
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `nexum extract --backfill --dry-run`: discover every candidate, count
+/// tokens, estimate cost, and write a manifest under `paths.extract`. The
+/// committed records are untouched; this verb is the read-side projection
+/// the operator inspects before authorizing the commit pass.
+fn run_backfill_dry_run(
+    paths: &Paths,
+    cfg: &Config,
+    client: &dyn ModelClient,
+    json: bool,
+) -> ExitCode {
+    let out_dir = paths.extract.clone();
+    match nexum_core::api::extract_backfill_dry_run(paths, cfg, client, &out_dir) {
+        Ok(manifest) => {
+            if json {
+                match serde_json::to_string_pretty(&manifest) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => return json_emit::emit_serialize_failure(&e),
+                }
+            } else {
+                println!(
+                    "dry_run_id: {}\ncandidate_count: {}\ntotal_estimated_cost_usd: {:.4}",
+                    manifest.dry_run_id,
+                    manifest.candidate_count,
+                    manifest.total_estimated_cost_usd
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(api_err) => {
+            let env: ErrorEnvelope = (&api_err).into();
+            let code = exit_codes::for_envelope(&env);
+            if json {
+                json_emit::emit_error(&env, code)
+            } else {
+                eprintln!("error: {api_err}");
+                ExitCode::from(code)
+            }
+        }
+    }
 }
 
 /// Resolve a `--session` selector to a [`SessionDigest`]. The three
