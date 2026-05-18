@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -96,11 +96,8 @@ struct SessionMetaPayload {
     cli_version: Option<String>,
     cwd: Option<String>,
     git: Option<SessionMetaGit>,
-    #[serde(default)]
     id: Option<String>,
-    #[serde(default)]
     model_provider: Option<String>,
-    #[serde(default)]
     timestamp: Option<DateTime<Utc>>,
 }
 
@@ -118,23 +115,18 @@ fn apply_session_meta(env: &Envelope, digest: &mut SessionDigest) {
     digest.metadata.started = payload.timestamp.or(env.timestamp);
     digest.metadata.cli_version = payload.cli_version;
     digest.metadata.model = payload.model_provider;
-    if let Some(cwd) = payload.cwd {
-        digest.metadata.cwd = Some(cwd.into());
-    }
+    let cwd = payload.cwd.map(PathBuf::from);
     if let Some(git) = payload.git {
-        digest.metadata.git_commit = git.commit_hash;
-        digest.metadata.git_branch = git.branch;
-        let repository_url = git.repository_url;
-        digest
-            .metadata
-            .git_repository_url
-            .clone_from(&repository_url);
         digest.project_hint = Some(ProjectHint {
-            git_repository_url: repository_url,
-            cwd: digest.metadata.cwd.clone(),
+            git_repository_url: git.repository_url.clone(),
+            cwd: cwd.clone(),
             project_id_guess: None,
         });
+        digest.metadata.git_commit = git.commit_hash;
+        digest.metadata.git_branch = git.branch;
+        digest.metadata.git_repository_url = git.repository_url;
     }
+    digest.metadata.cwd = cwd;
     if let Some(id) = payload.id {
         // Promote thread id to SessionKind::CodexThread if we found one.
         digest.session_kind = SessionKind::CodexThread { thread_id: id };
@@ -222,7 +214,11 @@ fn apply_function_call(
         output_excerpt: String::new(),
         exit_code: None,
     };
-    tool_index.insert(call_id, digest.tool_calls.len());
+    // Skip an empty call_id so two id-less calls cannot overwrite each other in
+    // the index; the call still gets recorded, it just cannot be back-filled.
+    if !call_id.is_empty() {
+        tool_index.insert(call_id, digest.tool_calls.len());
+    }
     digest.tool_calls.push(summary);
 }
 
