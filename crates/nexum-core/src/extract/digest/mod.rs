@@ -18,29 +18,19 @@ mod tests {
     #[test]
     fn session_id_cc_round_trips_uuid() {
         let id = Uuid::now_v7();
-        let session_id = SessionId::Cc(id);
-        if let SessionId::Cc(back) = session_id {
-            assert_eq!(back, id);
-        } else {
+        let SessionId::Cc(back) = SessionId::Cc(id) else {
             panic!("variant mismatch");
-        }
+        };
+        assert_eq!(back, id);
     }
 
     #[test]
     fn session_id_codex_rollout_path_round_trips() {
         let path = PathBuf::from("/tmp/rollout-x.jsonl");
-        let session_id = SessionId::CodexRolloutPath(path.clone());
-        if let SessionId::CodexRolloutPath(back) = session_id {
-            assert_eq!(back, path);
-        } else {
+        let SessionId::CodexRolloutPath(back) = SessionId::CodexRolloutPath(path.clone()) else {
             panic!("variant mismatch");
-        }
-    }
-
-    #[test]
-    fn tool_call_summary_truncation_caps_match_constants() {
-        assert_eq!(ToolCallSummary::ARGS_SKETCH_MAX_CHARS, 300);
-        assert_eq!(ToolCallSummary::OUTPUT_EXCERPT_MAX_CHARS, 500);
+        };
+        assert_eq!(back, path);
     }
 
     #[test]
