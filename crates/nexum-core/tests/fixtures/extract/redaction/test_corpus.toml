@@ -1,0 +1,56 @@
+# Each `[[hit]]` entry asserts a positive match. Each `[[miss]]` entry asserts
+# the input is NOT touched. The pattern name field anchors what test expects
+# to match.
+
+[[hit]]
+name = "aws_access_key"
+input = "AKIAIOSFODNN7EXAMPLE"
+
+[[hit]]
+name = "github_pat"
+input = "ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCDX"
+
+[[hit]]
+name = "jwt"
+input = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dozjgNryP4J3jVmNHl0w5WMcMI"
+
+[[hit]]
+name = "slack_token"
+input = "xoxb-1234567890-1234567890-AbCdEf-deadbeefcafe00112233"
+
+[[hit]]
+name = "env_secret_assignment"
+input = "API_KEY=sk-something-not-otherwise-matched"
+
+[[hit]]
+name = "anthropic_key"
+input = "sk-ant-abc123ABC456def789ghi012JKL345mno678"
+
+[[hit]]
+name = "openai_key"
+input = "sk-proj-AbCdEf1234567890Aa11Bb22Cc33Dd44"
+
+[[hit]]
+name = "ssh_private_key_block"
+input = "-----BEGIN OPENSSH PRIVATE KEY-----\nMIIEpAIBAAKCAQEAxyz...\n-----END OPENSSH PRIVATE KEY-----"
+
+[[hit]]
+name = "url_basic_auth"
+input = "https://alice:hunter2@example.invalid/path"
+
+# Negative cases — these must NOT redact.
+
+[[miss]]
+input = "AKIA-too-short"        # AWS prefix but wrong shape
+
+[[miss]]
+input = "ghp_short"             # GitHub prefix but too short to match {36,255}
+
+[[miss]]
+input = "eyJabc"                # JWT prefix only, missing the two dot-separated parts
+
+[[miss]]
+input = "PASSWORDS=are=okay"    # plural; the regex requires non-PLURAL keyword
+
+[[miss]]
+input = "sk-ant"                # truncated key prefix
