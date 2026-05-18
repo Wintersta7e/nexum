@@ -43,11 +43,14 @@ pub struct RawRecord {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum Provider {
+    #[serde(rename = "anthropic")]
     Anthropic,
+    #[serde(rename = "openai")]
     OpenAi,
+    #[serde(rename = "ollama")]
     Ollama,
+    #[serde(rename = "codex-phase1")]
     CodexPhase1,
 }
 

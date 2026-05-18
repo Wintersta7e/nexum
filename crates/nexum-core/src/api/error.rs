@@ -593,7 +593,7 @@ fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope 
         },
         E::DryRunMismatch { expected, actual } => ErrorEnvelope {
             error_code: error_codes::EXTRACT_DRY_RUN_MISMATCH,
-            message: format!("expected {expected}, recomputed {actual}"),
+            message: format!("dry-run id mismatch: expected {expected}, recomputed {actual}"),
             remediation: Some(Remediation {
                 command: Some("nexum extract --backfill --dry-run".to_owned()),
                 rationale: "the basis shifted; re-run --dry-run and supply the new id".to_owned(),
@@ -618,11 +618,20 @@ fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope 
             context: serde_json::json!({}),
         },
         E::Redaction(_) | E::Digest(_) | E::Io(_) | E::Json(_) | E::Yaml(_) | E::Git(_) => {
+            let kind = match err {
+                E::Redaction(_) => "redaction",
+                E::Digest(_) => "digest",
+                E::Io(_) => "io",
+                E::Json(_) => "json",
+                E::Yaml(_) => "yaml",
+                E::Git(_) => "git",
+                _ => unreachable!(),
+            };
             ErrorEnvelope {
                 error_code: error_codes::EXTRACT_MODEL_ERROR,
                 message: err.to_string(),
                 remediation: None,
-                context: serde_json::json!({}),
+                context: serde_json::json!({ "kind": kind, "message": err.to_string() }),
             }
         }
     }
@@ -1024,5 +1033,61 @@ mod tests {
         assert_eq!(env.error_code, error_codes::MIGRATION_REQUIRED);
         assert_eq!(env.context["kind"], "migration");
         assert_eq!(env.context["v_disk"], 1);
+    }
+
+    // ───── ExtractError variants ─────────────────────────────────────────────
+
+    #[test]
+    fn from_extract_no_api_key_routes_with_env_var_context() {
+        let err = crate::api::ApiError::Extraction(crate::extract::model::ExtractError::NoApiKey {
+            env_var: "ANTHROPIC_API_KEY".to_owned(),
+        });
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_NO_API_KEY);
+        assert!(env.message.contains("ANTHROPIC_API_KEY"));
+        assert!(env.remediation.is_some());
+        assert_eq!(
+            env.context.get("env_var").and_then(|v| v.as_str()),
+            Some("ANTHROPIC_API_KEY")
+        );
+    }
+
+    #[test]
+    fn from_extract_dry_run_mismatch_carries_expected_and_actual() {
+        let err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::DryRunMismatch {
+                expected: "sha256:aaa".to_owned(),
+                actual: "sha256:bbb".to_owned(),
+            });
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_DRY_RUN_MISMATCH);
+        assert_eq!(
+            env.context.get("expected").and_then(|v| v.as_str()),
+            Some("sha256:aaa")
+        );
+        assert_eq!(
+            env.context.get("actual").and_then(|v| v.as_str()),
+            Some("sha256:bbb")
+        );
+    }
+
+    #[test]
+    fn from_extract_validation_routes_to_extract_validation() {
+        let err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::Validation {
+                reason: "missing project_id".to_owned(),
+            });
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_VALIDATION);
+        assert!(env.message.contains("missing project_id"));
+    }
+
+    #[test]
+    fn from_extract_io_routes_to_model_error_with_kind() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no perms");
+        let err = crate::api::ApiError::Extraction(crate::extract::model::ExtractError::Io(io_err));
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_MODEL_ERROR);
+        assert_eq!(env.context.get("kind").and_then(|v| v.as_str()), Some("io"));
     }
 }
