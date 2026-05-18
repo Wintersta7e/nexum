@@ -1,10 +1,28 @@
 //! Pricing table + cost estimation.
 
+use chrono::{DateTime, Utc};
+
 /// RFC3339 timestamp pinning the current pricing snapshot. The dry-run
 /// manifest stores this as `pricing_snapshot_at`, and `compute_dry_run_id`
 /// folds it into the hash so the id flips whenever the table is bumped.
 /// Bump alongside any row in [`default_pricing_table`].
 pub const PRICING_SNAPSHOT_AT_RFC3339: &str = "2026-05-18T00:00:00Z";
+
+/// Parse [`PRICING_SNAPSHOT_AT_RFC3339`] into a `DateTime<Utc>`. Centralizes
+/// the parse + timezone conversion so callers do not embed the RFC3339
+/// string inline (which the dry-run and run paths both need to derive the
+/// same `compute_dry_run_id` input).
+///
+/// # Panics
+/// Panics only if the embedded const fails to parse as RFC3339 — that is a
+/// build-time invariant covered by `pricing_snapshot_at_rfc3339_const_parses`,
+/// so this branch is unreachable in practice.
+#[must_use]
+pub fn pricing_snapshot_at() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(PRICING_SNAPSHOT_AT_RFC3339)
+        .expect("PRICING_SNAPSHOT_AT_RFC3339 const must parse")
+        .with_timezone(&Utc)
+}
 
 const MAX_OUTPUT_TOKENS: u32 = 8192;
 
@@ -143,5 +161,16 @@ mod tests {
         // the gate catches it instead.
         chrono::DateTime::parse_from_rfc3339(PRICING_SNAPSHOT_AT_RFC3339)
             .expect("PRICING_SNAPSHOT_AT_RFC3339 must parse as RFC3339");
+    }
+
+    #[test]
+    fn pricing_snapshot_at_returns_utc_datetime_matching_const() {
+        // Helper must agree with a direct RFC3339 parse so dry-run and run
+        // both feed `compute_dry_run_id` the identical timestamp.
+        let via_helper = pricing_snapshot_at();
+        let via_const = chrono::DateTime::parse_from_rfc3339(PRICING_SNAPSHOT_AT_RFC3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(via_helper, via_const);
     }
 }

@@ -1,16 +1,15 @@
 //! `nexum extract` — drive the typed-extraction pipeline for one session
-//! (`--session <id>`) or a recent batch (`--since <duration>`).
+//! (`--session <id>`), a recent batch (`--since <duration>`), or the full
+//! backfill (`--backfill --dry-run` then `--backfill --dry-run-id <id>`).
 //!
 //! Wires the synchronous CLI into the pipeline. The Anthropic client owns
 //! its own worker tokio runtime, so the CLI itself stays sync. The
 //! consent gate fires before any digest leaves the machine; the recorded
 //! ack is scoped to (provider, model family).
 //!
-//! `--backfill` is recognized at the args layer so clap parses the flag
-//! and its `--dry-run` / `--dry-run-id` modifiers, but the actual
-//! backfill pathway lands in the follow-up CLI tasks; this verb returns
-//! the `EXTRACT_DRY_RUN_REQUIRED` envelope (informative for agents:
-//! "supply --dry-run first") until those land.
+//! `--backfill` alone (without `--dry-run` or `--dry-run-id`) surfaces
+//! `EXTRACT_DRY_RUN_REQUIRED`; the manifest has to be seeded explicitly
+//! so the operator sees the cost estimate before any extraction call.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -55,12 +54,14 @@ pub struct ExtractArgs {
     #[arg(long, group = "selector")]
     pub backfill: bool,
     /// Pair with `--backfill`: produce a manifest without committing
-    /// anything. Currently inert — see `--backfill`.
+    /// anything. Writes `~/.nexum/extract/dry-run-<ts>.json` and prints
+    /// the `dry_run_id` the operator hands back via `--dry-run-id`.
     #[arg(long, requires = "backfill")]
     pub dry_run: bool,
-    /// Pair with `--backfill`: consume a manifest produced by an earlier
-    /// `--dry-run` and commit its sessions. Currently inert — see
-    /// `--backfill`.
+    /// Pair with `--backfill`: re-discover, re-count tokens, re-compute
+    /// the canonical id, and commit every candidate's typed records. On
+    /// mismatch surfaces `EXTRACT_DRY_RUN_MISMATCH` so the operator
+    /// re-runs `--dry-run` against the new basis.
     #[arg(
         long,
         requires = "backfill",
@@ -111,10 +112,11 @@ pub fn run(args: &ExtractArgs) -> ExitCode {
         if args.dry_run {
             return run_backfill_dry_run(&paths, &cfg, client.as_ref(), args.json);
         }
-        // The commit path (`--backfill` alone) and the
-        // `--dry-run-id`-supplied commit path land in a follow-up task;
-        // until then, surface the same `DRY_RUN_REQUIRED` envelope so the
-        // contract stays stable.
+        if let Some(id) = args.dry_run_id.as_deref() {
+            return run_backfill_with_id(&paths, &cfg, client.as_ref(), id, args.json);
+        }
+        // `--backfill` without `--dry-run` or `--dry-run-id` requires the
+        // operator to seed a manifest first; surface the stable envelope.
         return emit_error(&ExtractError::DryRunRequired, args.json);
     }
     emit_error(
@@ -339,6 +341,49 @@ fn run_backfill_dry_run(
                     manifest.dry_run_id,
                     manifest.candidate_count,
                     manifest.total_estimated_cost_usd
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(api_err) => {
+            let env: ErrorEnvelope = (&api_err).into();
+            let code = exit_codes::for_envelope(&env);
+            if json {
+                json_emit::emit_error(&env, code)
+            } else {
+                eprintln!("error: {api_err}");
+                ExitCode::from(code)
+            }
+        }
+    }
+}
+
+/// `nexum extract --backfill --dry-run-id <id>`: rediscover the corpus,
+/// recompute the canonical id, abort with `EXTRACT_DRY_RUN_MISMATCH` if it
+/// no longer matches, and otherwise stream every candidate through the
+/// extraction pipeline. The `state.json` checkpoint is rewritten after
+/// every session so an interrupt resumes cleanly.
+fn run_backfill_with_id(
+    paths: &Paths,
+    cfg: &Config,
+    client: &dyn ModelClient,
+    id: &str,
+    json: bool,
+) -> ExitCode {
+    match nexum_core::api::extract_backfill_run(paths, cfg, client, id) {
+        Ok(outcome) => {
+            if json {
+                match serde_json::to_string_pretty(&outcome) {
+                    Ok(s) => println!("{s}"),
+                    Err(e) => return json_emit::emit_serialize_failure(&e),
+                }
+            } else {
+                println!(
+                    "committed_record_count: {}\ndeclined_session_count: {}\nfailed_session_count: {}\ntotal_session_count: {}",
+                    outcome.committed_record_count,
+                    outcome.declined_session_count,
+                    outcome.failed_session_count,
+                    outcome.total_session_count,
                 );
             }
             ExitCode::SUCCESS

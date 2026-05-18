@@ -58,3 +58,94 @@ fn dry_run_writes_manifest_zero_candidates() {
     let total = parsed["total_estimated_cost_usd"].as_f64().expect("cost");
     assert!(total.abs() < f64::EPSILON, "zero-candidate cost must be 0");
 }
+
+#[test]
+fn run_with_correct_id_proceeds() {
+    let home = TestHome::initialized_no_index();
+    home.write_extract_ack("anthropic", "claude-opus")
+        .expect("write extract ack");
+
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_nexum"));
+
+    let dry = Command::new(&exe)
+        .args(["extract", "--backfill", "--dry-run", "--json", "--quiet"])
+        .env("NEXUM_HOME", home.nexum_home())
+        .env("HOME", home.ssh_home())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("GIT_AUTHOR_NAME", "nexum-test")
+        .env("GIT_AUTHOR_EMAIL", "nexum-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "nexum-test")
+        .env("GIT_COMMITTER_EMAIL", "nexum-test@example.invalid")
+        .output()
+        .expect("spawn nexum dry-run");
+    assert!(
+        dry.status.success(),
+        "dry-run failed: stderr={}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let manifest: Value = serde_json::from_slice(&dry.stdout).expect("dry-run json");
+    let id = manifest["dry_run_id"]
+        .as_str()
+        .expect("dry_run_id")
+        .to_owned();
+
+    let run = Command::new(&exe)
+        .args([
+            "extract",
+            "--backfill",
+            "--dry-run-id",
+            &id,
+            "--json",
+            "--quiet",
+        ])
+        .env("NEXUM_HOME", home.nexum_home())
+        .env("HOME", home.ssh_home())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("GIT_AUTHOR_NAME", "nexum-test")
+        .env("GIT_AUTHOR_EMAIL", "nexum-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "nexum-test")
+        .env("GIT_COMMITTER_EMAIL", "nexum-test@example.invalid")
+        .output()
+        .expect("spawn nexum run");
+    assert!(
+        run.status.success(),
+        "run failed: stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let outcome: Value = serde_json::from_slice(&run.stdout).expect("run json");
+    assert_eq!(outcome["total_session_count"].as_u64(), Some(0));
+}
+
+#[test]
+fn run_with_wrong_id_aborts() {
+    let home = TestHome::initialized_no_index();
+    home.write_extract_ack("anthropic", "claude-opus")
+        .expect("write extract ack");
+
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_nexum"));
+    let run = Command::new(&exe)
+        .args([
+            "extract",
+            "--backfill",
+            "--dry-run-id",
+            "sha256:wrong",
+            "--json",
+            "--quiet",
+        ])
+        .env("NEXUM_HOME", home.nexum_home())
+        .env("HOME", home.ssh_home())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("GIT_AUTHOR_NAME", "nexum-test")
+        .env("GIT_AUTHOR_EMAIL", "nexum-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "nexum-test")
+        .env("GIT_COMMITTER_EMAIL", "nexum-test@example.invalid")
+        .output()
+        .expect("spawn nexum");
+    assert!(
+        !run.status.success(),
+        "mismatch should fail; stderr={}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let env_out: Value = serde_json::from_slice(&run.stdout).expect("envelope json");
+    assert_eq!(env_out["error_code"], "EXTRACT_DRY_RUN_MISMATCH");
+}
