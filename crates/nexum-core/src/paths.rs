@@ -26,6 +26,8 @@ pub struct Paths {
     pub logs: PathBuf,
     pub state: PathBuf,
     pub lock: PathBuf,
+    pub extract: PathBuf,
+    pub redaction: PathBuf,
 }
 
 impl Paths {
@@ -43,6 +45,8 @@ impl Paths {
             logs: home.join("logs"),
             state: home.join("state"),
             lock: home.join(".lock"),
+            extract: home.join("extract"),
+            redaction: home.join("redaction"),
             home,
         }
     }
@@ -106,5 +110,19 @@ mod tests {
         }
         // Quiet a Path import lint if Path isn't otherwise used.
         let _: &Path = &p.home;
+    }
+
+    #[test]
+    fn with_home_populates_extract_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_home(tmp.path().to_path_buf());
+        assert_eq!(paths.extract, tmp.path().join("extract"));
+    }
+
+    #[test]
+    fn with_home_populates_redaction_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_home(tmp.path().to_path_buf());
+        assert_eq!(paths.redaction, tmp.path().join("redaction"));
     }
 }

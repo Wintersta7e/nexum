@@ -1584,6 +1584,7 @@ dependencies = [
  "insta",
  "ndarray",
  "ort",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",

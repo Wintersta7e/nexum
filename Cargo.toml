@@ -45,6 +45,8 @@ tokenizers = "0.20"
 # Concurrency.
 rayon = "1"
 fs2 = "0.4"
+# Regex — used by secret-shaped substring redaction.
+regex = "1"
 # Test utilities — temp dirs for the test harness.
 tempfile = "3"
 walkdir = "2"

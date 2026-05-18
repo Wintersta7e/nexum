@@ -78,7 +78,7 @@ impl From<crate::trust::events::TrustError> for ApiError {
 ///
 /// The closure receives nothing — it just runs under the held lock and is
 /// responsible for any rollback inside its own error-handling paths.
-fn with_writer_lock<T>(
+pub(crate) fn with_writer_lock<T>(
     paths: &Paths,
     body: impl FnOnce() -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
@@ -280,7 +280,7 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
 /// non-zero, `Err` if the binary couldn't be spawned. Used by rollback paths
 /// that need to revert specific files without touching unrelated changes the
 /// operator may have in the worktree.
-fn restore_paths_from_head(
+pub(crate) fn restore_paths_from_head(
     repo: &std::path::Path,
     paths: &[&std::path::Path],
 ) -> Result<bool, std::io::Error> {
@@ -297,7 +297,7 @@ fn restore_paths_from_head(
 /// `Ok(true)` on success, `Ok(false)` on non-zero exit, `Err` if the binary
 /// couldn't be spawned. Used when a commit landed but its post-commit
 /// verification failed.
-fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
+pub(crate) fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
     let out = std::process::Command::new("git")
         .args(["reset", "--hard", "HEAD~1"])
         .current_dir(repo)
@@ -312,7 +312,7 @@ fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> 
 /// `our_paths` are repo-relative (e.g. `.trust/events.yml`). Anything dirty
 /// outside that set is treated as the operator's; we refuse the verb rather
 /// than silently destroying it.
-fn refuse_if_unrelated_dirty(
+pub(crate) fn refuse_if_unrelated_dirty(
     repo: &std::path::Path,
     our_paths: &[&std::path::Path],
 ) -> Result<(), ApiError> {
