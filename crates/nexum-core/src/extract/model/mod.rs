@@ -1,10 +1,16 @@
 //! `ModelClient` implementations and shared types.
 
 mod anthropic;
+mod codex_phase1;
+mod ollama_stub;
+mod openai_stub;
 mod render;
 mod types;
 
 pub use anthropic::AnthropicClient;
+pub use codex_phase1::CodexPhase1Reader;
+pub use ollama_stub::OllamaClient;
+pub use openai_stub::OpenAiClient;
 pub use types::{ExtractError, ExtractionOutput, ModelClient, Provider, RawRecord};
 
 #[cfg(test)]
