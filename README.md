@@ -29,7 +29,10 @@ your memory files — and your agent will trust whatever's there.
   `~/.codex/memories/` as upstream — no replacement, no fragmentation.
 - **Structured search** on the unioned corpus:
   `nexum search "concurrency" --type failure --since 30d` plus
-  `nexum list / get / recent / by-session`.
+  `nexum list / get / recent / by-session`. The `--metadata-type` filter
+  slices by adapter-specific frontmatter type (e.g. CC's `feedback`,
+  `reference`, `user`); every result row surfaces it as `metadata_type`
+  alongside `record_type`.
 - **Cryptographic provenance** — every record nexum writes is signed
   with your SSH key (commits to `~/.nexum/notebook.git/`), so a
   malicious npm postinstall can't quietly inject memory your agent
@@ -77,7 +80,8 @@ your memory files — and your agent will trust whatever's there.
   commits each record to `notebook.git` via the existing signed-commit pipeline.
   Hash-bound two-step backfill flow gives an explicit cost-acknowledgement loop;
   first-run consent is recorded per (provider, model family) for `--quiet` and
-  cron-style use.
+  cron-style use. Committed records are immediately queryable via the standard
+  read verbs (`get` / `list` / `search`).
 
 ## Quick start
 
