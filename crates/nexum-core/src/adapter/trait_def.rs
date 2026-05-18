@@ -98,10 +98,6 @@ pub enum AdapterError {
     Project(#[from] crate::project::ProjectError),
 }
 
-/// Adapter trait. Two methods — `list` returns a pass shape, `read` fetches
-/// the full record body for a single id (used by `query::get` for sources whose
-/// indexed body is truncated; the read path stores full bodies and rarely needs
-/// `read`, but the contract is preserved for future use).
 pub trait Adapter {
     /// What source this adapter speaks for.
     fn source(&self) -> Source;
@@ -122,6 +118,27 @@ pub trait Adapter {
     /// unreadable; `AdapterError::MalformedRecord` if parsing fails; other
     /// variants for per-source-specific failures.
     fn read(&self, id: &RecordId) -> Result<UnifiedRecord, AdapterError>;
+
+    /// Fetch the full `UnifiedRecord` matching a `RecordSummary` — i.e.
+    /// the composite `(project_id, id)` identity emitted by `list`.
+    /// Adapters whose storage layout disambiguates same-id records by
+    /// project bucket (local, cc-native) should override this to walk
+    /// only the relevant bucket, so two records with the same `id` but
+    /// distinct project ids both surface through the indexer instead of
+    /// the first-match-wins behaviour of `read(&summary.id)`.
+    ///
+    /// The default implementation drops `summary.project_id` and falls
+    /// back to the id-only path, which is correct for adapters whose
+    /// ids are already unique across projects (codex).
+    ///
+    /// # Errors
+    /// Same shape as [`read`].
+    fn read_by_summary(
+        &self,
+        summary: &crate::records::RecordSummary,
+    ) -> Result<UnifiedRecord, AdapterError> {
+        self.read(&summary.id)
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +201,7 @@ mod tests {
             records: vec![RecordSummary {
                 id: "alpha".into(),
                 content_hash: "deadbeef".into(),
+                project_id: Some("example".into()),
             }],
             completeness: PassCompleteness::Authoritative,
         };

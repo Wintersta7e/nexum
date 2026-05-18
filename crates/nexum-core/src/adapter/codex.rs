@@ -152,6 +152,12 @@ impl CodexAdapter {
                     records.push(RecordSummary {
                         id,
                         content_hash: hash,
+                        // Codex resolves project_id later inside `build_record`
+                        // (via the threads index). Leaving it `None` at list
+                        // time is fine: codex ids are derived from rollout
+                        // paths or thread ids and are already unique across
+                        // projects.
+                        project_id: None,
                     });
                 }
                 Err(()) => skipped.push(SkipReason {
@@ -530,6 +536,7 @@ fn push_record_summaries(
         records.push(RecordSummary {
             id,
             content_hash: hash,
+            project_id: None,
         });
     }
 }

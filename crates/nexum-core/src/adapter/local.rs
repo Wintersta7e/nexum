@@ -121,6 +121,7 @@ impl Adapter for LocalAdapter {
                 Ok(r) => records.push(RecordSummary {
                     id: r.id.clone(),
                     content_hash: r.content_hash.clone(),
+                    project_id: Some(r.project_id.clone()),
                 }),
                 Err(LocalParseError::Malformed(reason) | LocalParseError::IoTransient(reason)) => {
                     skipped.push(reason);
@@ -161,6 +162,55 @@ impl Adapter for LocalAdapter {
         Err(AdapterError::Io {
             path: PathBuf::from(id),
             source: std::io::Error::new(std::io::ErrorKind::NotFound, format!("local record {id}")),
+        })
+    }
+
+    fn read_by_summary(
+        &self,
+        summary: &crate::records::RecordSummary,
+    ) -> Result<UnifiedRecord, AdapterError> {
+        // Two records with the same `id` can land at different `project_id`
+        // values: per-project records resolve project_id from the path
+        // subdir; legacy top-level records resolve it from the YAML body's
+        // `project_id:` field. Parse each same-id candidate and return the
+        // one whose resolved project matches — `read(&summary.id)` alone
+        // returns the first-match-wins choice and silently shadows the
+        // sibling.
+        let Some(project) = &summary.project_id else {
+            return self.read(&summary.id);
+        };
+        let mut last_err: Option<AdapterError> = None;
+        for path in self.discover() {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem != summary.id {
+                continue;
+            }
+            match parse_local_record(&self.notebook_git, &path) {
+                Ok(r) if r.project_id == *project => return Ok(*r),
+                Ok(_) => {}
+                Err(e) => {
+                    last_err = Some(match e {
+                        LocalParseError::Malformed(r) => AdapterError::MalformedRecord {
+                            path: r.path,
+                            detail: "local yaml parse failure".into(),
+                        },
+                        LocalParseError::IoTransient(r) => AdapterError::Io {
+                            path: r.path,
+                            source: std::io::Error::other("transient i/o"),
+                        },
+                    });
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e);
+        }
+        Err(AdapterError::Io {
+            path: PathBuf::from(&summary.id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("local record {id} under project {project}", id = summary.id),
+            ),
         })
     }
 }
