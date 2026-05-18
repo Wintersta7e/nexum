@@ -24,8 +24,8 @@ use tracing::{info, warn};
 
 use crate::{
     adapter::{
-        Adapter, AdapterPass, PassCompleteness, cc::CcAdapter, codex::CodexAdapter,
-        local::LocalAdapter,
+        Adapter, AdapterPass, PassCompleteness, SkipKind, SkipReason, cc::CcAdapter,
+        codex::CodexAdapter, local::LocalAdapter,
     },
     config::types::Config,
     embed::{Embedder, f32_slice_to_le_bytes},
@@ -84,6 +84,30 @@ impl std::fmt::Display for PerSourceCompleteness {
     }
 }
 
+/// One bucket in `PerSourceOutcome.partial_reasons` — a `SkipKind` with its
+/// running count from a `PassCompleteness::Partial` adapter pass. JSON-form:
+/// `{"kind": "file-malformed", "count": 3}`. The kind is the same kebab
+/// string `SkipKind` serializes as, so agents can match on a stable
+/// enumeration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialReasonSummary {
+    pub kind: SkipKind,
+    pub count: u32,
+}
+
+/// Bucket `skipped` reasons by `SkipKind` and emit one summary per kind,
+/// ordered by `SkipKind` declaration order so the JSON output is stable.
+fn summarize_skip_reasons(skipped: &[SkipReason]) -> Vec<PartialReasonSummary> {
+    let mut counts: std::collections::BTreeMap<SkipKind, u32> = std::collections::BTreeMap::new();
+    for r in skipped {
+        *counts.entry(r.kind).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| PartialReasonSummary { kind, count })
+        .collect()
+}
+
 /// Per-source slice of the reindex outcome. Surfaces what each adapter
 /// contributed so the CLI can render a structured summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +132,14 @@ pub struct PerSourceOutcome {
     /// colliding ids.
     #[serde(default)]
     pub duplicate_ids_skipped: u32,
+    /// When `completeness` is `partial`, an ordered breakdown of the
+    /// `SkipReason` kinds the adapter surfaced — e.g. how many files were
+    /// `file-malformed` vs `file-transient` vs `lock-contention`. Empty for
+    /// every other completeness state. Agents read this to decide whether
+    /// a partial pass is worth retrying (transient) or escalating
+    /// (malformed).
+    #[serde(default)]
+    pub partial_reasons: Vec<PartialReasonSummary>,
 }
 
 /// Aggregate outcome of one reindex pass across all enabled adapters.
@@ -369,6 +401,10 @@ where
         PassCompleteness::MissingRoot { .. } => PerSourceCompleteness::MissingRoot,
         PassCompleteness::Unreadable { .. } => PerSourceCompleteness::Unreadable,
     };
+    let partial_reasons = match &pass.completeness {
+        PassCompleteness::Partial { skipped } => summarize_skip_reasons(skipped),
+        _ => Vec::new(),
+    };
     let mut per_source = PerSourceOutcome {
         source,
         completeness,
@@ -378,6 +414,7 @@ where
         deferred_deletes: 0,
         embed_failures: 0,
         duplicate_ids_skipped: 0,
+        partial_reasons,
     };
 
     if let PassCompleteness::Failed { reason } = &pass.completeness {
@@ -1254,6 +1291,7 @@ mod tests {
             deferred_deletes: 0,
             embed_failures: 0,
             duplicate_ids_skipped: 0,
+            partial_reasons: Vec::new(),
         };
         assert_eq!(outcome.embed_failures, 0);
     }
@@ -1269,7 +1307,67 @@ mod tests {
             deferred_deletes: 0,
             embed_failures: 0,
             duplicate_ids_skipped: 1,
+            partial_reasons: Vec::new(),
         };
         assert_eq!(outcome.duplicate_ids_skipped, 1);
+    }
+
+    #[test]
+    fn summarize_skip_reasons_buckets_by_kind() {
+        // Two `file-malformed` and one `file-transient` collapse into two
+        // summary rows. Order follows `SkipKind`'s declaration order, which
+        // is the stable ABI we hand agents.
+        use std::path::PathBuf;
+        let skipped = vec![
+            SkipReason {
+                path: PathBuf::from("a.yml"),
+                kind: SkipKind::FileMalformed,
+                at: chrono::Utc::now(),
+            },
+            SkipReason {
+                path: PathBuf::from("b.yml"),
+                kind: SkipKind::FileMalformed,
+                at: chrono::Utc::now(),
+            },
+            SkipReason {
+                path: PathBuf::from("c.yml"),
+                kind: SkipKind::FileTransient,
+                at: chrono::Utc::now(),
+            },
+        ];
+        let summary = summarize_skip_reasons(&skipped);
+        assert_eq!(summary.len(), 2);
+        // BTreeMap iteration follows `SkipKind`'s declared order:
+        // FileTransient, FileMalformed, LockContention.
+        assert_eq!(summary[0].kind, SkipKind::FileTransient);
+        assert_eq!(summary[0].count, 1);
+        assert_eq!(summary[1].kind, SkipKind::FileMalformed);
+        assert_eq!(summary[1].count, 2);
+    }
+
+    #[test]
+    fn per_source_outcome_carries_partial_reasons_field() {
+        // The field defaults to empty for non-partial completeness states
+        // and round-trips through serde so existing JSON consumers see no
+        // change unless `partial_reasons` is populated.
+        let outcome = PerSourceOutcome {
+            source: Source::Local,
+            completeness: PerSourceCompleteness::Partial,
+            ingested: 3,
+            upserts: 2,
+            deletes: 0,
+            deferred_deletes: 0,
+            embed_failures: 0,
+            duplicate_ids_skipped: 0,
+            partial_reasons: vec![PartialReasonSummary {
+                kind: SkipKind::FileMalformed,
+                count: 1,
+            }],
+        };
+        let json = serde_json::to_string(&outcome).expect("serialize");
+        assert!(json.contains(r#""partial_reasons":[{"kind":"file-malformed","count":1}]"#));
+        let parsed: PerSourceOutcome = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.partial_reasons.len(), 1);
+        assert_eq!(parsed.partial_reasons[0].count, 1);
     }
 }

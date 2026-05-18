@@ -21,7 +21,7 @@ pub struct SkipReason {
 /// next pass" cases; `FileMalformed` is content the parser couldn't handle
 /// even after the file was fully read; `LockContention` is the SQLite-locked
 /// case for the Codex adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SkipKind {
     FileTransient,
