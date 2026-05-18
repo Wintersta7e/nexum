@@ -5,5 +5,6 @@
 
 pub mod digest;
 pub mod model;
+pub mod pricing;
 pub mod prompts;
 pub mod redaction;
