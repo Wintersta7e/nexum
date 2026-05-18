@@ -40,8 +40,8 @@ impl RedactionEngine {
             if spans.is_empty() {
                 continue;
             }
-            for (start, end) in spans.iter().rev() {
-                let matched = &text[*start..*end];
+            for &(start, end) in &spans {
+                let matched = &text[start..end];
                 let context_start = start.saturating_sub(8);
                 let context_end = (end + 8).min(text.len());
                 events.push(RedactionEvent {
