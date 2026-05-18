@@ -3,6 +3,7 @@
 //! parses the YAML response into typed records, and commits them via the
 //! existing trust-chain signed-commit path.
 
+pub mod consent;
 pub mod digest;
 pub mod model;
 pub mod pipeline;
