@@ -41,6 +41,8 @@ pub enum ApiError {
     // with the existing From<QueryError> which also wraps TrustError.
     #[error(transparent)]
     Trust(crate::trust::events::TrustError),
+    #[error(transparent)]
+    Extraction(#[from] crate::extract::model::ExtractError),
 }
 
 impl From<crate::query::QueryError> for ApiError {

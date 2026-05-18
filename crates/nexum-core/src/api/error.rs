@@ -95,6 +95,28 @@ pub mod error_codes {
     /// embedder is the broken component. Remediation: reinstall the
     /// embedding model.
     pub const EMBED_FAILED: &str = "EMBED_FAILED";
+    /// First-run consent missing; user must run `nexum extract --session
+    /// <id>` interactively once before automated extraction proceeds.
+    pub const EXTRACT_NOT_ACKNOWLEDGED: &str = "EXTRACT_NOT_ACKNOWLEDGED";
+    /// `--backfill` invoked without a prior `--dry-run` manifest.
+    pub const EXTRACT_DRY_RUN_REQUIRED: &str = "EXTRACT_DRY_RUN_REQUIRED";
+    /// Recomputed dry-run id differs from the manifest's recorded id
+    /// (basis shifted between dry-run and backfill).
+    pub const EXTRACT_DRY_RUN_MISMATCH: &str = "EXTRACT_DRY_RUN_MISMATCH";
+    /// Provider API key environment variable was not set.
+    pub const EXTRACT_NO_API_KEY: &str = "EXTRACT_NO_API_KEY";
+    /// Configured provider is not implemented in this build.
+    pub const EXTRACT_PROVIDER_UNSUPPORTED: &str = "EXTRACT_PROVIDER_UNSUPPORTED";
+    /// Catch-all for transport, redaction, digest, I/O, JSON, YAML, and git
+    /// failures that surface during extraction. Operator inspects the
+    /// `message` field for the underlying cause.
+    pub const EXTRACT_MODEL_ERROR: &str = "EXTRACT_MODEL_ERROR";
+    /// Model returned content that could not be parsed as YAML.
+    pub const EXTRACT_PARSE: &str = "EXTRACT_PARSE";
+    /// Parsed YAML record failed schema validation.
+    pub const EXTRACT_VALIDATION: &str = "EXTRACT_VALIDATION";
+    /// Session selector matched no sessions.
+    pub const EXTRACT_NO_SESSIONS: &str = "EXTRACT_NO_SESSIONS";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -110,6 +132,7 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
             ApiError::Indexer(e) => indexer_envelope(e),
             ApiError::Config(e) => config_envelope(e),
             ApiError::Trust(e) => trust_envelope(e),
+            ApiError::Extraction(e) => extract_envelope(e),
             ApiError::TrustRegenerateRefused { reason } => ErrorEnvelope {
                 // Refusals (merge in progress, dirty worktree, pending
                 // reanchor) are operator-fixable conditions — they belong
@@ -516,6 +539,92 @@ fn store_integrity_foreign(kind: &'static str, e: &dyn std::fmt::Display) -> Err
         message: format!("{kind} error: {inner}"),
         remediation: None,
         context,
+    }
+}
+
+// ───── ExtractError variant dispatch ────────────────────────────────────────
+
+fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope {
+    use crate::extract::model::ExtractError as E;
+    match err {
+        E::NoApiKey { env_var } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_NO_API_KEY,
+            message: format!("set {env_var} in the environment and re-run"),
+            remediation: Some(Remediation {
+                command: Some(format!("export {env_var}=...")),
+                rationale: format!("set {env_var} before invoking the command"),
+            }),
+            context: serde_json::json!({ "env_var": env_var }),
+        },
+        E::ProviderUnsupported { provider } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_PROVIDER_UNSUPPORTED,
+            message: format!("provider `{provider}` is not implemented in this build"),
+            remediation: None,
+            context: serde_json::json!({ "provider": provider }),
+        },
+        E::Http { status, body } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_MODEL_ERROR,
+            message: format!("HTTP {status}: {body}"),
+            remediation: None,
+            context: serde_json::json!({ "status": status, "body": body }),
+        },
+        E::MalformedResponse { reason } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_PARSE,
+            message: format!("model response was not parseable as YAML: {reason}"),
+            remediation: None,
+            context: serde_json::json!({ "reason": reason }),
+        },
+        E::Validation { reason } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_VALIDATION,
+            message: format!("record failed schema validation: {reason}"),
+            remediation: None,
+            context: serde_json::json!({ "reason": reason }),
+        },
+        E::DryRunRequired => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_DRY_RUN_REQUIRED,
+            message: "run `nexum extract --backfill --dry-run` first to write a manifest"
+                .to_owned(),
+            remediation: Some(Remediation {
+                command: Some("nexum extract --backfill --dry-run".to_owned()),
+                rationale: "the backfill path requires a manifest from a dry-run pass first"
+                    .to_owned(),
+            }),
+            context: serde_json::json!({}),
+        },
+        E::DryRunMismatch { expected, actual } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_DRY_RUN_MISMATCH,
+            message: format!("expected {expected}, recomputed {actual}"),
+            remediation: Some(Remediation {
+                command: Some("nexum extract --backfill --dry-run".to_owned()),
+                rationale: "the basis shifted; re-run --dry-run and supply the new id".to_owned(),
+            }),
+            context: serde_json::json!({ "expected": expected, "actual": actual }),
+        },
+        E::NotAcknowledged => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_NOT_ACKNOWLEDGED,
+            message: "run `nexum extract --session <any-id>` interactively once to record consent"
+                .to_owned(),
+            remediation: Some(Remediation {
+                command: Some("nexum extract --session <any-id>".to_owned()),
+                rationale: "first run records the consent ack so subsequent runs can proceed"
+                    .to_owned(),
+            }),
+            context: serde_json::json!({}),
+        },
+        E::NoSessions => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_NO_SESSIONS,
+            message: "the supplied selector matched no sessions".to_owned(),
+            remediation: None,
+            context: serde_json::json!({}),
+        },
+        E::Redaction(_) | E::Digest(_) | E::Io(_) | E::Json(_) | E::Yaml(_) | E::Git(_) => {
+            ErrorEnvelope {
+                error_code: error_codes::EXTRACT_MODEL_ERROR,
+                message: err.to_string(),
+                remediation: None,
+                context: serde_json::json!({}),
+            }
+        }
     }
 }
 
