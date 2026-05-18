@@ -55,6 +55,12 @@ pub struct SearchParams {
     /// or `untyped`. Omit for all types.
     #[serde(default)]
     pub record_type: Option<String>,
+    /// Restrict to one adapter-specific metadata type, e.g. the CC
+    /// frontmatter `metadata.type` surfaced as `metadata_type` on result
+    /// rows. Implicitly narrows to records that carry it (today only
+    /// `cc-native`); other sources never match.
+    #[serde(default)]
+    pub metadata_type: Option<String>,
     /// Restrict to one source adapter: `cc-native`, `codex-native`, or
     /// `local`. Omit for all sources.
     #[serde(default)]
@@ -90,6 +96,12 @@ pub struct ListParams {
     /// or `untyped`. Omit for all types.
     #[serde(default)]
     pub record_type: Option<String>,
+    /// Restrict to one adapter-specific metadata type, e.g. the CC
+    /// frontmatter `metadata.type` surfaced as `metadata_type` on result
+    /// rows. Implicitly narrows to records that carry it (today only
+    /// `cc-native`); other sources never match.
+    #[serde(default)]
+    pub metadata_type: Option<String>,
     /// Restrict to one source adapter: `cc-native`, `codex-native`, or
     /// `local`. Omit for all sources.
     #[serde(default)]

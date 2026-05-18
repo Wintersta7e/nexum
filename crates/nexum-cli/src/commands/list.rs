@@ -14,6 +14,8 @@ pub struct ListArgs {
     #[arg(long)]
     pub r#type: Option<String>,
     #[arg(long)]
+    pub metadata_type: Option<String>,
+    #[arg(long)]
     pub project: Option<String>,
     #[arg(long)]
     pub source: Option<String>,
@@ -74,6 +76,7 @@ fn build_filters(args: &ListArgs) -> Result<Filters, super::common::InvalidFilte
             args.r#type.as_deref(),
             RecordType::try_from_user_str,
         )?,
+        metadata_type: args.metadata_type.clone(),
         project_id: args.project.clone(),
         source: parse_enum_filter("source", args.source.as_deref(), Source::try_from_user_str)?,
         tags: args.tag.clone(),

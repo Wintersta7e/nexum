@@ -63,6 +63,12 @@ pub enum EmbedStatus {
 pub struct Filters {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_type: Option<RecordType>,
+    /// Adapter-specific metadata type (e.g. CC frontmatter `metadata.type`
+    /// surfaced as `cc_type`). Matches `json_extract(extras, '$.cc_type')`
+    /// at query time. Implicitly narrows to records that carry it (today
+    /// only `cc-native`); other sources never match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +105,12 @@ pub struct Filters {
 pub struct SearchResult {
     pub id: RecordId,
     pub record_type: RecordType,
+    /// Adapter-specific metadata type surfaced from `records.extras`. For
+    /// `cc-native` records this is the original frontmatter `metadata.type`
+    /// (e.g. `"feedback"`, `"reference"`, `"user"`). `None` for sources
+    /// without an analogous field (codex, local).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_type: Option<String>,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
