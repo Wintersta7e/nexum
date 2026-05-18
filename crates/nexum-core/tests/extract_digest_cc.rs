@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use nexum_core::extract::digest::{
-    build_cc_digest, BuildDigestError, SessionId, SessionKind, TurnRole,
+    BuildDigestError, SessionId, SessionKind, TurnRole, build_cc_digest,
 };
 use uuid::Uuid;
 
@@ -48,12 +48,16 @@ fn rich_session_collects_assistant_text_blocks() {
     let digest = build_cc_digest(&fixture("rich.jsonl"), uuid).expect("build");
     assert_eq!(digest.assistant_turns.len(), 3);
     assert_eq!(digest.assistant_turns[0].role, TurnRole::Assistant);
-    assert!(digest.assistant_turns[0]
-        .content
-        .contains("flag and a unit test"));
-    assert!(digest.assistant_turns[2]
-        .content
-        .contains("wrap it in Option"));
+    assert!(
+        digest.assistant_turns[0]
+            .content
+            .contains("flag and a unit test")
+    );
+    assert!(
+        digest.assistant_turns[2]
+            .content
+            .contains("wrap it in Option")
+    );
 }
 
 #[test]
