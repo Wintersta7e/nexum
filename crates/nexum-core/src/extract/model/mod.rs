@@ -1,7 +1,10 @@
 //! `ModelClient` implementations and shared types.
 
+mod anthropic;
+mod render;
 mod types;
 
+pub use anthropic::AnthropicClient;
 pub use types::{ExtractError, ExtractionOutput, ModelClient, Provider, RawRecord};
 
 #[cfg(test)]
