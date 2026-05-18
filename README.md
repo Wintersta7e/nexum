@@ -70,6 +70,14 @@ your memory files — and your agent will trust whatever's there.
   embedding backfill, schema migration). Every mutation runs under a
   writer-process lock and rolls back on failure so the worktree
   stays clean.
+- **Typed extraction** — `nexum extract --session <id>` / `--since <duration>` /
+  `--backfill --dry-run` / `--backfill --dry-run-id <hash>`. Reads CC transcripts
+  and Codex rollouts, scrubs common secret shapes, sends a 10-30 KB digest to the
+  configured `ModelClient` (default Anthropic), validates the YAML response, and
+  commits each record to `notebook.git` via the existing signed-commit pipeline.
+  Hash-bound two-step backfill flow gives an explicit cost-acknowledgement loop;
+  first-run consent is recorded per (provider, model family) for `--quiet` and
+  cron-style use.
 
 ## Quick start
 
@@ -117,15 +125,14 @@ CC_HOME="$HOME/.claude" ./e2e/run.sh cc         # real cc install
 ## Status
 
 The read path, the write path, the trust state machine, the MCP
-stdio server, semantic ranking, and the admin / recovery command
-surface are all in `main` and validated end-to-end against real
-codex + cc data via the Docker harness. Three crates compile clean,
-gate green at `cargo fmt + check + clippy -D warnings + test`.
+stdio server, semantic ranking, typed extraction, and the admin /
+recovery command surface are all in `main` and validated end-to-end
+against real codex + cc data via the Docker harness. Three crates
+compile clean, gate green at
+`cargo fmt + check + clippy -D warnings + test`.
 
-Remaining work: typed extraction from past sessions (Claude / Codex
-extractor frontends, prompt versioning, structured field promotion),
-then a recommendation → decision promotion flow when matching commits
-land in your project repo.
+Remaining work: a recommendation -> decision promotion flow when
+matching commits land in your project repo.
 
 ## Layout
 

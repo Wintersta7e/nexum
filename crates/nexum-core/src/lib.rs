@@ -1,8 +1,8 @@
 //! `nexum-core` — core library for nexum.
 //!
 //! Wires the read path (`adapter::*`), the indexer (`indexer::*`), the query
-//! layer (`query::*`), and the API facade (`api::*`). Semantic embeddings
-//! and the MCP surface are not yet wired.
+//! layer (`query::*`), the API facade (`api::*`), the embedder + install
+//! pipeline (`embed::*`), and the typed extraction pipeline (`extract::*`).
 
 // Relaxed `forbid` → `deny` to permit the single justified
 // `#[allow(unsafe_code)]` on `indexer::db::register_sqlite_vec_once`.
