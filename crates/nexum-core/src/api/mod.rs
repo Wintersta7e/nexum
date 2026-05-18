@@ -41,6 +41,8 @@ pub enum ApiError {
     // with the existing From<QueryError> which also wraps TrustError.
     #[error(transparent)]
     Trust(crate::trust::events::TrustError),
+    #[error(transparent)]
+    Extraction(#[from] crate::extract::model::ExtractError),
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -78,7 +80,7 @@ impl From<crate::trust::events::TrustError> for ApiError {
 ///
 /// The closure receives nothing — it just runs under the held lock and is
 /// responsible for any rollback inside its own error-handling paths.
-fn with_writer_lock<T>(
+pub(crate) fn with_writer_lock<T>(
     paths: &Paths,
     body: impl FnOnce() -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
@@ -280,7 +282,7 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
 /// non-zero, `Err` if the binary couldn't be spawned. Used by rollback paths
 /// that need to revert specific files without touching unrelated changes the
 /// operator may have in the worktree.
-fn restore_paths_from_head(
+pub(crate) fn restore_paths_from_head(
     repo: &std::path::Path,
     paths: &[&std::path::Path],
 ) -> Result<bool, std::io::Error> {
@@ -297,7 +299,7 @@ fn restore_paths_from_head(
 /// `Ok(true)` on success, `Ok(false)` on non-zero exit, `Err` if the binary
 /// couldn't be spawned. Used when a commit landed but its post-commit
 /// verification failed.
-fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
+pub(crate) fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
     let out = std::process::Command::new("git")
         .args(["reset", "--hard", "HEAD~1"])
         .current_dir(repo)
@@ -312,7 +314,7 @@ fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> 
 /// `our_paths` are repo-relative (e.g. `.trust/events.yml`). Anything dirty
 /// outside that set is treated as the operator's; we refuse the verb rather
 /// than silently destroying it.
-fn refuse_if_unrelated_dirty(
+pub(crate) fn refuse_if_unrelated_dirty(
     repo: &std::path::Path,
     our_paths: &[&std::path::Path],
 ) -> Result<(), ApiError> {
@@ -391,12 +393,14 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
         }
         crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
 
-        // Refuse if the operator has uncommitted changes outside the trust
-        // file set — the rollback paths use `git checkout HEAD -- <files>`
-        // (path-scoped) but the operator's other work should still not be
-        // entangled with a trust-state mutation that might fail mid-flight.
+        // Refuse if the operator has uncommitted changes outside the
+        // signer-projection file set. `events.yml` is deliberately NOT in
+        // the allowlist: this command derives the three signer projections
+        // from `events.yml`, and a dirty `events.yml` would mean the signed
+        // commit captures projections of an uncommitted source — a
+        // non-self-contained mutation. Operators must commit `events.yml`
+        // first.
         let trust_file_pbs: Vec<std::path::PathBuf> = [
-            ".trust/events.yml",
             ".trust/historical_signers",
             ".trust/allowed_signers",
             ".trust/revoked_signers",
@@ -1339,6 +1343,379 @@ fn identity_kind_for(project_id: &str) -> &'static str {
         "cc-slug" => "cc-slug-fallback",
         "codex-cwd" => "codex-cwd-fallback",
         _ => "path",
+    }
+}
+
+/// Run the backfill dry-run pass. Discovers every candidate session under
+/// the configured CC and Codex adapters, builds each digest, counts input
+/// tokens via `client.count_input_tokens`, estimates output tokens and
+/// per-session cost via the pinned pricing table, and writes a
+/// [`crate::extract::state::Manifest`] under `<out_dir>/dry-run-<ts>.json`.
+///
+/// The manifest carries a deterministic `dry_run_id` (hash of
+/// `provider` + `model` + `pricing_snapshot_at` + sorted per-session
+/// (id, tokens, `digest_hash`) tuples), so two consecutive dry-run
+/// passes against the same corpus produce the same id. Candidate
+/// digests whose builder
+/// surfaces an error are skipped — one unreadable transcript must not
+/// abort the batch — but the failure is left implicit (a future
+/// `--explain` flag could surface a per-candidate summary).
+///
+/// # Errors
+///
+/// Returns `ApiError::Extraction` if the pricing table has no row for the
+/// configured `(provider, model)`, if `client.count_input_tokens` fails for
+/// a candidate, or if the manifest cannot be serialized / written.
+///
+/// # Panics
+///
+/// Panics only if the embedded `PRICING_SNAPSHOT_AT_RFC3339` const fails
+/// to parse as RFC3339 — that is a build-time invariant covered by a unit
+/// test, so this branch is unreachable in practice.
+pub fn extract_backfill_dry_run(
+    paths: &Paths,
+    cfg: &Config,
+    client: &dyn crate::extract::model::ModelClient,
+    out_dir: &std::path::Path,
+) -> Result<crate::extract::state::Manifest, ApiError> {
+    use sha2::{Digest as _, Sha256};
+
+    use crate::extract::digest::{SessionId, build_cc_digest, build_codex_digest};
+    use crate::extract::discovery::{discover_cc_sessions, discover_codex_sessions};
+    use crate::extract::model::{ExtractError, render_digest};
+    use crate::extract::pricing::{
+        default_pricing_table, estimate_cost_usd, estimate_output_tokens, pricing_snapshot_at,
+    };
+    use crate::extract::state::{Manifest, PerSourceManifest, SourceBreakdown, compute_dry_run_id};
+
+    let provider_name = client.provider_name().to_owned();
+    let model = cfg.extractor.model.clone();
+
+    let pricing = default_pricing_table();
+    let row = pricing
+        .lookup(&provider_name, &model)
+        .ok_or_else(|| ExtractError::Validation {
+            reason: format!(
+                "no pricing row for (provider={provider_name}, model={model}); update pricing.rs"
+            ),
+        })?
+        .clone();
+
+    let pricing_snapshot_at = pricing_snapshot_at();
+
+    // Discover every candidate (no --since cutoff for a full backfill).
+    let mut candidates = Vec::new();
+    if cfg.adapters.cc.enabled {
+        candidates.extend(
+            discover_cc_sessions(std::path::Path::new(&cfg.adapters.cc.projects_dir), None)
+                .map_err(ApiError::from)?,
+        );
+    }
+    if cfg.adapters.codex.enabled {
+        candidates.extend(
+            discover_codex_sessions(std::path::Path::new(&cfg.adapters.codex.state_db), None)
+                .map_err(ApiError::from)?,
+        );
+    }
+
+    let mut per_session: Vec<(String, u32, String)> = Vec::with_capacity(candidates.len());
+    let mut candidate_ids: Vec<String> = Vec::with_capacity(candidates.len());
+    let mut per_session_cost: Vec<f64> = Vec::with_capacity(candidates.len());
+    let mut cc_breakdown = SourceBreakdown::default();
+    let mut codex_breakdown = SourceBreakdown::default();
+    let mut total_cost: f64 = 0.0;
+
+    for candidate in candidates {
+        let digest_result = match &candidate.session_id {
+            SessionId::Cc(uuid) => build_cc_digest(&candidate.source_path, *uuid),
+            SessionId::CodexThread(_) | SessionId::CodexRolloutPath(_) => {
+                build_codex_digest(&candidate.source_path)
+            }
+        };
+        // Skip an unreadable transcript; one bad file must not abort the
+        // batch. Future work could collect these into a `--explain` summary.
+        let Ok(digest) = digest_result else {
+            continue;
+        };
+        let input_tokens = client.count_input_tokens(&digest).map_err(ApiError::from)?;
+        let output_tokens = estimate_output_tokens(input_tokens);
+        let cost = estimate_cost_usd(input_tokens, output_tokens, &row);
+
+        let rendered = render_digest(&digest);
+        let digest_bytes = Sha256::digest(rendered.as_bytes());
+        let digest_hash = format!("sha256:{}", bytes_to_hex(digest_bytes.as_slice()));
+
+        let id_str = match &digest.session_id {
+            SessionId::Cc(uuid) => uuid.to_string(),
+            SessionId::CodexRolloutPath(p) => p.display().to_string(),
+            SessionId::CodexThread(t) => t.clone(),
+        };
+
+        match &candidate.session_id {
+            SessionId::Cc(_) => {
+                cc_breakdown.candidate_count = cc_breakdown.candidate_count.saturating_add(1);
+                cc_breakdown.estimated_cost_usd += cost;
+            }
+            SessionId::CodexThread(_) | SessionId::CodexRolloutPath(_) => {
+                codex_breakdown.candidate_count = codex_breakdown.candidate_count.saturating_add(1);
+                codex_breakdown.estimated_cost_usd += cost;
+            }
+        }
+
+        per_session.push((id_str.clone(), input_tokens, digest_hash));
+        candidate_ids.push(id_str);
+        per_session_cost.push(cost);
+        total_cost += cost;
+    }
+
+    let candidate_count = u32::try_from(per_session.len()).unwrap_or(u32::MAX);
+    let p95 = p95_cost(&per_session_cost);
+
+    let dry_run_id = compute_dry_run_id(&provider_name, &model, pricing_snapshot_at, &per_session);
+
+    let manifest = Manifest {
+        dry_run_id,
+        provider: provider_name,
+        model,
+        pricing_snapshot_at,
+        candidate_count,
+        total_estimated_cost_usd: total_cost,
+        p95_per_session_cost_usd: p95,
+        per_source: PerSourceManifest {
+            cc: cc_breakdown,
+            codex: codex_breakdown,
+        },
+        candidate_ids,
+    };
+
+    write_dry_run_manifest(paths, out_dir, &manifest)?;
+
+    Ok(manifest)
+}
+
+/// Nearest-rank p95 of a per-session cost list. Returns `0.0` for an empty
+/// list (the manifest under zero candidates has no percentile to report).
+fn p95_cost(costs: &[f64]) -> f64 {
+    if costs.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = costs.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    // Nearest-rank p95 via integer math: idx = ceil((95 * n) / 100) - 1.
+    // Operating on `usize` sidesteps the f64-as-i64 truncation lint.
+    let one_indexed = (n.saturating_mul(95)).div_ceil(100).max(1);
+    let idx = one_indexed - 1;
+    sorted[idx.min(n - 1)]
+}
+
+/// Write the dry-run manifest atomically to
+/// `<out_dir>/dry-run-<unix-ts>.json`. The unix-ts suffix lets a series of
+/// dry-runs accumulate without overwriting earlier passes.
+fn write_dry_run_manifest(
+    _paths: &Paths,
+    out_dir: &std::path::Path,
+    manifest: &crate::extract::state::Manifest,
+) -> Result<(), ApiError> {
+    use crate::extract::model::ExtractError;
+
+    std::fs::create_dir_all(out_dir).map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    let ts = chrono::Utc::now().timestamp();
+    let path = out_dir.join(format!("dry-run-{ts}.json"));
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_vec_pretty(manifest)
+        .map_err(|e| ApiError::Extraction(ExtractError::Json(e)))?;
+    std::fs::write(&tmp, json).map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    std::fs::rename(&tmp, &path).map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    Ok(())
+}
+
+/// Aggregated outcome of a backfill run. Returned by [`extract_backfill_run`]
+/// so the CLI can render a one-line summary or the JSON envelope without
+/// re-reading `state.json`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackfillOutcome {
+    pub committed_record_count: u32,
+    pub declined_session_count: u32,
+    pub failed_session_count: u32,
+    pub total_session_count: u32,
+}
+
+struct PreparedCandidate {
+    id_str: String,
+    digest: crate::extract::digest::SessionDigest,
+}
+
+/// Run the backfill bound to a supplied `dry_run_id`. Rediscovers every CC
+/// and Codex candidate, rebuilds each digest, recounts input tokens, and
+/// recomputes the canonical id. If the recomputed id differs from
+/// `expected_id`, aborts with
+/// [`crate::extract::model::ExtractError::DryRunMismatch`] so the operator
+/// re-runs `--dry-run` against the new basis.
+///
+/// On a match, streams every candidate not already in
+/// `state.json`'s `completed_session_ids` through
+/// [`crate::extract::pipeline::extract_session_with_client`]. The state file
+/// is rewritten after every session so an interrupt resumes cleanly. A
+/// per-session digest-build failure is silently skipped (one unreadable
+/// transcript must not abort the batch); a per-session model / commit
+/// failure is recorded under `failed_session_ids` so the operator can
+/// inspect it after the pass.
+///
+/// # Errors
+///
+/// Returns `ApiError::Extraction` for token-count failures, pricing-row
+/// lookups, the dry-run id mismatch, or any `extract_session_with_client`
+/// propagation that bubbles up before the per-session arm catches it.
+/// Returns the underlying `ApiError` variant for config-load,
+/// state.json read/write, or indexer failures during the post-commit
+/// index pass.
+///
+/// # Panics
+///
+/// Inherits the unreachable panic from
+/// [`crate::extract::pricing::pricing_snapshot_at`] — the embedded const is
+/// validated at build time by a unit test.
+#[allow(clippy::too_many_lines)]
+pub fn extract_backfill_run(
+    paths: &Paths,
+    cfg: &Config,
+    client: &dyn crate::extract::model::ModelClient,
+    expected_id: &str,
+) -> Result<BackfillOutcome, ApiError> {
+    use sha2::{Digest as _, Sha256};
+
+    use crate::extract::digest::{SessionId, build_cc_digest, build_codex_digest};
+    use crate::extract::discovery::{Candidate, discover_cc_sessions, discover_codex_sessions};
+    use crate::extract::model::{ExtractError, render_digest};
+    use crate::extract::pipeline::extract_session_with_client;
+    use crate::extract::pricing::pricing_snapshot_at;
+    use crate::extract::state::{BatchState, FailedSession, compute_dry_run_id};
+
+    let provider_name = client.provider_name().to_owned();
+    let model = cfg.extractor.model.clone();
+    let pricing_snapshot_at = pricing_snapshot_at();
+
+    // Discover every candidate (no --since cutoff for a full backfill).
+    let mut candidates: Vec<Candidate> = Vec::new();
+    if cfg.adapters.cc.enabled {
+        candidates.extend(
+            discover_cc_sessions(std::path::Path::new(&cfg.adapters.cc.projects_dir), None)
+                .map_err(ApiError::from)?,
+        );
+    }
+    if cfg.adapters.codex.enabled {
+        candidates.extend(
+            discover_codex_sessions(std::path::Path::new(&cfg.adapters.codex.state_db), None)
+                .map_err(ApiError::from)?,
+        );
+    }
+
+    let mut prepared: Vec<PreparedCandidate> = Vec::with_capacity(candidates.len());
+    let mut per_session: Vec<(String, u32, String)> = Vec::with_capacity(candidates.len());
+
+    for candidate in candidates {
+        let digest_result = match &candidate.session_id {
+            SessionId::Cc(uuid) => build_cc_digest(&candidate.source_path, *uuid),
+            SessionId::CodexThread(_) | SessionId::CodexRolloutPath(_) => {
+                build_codex_digest(&candidate.source_path)
+            }
+        };
+        let Ok(digest) = digest_result else {
+            continue;
+        };
+        let input_tokens = client.count_input_tokens(&digest).map_err(ApiError::from)?;
+        let rendered = render_digest(&digest);
+        let digest_bytes = Sha256::digest(rendered.as_bytes());
+        let digest_hash = format!("sha256:{}", bytes_to_hex(digest_bytes.as_slice()));
+        let id_str = match &digest.session_id {
+            SessionId::Cc(uuid) => uuid.to_string(),
+            SessionId::CodexRolloutPath(p) => p.display().to_string(),
+            SessionId::CodexThread(t) => t.clone(),
+        };
+        per_session.push((id_str.clone(), input_tokens, digest_hash));
+        prepared.push(PreparedCandidate { id_str, digest });
+    }
+
+    let recomputed = compute_dry_run_id(&provider_name, &model, pricing_snapshot_at, &per_session);
+    if recomputed != expected_id {
+        return Err(ApiError::Extraction(ExtractError::DryRunMismatch {
+            expected: expected_id.to_owned(),
+            actual: recomputed,
+        }));
+    }
+
+    // Load or initialize the resumable state file.
+    let state_path = paths.extract.join("state.json");
+    let mut state = BatchState::load(&state_path)
+        .map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?
+        .unwrap_or_else(|| BatchState {
+            started_at: chrono::Utc::now(),
+            provider: provider_name.clone(),
+            model: model.clone(),
+            completed_session_ids: Vec::new(),
+            failed_session_ids: Vec::new(),
+        });
+
+    let total_session_count = u32::try_from(prepared.len()).unwrap_or(u32::MAX);
+    let mut committed_record_count: u32 = 0;
+    let mut declined_session_count: u32 = 0;
+
+    for prep in &prepared {
+        if state.contains_completed(&prep.id_str) {
+            continue;
+        }
+        match extract_session_with_client(paths, cfg, &prep.digest, client) {
+            Ok(outcome) => {
+                committed_record_count = committed_record_count.saturating_add(
+                    u32::try_from(outcome.committed_record_ids.len()).unwrap_or(u32::MAX),
+                );
+                if outcome.declined_reason.is_some() {
+                    declined_session_count = declined_session_count.saturating_add(1);
+                }
+                state.completed_session_ids.push(prep.id_str.clone());
+            }
+            Err(e) => {
+                let env: crate::api::error::ErrorEnvelope = (&e).into();
+                state.failed_session_ids.push(FailedSession {
+                    session_id: prep.id_str.clone(),
+                    error_code: env.error_code.to_owned(),
+                    message: e.to_string(),
+                    retry_count: 0,
+                });
+            }
+        }
+        state
+            .save(&state_path)
+            .map_err(|e| ApiError::Extraction(ExtractError::Io(e)))?;
+    }
+
+    Ok(BackfillOutcome {
+        committed_record_count,
+        declined_session_count,
+        failed_session_count: u32::try_from(state.failed_session_ids.len()).unwrap_or(u32::MAX),
+        total_session_count,
+    })
+}
+
+/// Lowercase-hex encoder. `sha2::Sha256::digest` returns an opaque
+/// `Output` type that does not implement `LowerHex`, so the
+/// `format!("{:x}", ..)` shortcut from the older `sha2` API is not
+/// available here.
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(nibble_char(b >> 4));
+        s.push(nibble_char(b & 0x0f));
+    }
+    s
+}
+
+fn nibble_char(n: u8) -> char {
+    match n {
+        0..=9 => (b'0' + n) as char,
+        10..=15 => (b'a' + n - 10) as char,
+        _ => '0',
     }
 }
 

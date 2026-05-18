@@ -20,6 +20,20 @@
 //! - `12` ([`HIDDEN_BY_POLICY`]): record exists but suppressed by trust
 //!   policy (suggest retrying with `--include-unsigned`).
 //! - `13` ([`AMBIGUOUS`]): bare id matched multiple records.
+//! - `20` ([`EXTRACT_NOT_ACKNOWLEDGED`]): consent missing; run
+//!   `nexum extract --session <id>` interactively once.
+//! - `21` ([`EXTRACT_DRY_RUN_REQUIRED`]): `--backfill` invoked without a
+//!   prior `--dry-run` manifest.
+//! - `22` ([`EXTRACT_DRY_RUN_MISMATCH`]): the manifest id no longer matches
+//!   the recomputed basis; re-run `--dry-run`.
+//! - `23` ([`EXTRACT_NO_API_KEY`]): provider API-key env var unset.
+//! - `24` ([`EXTRACT_PROVIDER_UNSUPPORTED`]): configured provider has no
+//!   working client in this build.
+//! - `25` ([`EXTRACT_MODEL_ERROR`]): catch-all for transport / redaction
+//!   / digest / I/O / JSON / YAML / git failures during extraction.
+//! - `26` ([`EXTRACT_PARSE`]): model response was not valid YAML.
+//! - `27` ([`EXTRACT_VALIDATION`]): parsed record failed schema validation.
+//! - `28` ([`EXTRACT_NO_SESSIONS`]): selector matched no sessions.
 
 /// Generic failure (mirrors `ExitCode::FAILURE`); surfaces from the
 /// `for_envelope` wildcard arm and from `SERIALIZE_FAILED`.
@@ -40,6 +54,15 @@ pub(crate) const NOT_INDEXED: u8 = 10;
 pub(crate) const NOT_FOUND: u8 = 11;
 pub(crate) const HIDDEN_BY_POLICY: u8 = 12;
 pub(crate) const AMBIGUOUS: u8 = 13;
+pub(crate) const EXTRACT_NOT_ACKNOWLEDGED: u8 = 20;
+pub(crate) const EXTRACT_DRY_RUN_REQUIRED: u8 = 21;
+pub(crate) const EXTRACT_DRY_RUN_MISMATCH: u8 = 22;
+pub(crate) const EXTRACT_NO_API_KEY: u8 = 23;
+pub(crate) const EXTRACT_PROVIDER_UNSUPPORTED: u8 = 24;
+pub(crate) const EXTRACT_MODEL_ERROR: u8 = 25;
+pub(crate) const EXTRACT_PARSE: u8 = 26;
+pub(crate) const EXTRACT_VALIDATION: u8 = 27;
+pub(crate) const EXTRACT_NO_SESSIONS: u8 = 28;
 
 /// Map an `ErrorEnvelope`'s `error_code` to the matching CLI exit code.
 ///
@@ -59,6 +82,15 @@ pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
         ec::NOT_FOUND => NOT_FOUND,
         ec::HIDDEN_BY_POLICY => HIDDEN_BY_POLICY,
         ec::AMBIGUOUS_KEY => AMBIGUOUS,
+        ec::EXTRACT_NOT_ACKNOWLEDGED => EXTRACT_NOT_ACKNOWLEDGED,
+        ec::EXTRACT_DRY_RUN_REQUIRED => EXTRACT_DRY_RUN_REQUIRED,
+        ec::EXTRACT_DRY_RUN_MISMATCH => EXTRACT_DRY_RUN_MISMATCH,
+        ec::EXTRACT_NO_API_KEY => EXTRACT_NO_API_KEY,
+        ec::EXTRACT_PROVIDER_UNSUPPORTED => EXTRACT_PROVIDER_UNSUPPORTED,
+        ec::EXTRACT_MODEL_ERROR => EXTRACT_MODEL_ERROR,
+        ec::EXTRACT_PARSE => EXTRACT_PARSE,
+        ec::EXTRACT_VALIDATION => EXTRACT_VALIDATION,
+        ec::EXTRACT_NO_SESSIONS => EXTRACT_NO_SESSIONS,
         // SERIALIZE_FAILED + any future unmapped code routes to generic
         // FAILURE; the stable envelope_code on the wire stays accurate.
         _ => FAILURE,
@@ -97,5 +129,18 @@ mod tests {
     #[test]
     fn tampering_detected_routes_to_store_integrity() {
         assert_eq!(for_envelope(&env(error_codes::TAMPERING_DETECTED)), 4);
+    }
+
+    #[test]
+    fn extract_not_acknowledged_routes_to_twenty() {
+        assert_eq!(
+            for_envelope(&env(error_codes::EXTRACT_NOT_ACKNOWLEDGED)),
+            20
+        );
+    }
+
+    #[test]
+    fn extract_no_sessions_routes_to_twenty_eight() {
+        assert_eq!(for_envelope(&env(error_codes::EXTRACT_NO_SESSIONS)), 28);
     }
 }

@@ -95,6 +95,28 @@ pub mod error_codes {
     /// embedder is the broken component. Remediation: reinstall the
     /// embedding model.
     pub const EMBED_FAILED: &str = "EMBED_FAILED";
+    /// First-run consent missing; user must run `nexum extract --session
+    /// <id>` interactively once before automated extraction proceeds.
+    pub const EXTRACT_NOT_ACKNOWLEDGED: &str = "EXTRACT_NOT_ACKNOWLEDGED";
+    /// `--backfill` invoked without a prior `--dry-run` manifest.
+    pub const EXTRACT_DRY_RUN_REQUIRED: &str = "EXTRACT_DRY_RUN_REQUIRED";
+    /// Recomputed dry-run id differs from the manifest's recorded id
+    /// (basis shifted between dry-run and backfill).
+    pub const EXTRACT_DRY_RUN_MISMATCH: &str = "EXTRACT_DRY_RUN_MISMATCH";
+    /// Provider API key environment variable was not set.
+    pub const EXTRACT_NO_API_KEY: &str = "EXTRACT_NO_API_KEY";
+    /// Configured provider is not implemented in this build.
+    pub const EXTRACT_PROVIDER_UNSUPPORTED: &str = "EXTRACT_PROVIDER_UNSUPPORTED";
+    /// Catch-all for transport, redaction, digest, I/O, JSON, YAML, and git
+    /// failures that surface during extraction. Operator inspects the
+    /// `message` field for the underlying cause.
+    pub const EXTRACT_MODEL_ERROR: &str = "EXTRACT_MODEL_ERROR";
+    /// Model returned content that could not be parsed as YAML.
+    pub const EXTRACT_PARSE: &str = "EXTRACT_PARSE";
+    /// Parsed YAML record failed schema validation.
+    pub const EXTRACT_VALIDATION: &str = "EXTRACT_VALIDATION";
+    /// Session selector matched no sessions.
+    pub const EXTRACT_NO_SESSIONS: &str = "EXTRACT_NO_SESSIONS";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -110,8 +132,13 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
             ApiError::Indexer(e) => indexer_envelope(e),
             ApiError::Config(e) => config_envelope(e),
             ApiError::Trust(e) => trust_envelope(e),
+            ApiError::Extraction(e) => extract_envelope(e),
             ApiError::TrustRegenerateRefused { reason } => ErrorEnvelope {
-                error_code: error_codes::STORE_INTEGRITY,
+                // Refusals (merge in progress, dirty worktree, pending
+                // reanchor) are operator-fixable conditions — they belong
+                // in the USAGE bucket, not STORE_INTEGRITY which the spec
+                // reserves for actual store damage.
+                error_code: error_codes::USAGE,
                 message: format!("trust regenerate refused: {reason}"),
                 remediation: None,
                 context: serde_json::json!({
@@ -515,6 +542,115 @@ fn store_integrity_foreign(kind: &'static str, e: &dyn std::fmt::Display) -> Err
     }
 }
 
+// ───── ExtractError variant dispatch ────────────────────────────────────────
+
+/// Build the [`ErrorEnvelope`] for an [`ExtractError`]. Exposed so the
+/// `nexum extract` CLI verb can render envelopes from a borrowed
+/// `ExtractError` without first having to wrap it in an owned
+/// `ApiError::Extraction` (`ExtractError` is not `Clone`, so a borrow is
+/// the only available carrier at the CLI's error-emission site).
+///
+/// [`ExtractError`]: crate::extract::model::ExtractError
+pub fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope {
+    use crate::extract::model::ExtractError as E;
+    match err {
+        E::NoApiKey { env_var } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_NO_API_KEY,
+            message: format!("set {env_var} in the environment and re-run"),
+            remediation: Some(Remediation {
+                command: Some(format!("export {env_var}=...")),
+                rationale: format!("set {env_var} before invoking the command"),
+            }),
+            context: serde_json::json!({ "env_var": env_var }),
+        },
+        E::ProviderUnsupported { provider } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_PROVIDER_UNSUPPORTED,
+            message: format!("provider `{provider}` is not implemented in this build"),
+            remediation: None,
+            context: serde_json::json!({ "provider": provider }),
+        },
+        E::Http { status, body } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_MODEL_ERROR,
+            message: format!("HTTP {status}: {body}"),
+            remediation: None,
+            context: serde_json::json!({ "status": status, "body": body }),
+        },
+        E::MalformedResponse { reason } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_PARSE,
+            message: format!("model response was not parseable as YAML: {reason}"),
+            remediation: None,
+            context: serde_json::json!({ "reason": reason }),
+        },
+        E::Validation { reason } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_VALIDATION,
+            message: format!("record failed schema validation: {reason}"),
+            remediation: None,
+            context: serde_json::json!({ "reason": reason }),
+        },
+        E::DryRunRequired => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_DRY_RUN_REQUIRED,
+            message: "run `nexum extract --backfill --dry-run` first to write a manifest"
+                .to_owned(),
+            remediation: Some(Remediation {
+                command: Some("nexum extract --backfill --dry-run".to_owned()),
+                rationale: "the backfill path requires a manifest from a dry-run pass first"
+                    .to_owned(),
+            }),
+            context: serde_json::json!({}),
+        },
+        E::DryRunMismatch { expected, actual } => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_DRY_RUN_MISMATCH,
+            message: format!("dry-run id mismatch: expected {expected}, recomputed {actual}"),
+            remediation: Some(Remediation {
+                command: Some("nexum extract --backfill --dry-run".to_owned()),
+                rationale: "the basis shifted; re-run --dry-run and supply the new id".to_owned(),
+            }),
+            context: serde_json::json!({ "expected": expected, "actual": actual }),
+        },
+        E::NotAcknowledged => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_NOT_ACKNOWLEDGED,
+            message: "run `nexum extract --session <any-id>` interactively once to record consent"
+                .to_owned(),
+            remediation: Some(Remediation {
+                command: Some("nexum extract --session <any-id>".to_owned()),
+                rationale: "first run records the consent ack so subsequent runs can proceed"
+                    .to_owned(),
+            }),
+            context: serde_json::json!({}),
+        },
+        E::NoSessions => ErrorEnvelope {
+            error_code: error_codes::EXTRACT_NO_SESSIONS,
+            message: "the supplied selector matched no sessions".to_owned(),
+            remediation: None,
+            context: serde_json::json!({}),
+        },
+        E::Redaction(_)
+        | E::Digest(_)
+        | E::Init(_)
+        | E::Io(_)
+        | E::Json(_)
+        | E::Yaml(_)
+        | E::Git(_) => {
+            let kind = match err {
+                E::Redaction(_) => "redaction",
+                E::Digest(_) => "digest",
+                E::Init(_) => "init",
+                E::Io(_) => "io",
+                E::Json(_) => "json",
+                E::Yaml(_) => "yaml",
+                E::Git(_) => "git",
+                _ => unreachable!(),
+            };
+            ErrorEnvelope {
+                error_code: error_codes::EXTRACT_MODEL_ERROR,
+                message: err.to_string(),
+                remediation: None,
+                context: serde_json::json!({ "kind": kind, "message": err.to_string() }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,5 +1047,127 @@ mod tests {
         assert_eq!(env.error_code, error_codes::MIGRATION_REQUIRED);
         assert_eq!(env.context["kind"], "migration");
         assert_eq!(env.context["v_disk"], 1);
+    }
+
+    // ───── ExtractError variants ─────────────────────────────────────────────
+
+    #[test]
+    fn from_extract_no_api_key_routes_with_env_var_context() {
+        let err = crate::api::ApiError::Extraction(crate::extract::model::ExtractError::NoApiKey {
+            env_var: "ANTHROPIC_API_KEY".to_owned(),
+        });
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_NO_API_KEY);
+        assert!(env.message.contains("ANTHROPIC_API_KEY"));
+        assert!(env.remediation.is_some());
+        assert_eq!(
+            env.context.get("env_var").and_then(|v| v.as_str()),
+            Some("ANTHROPIC_API_KEY")
+        );
+    }
+
+    #[test]
+    fn from_extract_dry_run_mismatch_carries_expected_and_actual() {
+        let err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::DryRunMismatch {
+                expected: "sha256:aaa".to_owned(),
+                actual: "sha256:bbb".to_owned(),
+            });
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_DRY_RUN_MISMATCH);
+        assert_eq!(
+            env.context.get("expected").and_then(|v| v.as_str()),
+            Some("sha256:aaa")
+        );
+        assert_eq!(
+            env.context.get("actual").and_then(|v| v.as_str()),
+            Some("sha256:bbb")
+        );
+    }
+
+    #[test]
+    fn from_extract_validation_routes_to_extract_validation() {
+        let err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::Validation {
+                reason: "missing project_id".to_owned(),
+            });
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_VALIDATION);
+        assert!(env.message.contains("missing project_id"));
+    }
+
+    #[test]
+    fn from_extract_io_routes_to_model_error_with_kind() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "no perms");
+        let err = crate::api::ApiError::Extraction(crate::extract::model::ExtractError::Io(io_err));
+        let env = ErrorEnvelope::from(&err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_MODEL_ERROR);
+        assert_eq!(env.context.get("kind").and_then(|v| v.as_str()), Some("io"));
+    }
+
+    #[test]
+    fn extract_envelope_not_acknowledged_has_session_command() {
+        let api_err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::NotAcknowledged);
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_NOT_ACKNOWLEDGED);
+        let rem = env.remediation.expect("remediation");
+        assert!(rem.rationale.contains("consent") || rem.command.is_some());
+    }
+
+    #[test]
+    fn extract_envelope_no_sessions_routes_cleanly() {
+        let api_err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::NoSessions);
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_NO_SESSIONS);
+    }
+
+    #[test]
+    fn extract_envelope_provider_unsupported_names_provider() {
+        let api_err = crate::api::ApiError::Extraction(
+            crate::extract::model::ExtractError::ProviderUnsupported {
+                provider: "openai".into(),
+            },
+        );
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_PROVIDER_UNSUPPORTED);
+        assert!(env.message.contains("openai"));
+    }
+
+    #[test]
+    fn extract_envelope_dry_run_required_suggests_dry_run() {
+        let api_err =
+            crate::api::ApiError::Extraction(crate::extract::model::ExtractError::DryRunRequired);
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_DRY_RUN_REQUIRED);
+    }
+
+    #[test]
+    fn extract_envelope_http_carries_status_in_context() {
+        let api_err = crate::api::ApiError::Extraction(crate::extract::model::ExtractError::Http {
+            status: 429,
+            body: "Rate limited".into(),
+        });
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_MODEL_ERROR);
+        assert_eq!(
+            env.context
+                .get("status")
+                .and_then(serde_json::Value::as_u64),
+            Some(429)
+        );
+    }
+
+    #[test]
+    fn extract_envelope_malformed_response_routes_to_extract_parse() {
+        let api_err = crate::api::ApiError::Extraction(
+            crate::extract::model::ExtractError::MalformedResponse {
+                reason: "expected mapping".into(),
+            },
+        );
+        let env = ErrorEnvelope::from(&api_err);
+        assert_eq!(env.error_code, error_codes::EXTRACT_PARSE);
+        assert!(env.message.contains("expected mapping"));
     }
 }

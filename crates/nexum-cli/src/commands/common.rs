@@ -26,6 +26,37 @@ use super::exit_codes;
 ///
 /// Exit-code mapping is `super::exit_codes::for_envelope` over the envelope
 /// the core helper returns — identical across both channels.
+/// Carrier for an invalid CLI enum filter — `(flag, value)`. Surfaces as
+/// the `INVALID_FILTER` wire-stable error envelope via
+/// `json_emit::emit_invalid_filter`. Centralised so every read verb that
+/// accepts enum-string filters routes failures the same way.
+pub(crate) struct InvalidFilter {
+    pub flag: &'static str,
+    pub value: String,
+}
+
+/// Parse one optional enum-string CLI argument strictly.
+///
+/// `None` (no flag) stays `None`. `Some(value)` parses via `parser`; a
+/// parser that returns `None` triggers an `InvalidFilter` rather than the
+/// previous silent-drop behaviour.
+pub(crate) fn parse_enum_filter<T>(
+    flag: &'static str,
+    raw: Option<&str>,
+    parser: impl FnOnce(&str) -> Option<T>,
+) -> Result<Option<T>, InvalidFilter> {
+    match raw {
+        None => Ok(None),
+        Some(s) => match parser(s) {
+            Some(parsed) => Ok(Some(parsed)),
+            None => Err(InvalidFilter {
+                flag,
+                value: s.to_owned(),
+            }),
+        },
+    }
+}
+
 pub(crate) fn resolve_runtime(json: bool) -> Result<(Paths, Config), ExitCode> {
     nexum_core::session::resolve_runtime().map_err(|env| {
         let code = exit_codes::for_envelope(&env);

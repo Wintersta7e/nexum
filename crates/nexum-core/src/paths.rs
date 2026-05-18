@@ -26,6 +26,8 @@ pub struct Paths {
     pub logs: PathBuf,
     pub state: PathBuf,
     pub lock: PathBuf,
+    pub extract: PathBuf,
+    pub redaction: PathBuf,
 }
 
 impl Paths {
@@ -43,6 +45,8 @@ impl Paths {
             logs: home.join("logs"),
             state: home.join("state"),
             lock: home.join(".lock"),
+            extract: home.join("extract"),
+            redaction: home.join("redaction"),
             home,
         }
     }
@@ -90,6 +94,8 @@ mod tests {
         assert_eq!(p.logs, root.join("logs"));
         assert_eq!(p.state, root.join("state"));
         assert_eq!(p.lock, root.join(".lock"));
+        assert_eq!(p.extract, root.join("extract"));
+        assert_eq!(p.redaction, root.join("redaction"));
         // Sanity: every subpath must start with the home root (no escapes).
         for sub in [
             &p.notebook_git,
@@ -101,6 +107,8 @@ mod tests {
             &p.logs,
             &p.state,
             &p.lock,
+            &p.extract,
+            &p.redaction,
         ] {
             assert!(sub.starts_with(&root), "{sub:?} escaped {root:?}");
         }

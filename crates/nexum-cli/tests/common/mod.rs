@@ -274,6 +274,40 @@ impl TestHome {
         &self.nexum_home
     }
 
+    /// The `NEXUM_HOME` value (alias for [`path`]). Spelled out for tests
+    /// that pass the env var into `Command::env` directly rather than
+    /// going through [`run`].
+    ///
+    /// [`path`]: Self::path
+    /// [`run`]: Self::run
+    pub fn nexum_home(&self) -> &Path {
+        &self.nexum_home
+    }
+
+    /// The `HOME` value for the per-test ssh-key probe and git config
+    /// lookup. Tests that spawn `nexum` directly (rather than via
+    /// [`Self::run`]) need this to keep the developer's real `~/.gitconfig`
+    /// out of the test.
+    pub fn ssh_home(&self) -> &Path {
+        &self.ssh_home
+    }
+
+    /// Pre-seed `state/extract_acked.json` so the consent gate accepts
+    /// `(provider, model_family)` without an interactive prompt. Mirrors
+    /// what `nexum extract` would write after a first-run `[y/N]` answer.
+    pub fn write_extract_ack(&self, provider: &str, model_family: &str) -> std::io::Result<()> {
+        let path = self.nexum_home.join("state").join("extract_acked.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::json!({
+            "acked_at": "2026-05-17T00:00:00Z",
+            "acked_provider": provider,
+            "acked_model_family": model_family,
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&body)?)
+    }
+
     /// Spawn `nexum` with the per-test `NEXUM_HOME` / `HOME` / git-identity
     /// env vars wired from this home. Routes through the canonical
     /// `run_nexum` so every spawn picks up the CI-portable git identity

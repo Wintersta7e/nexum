@@ -103,6 +103,18 @@ pub struct ExtractorConfig {
     pub model: String,
     pub max_digest_tokens: u32,
     pub anthropic: ExtractorAnthropicConfig,
+    #[serde(default = "default_redaction_log")]
+    pub redaction_log: String,
+    #[serde(default = "default_state_path")]
+    pub state_path: String,
+}
+
+fn default_redaction_log() -> String {
+    "~/.nexum/logs/redaction.jsonl".to_string()
+}
+
+fn default_state_path() -> String {
+    "~/.nexum/extract/state.json".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -180,6 +192,8 @@ impl Config {
                 anthropic: ExtractorAnthropicConfig {
                     api_key_env: "ANTHROPIC_API_KEY".into(),
                 },
+                redaction_log: default_redaction_log(),
+                state_path: default_state_path(),
             },
             promote: PromoteConfig {
                 enabled: false,
@@ -218,5 +232,33 @@ mod tests {
     #[test]
     fn seed_trust_bootstrap_fingerprint_empty() {
         assert!(Config::seed().trust.bootstrap.fingerprint.is_empty());
+    }
+
+    #[test]
+    fn seed_extractor_redaction_log_defaults_to_logs_dir() {
+        let cfg = Config::seed();
+        assert_eq!(cfg.extractor.redaction_log, "~/.nexum/logs/redaction.jsonl");
+    }
+
+    #[test]
+    fn seed_extractor_state_path_defaults_to_extract_dir() {
+        let cfg = Config::seed();
+        assert_eq!(cfg.extractor.state_path, "~/.nexum/extract/state.json");
+    }
+
+    #[test]
+    fn extractor_config_round_trips_without_new_fields() {
+        let legacy_toml = r#"
+provider = "anthropic"
+model = "claude-opus-4-7"
+max_digest_tokens = 32000
+
+[anthropic]
+api_key_env = "ANTHROPIC_API_KEY"
+"#;
+        let parsed: ExtractorConfig = toml::from_str(legacy_toml).expect("parse legacy");
+        assert_eq!(parsed.provider, "anthropic");
+        assert_eq!(parsed.redaction_log, "~/.nexum/logs/redaction.jsonl");
+        assert_eq!(parsed.state_path, "~/.nexum/extract/state.json");
     }
 }

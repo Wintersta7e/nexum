@@ -56,6 +56,15 @@ pub enum EmbedError {
         expected: Vec<usize>,
         actual: Vec<usize>,
     },
+
+    #[error(
+        "download for {file} exceeded the manifest size (expected {expected_bytes} bytes, observed {observed_bytes} bytes)"
+    )]
+    OversizeStream {
+        file: String,
+        expected_bytes: u64,
+        observed_bytes: u64,
+    },
 }
 
 impl EmbedError {
@@ -140,6 +149,7 @@ impl EmbedError {
             EmbedError::OrtInit { .. } => 14,
             EmbedError::OrtRun { .. } => 15,
             EmbedError::OutputShapeMismatch { .. } => 16,
+            EmbedError::OversizeStream { .. } => 17,
         }
     }
 
@@ -157,6 +167,7 @@ impl EmbedError {
             EmbedError::OrtInit { .. } => "ort_init",
             EmbedError::OrtRun { .. } => "ort_run",
             EmbedError::OutputShapeMismatch { .. } => "output_shape_mismatch",
+            EmbedError::OversizeStream { .. } => "oversize_stream",
         }
     }
 }

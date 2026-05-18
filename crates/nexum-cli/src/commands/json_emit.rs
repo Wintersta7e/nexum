@@ -57,6 +57,22 @@ pub(crate) fn emit_serialize_failure(e: &serde_json::Error) -> ExitCode {
     emit_error(&env, code)
 }
 
+/// Emit an `INVALID_FILTER` envelope for a CLI flag whose value did not
+/// parse to a recognized enum variant (e.g. `--source typo`). Routes
+/// through the same path as a server-side `InvalidFilter` so the wire
+/// contract matches what other surfaces (MCP, `nexum recent`) already emit.
+pub(crate) fn emit_invalid_filter(json: bool, flag: &str, value: &str) -> ExitCode {
+    let detail = format!("--{flag}={value}");
+    let api_err = ApiError::Query(nexum_core::query::QueryError::InvalidFilter { detail });
+    if json {
+        let env: ErrorEnvelope = (&api_err).into();
+        let code = super::exit_codes::for_envelope(&env);
+        emit_error(&env, code)
+    } else {
+        super::common::handle_read_verb_error(&api_err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

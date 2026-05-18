@@ -4,6 +4,7 @@ pub mod by_session;
 pub(crate) mod common;
 pub mod doctor;
 pub(crate) mod exit_codes;
+pub mod extract;
 pub mod get;
 pub mod index;
 pub mod init;

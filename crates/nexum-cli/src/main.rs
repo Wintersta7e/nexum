@@ -34,6 +34,8 @@ enum Commands {
     Recent(commands::recent::RecentArgs),
     /// Records associated with a session.
     BySession(commands::by_session::BySessionArgs),
+    /// Run typed extraction against one session or a recent batch.
+    Extract(commands::extract::ExtractArgs),
     /// Manage embedding models. The bge-m3 install is the only supported model in this release.
     Models {
         #[command(subcommand)]
@@ -70,6 +72,7 @@ fn main() -> ExitCode {
         Commands::List(a) => commands::list::run(&a),
         Commands::Recent(a) => commands::recent::run(&a),
         Commands::BySession(a) => commands::by_session::run(&a),
+        Commands::Extract(a) => commands::extract::run(&a),
         Commands::Models { cmd } => commands::models::run(&cmd),
         Commands::Project(a) => commands::project::run(&a),
         Commands::Trust { cmd } => commands::trust::run(&cmd),
