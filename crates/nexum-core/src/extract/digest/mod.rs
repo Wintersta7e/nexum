@@ -4,6 +4,9 @@
 
 mod types;
 
+mod codex;
+
+pub use codex::build_codex_digest;
 pub use types::{
     BuildDigestError, MessageTurn, PlanFinal, PlanStep, ProjectHint, SessionDigest, SessionId,
     SessionKind, SessionMetadata, ToolCallSummary, TurnRole,
