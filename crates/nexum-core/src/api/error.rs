@@ -617,10 +617,17 @@ fn extract_envelope(err: &crate::extract::model::ExtractError) -> ErrorEnvelope 
             remediation: None,
             context: serde_json::json!({}),
         },
-        E::Redaction(_) | E::Digest(_) | E::Io(_) | E::Json(_) | E::Yaml(_) | E::Git(_) => {
+        E::Redaction(_)
+        | E::Digest(_)
+        | E::Init(_)
+        | E::Io(_)
+        | E::Json(_)
+        | E::Yaml(_)
+        | E::Git(_) => {
             let kind = match err {
                 E::Redaction(_) => "redaction",
                 E::Digest(_) => "digest",
+                E::Init(_) => "init",
                 E::Io(_) => "io",
                 E::Json(_) => "json",
                 E::Yaml(_) => "yaml",

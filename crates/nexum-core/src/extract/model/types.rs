@@ -98,6 +98,8 @@ pub enum ExtractError {
     Redaction(#[from] RedactionError),
     #[error("digest: {0}")]
     Digest(#[from] BuildDigestError),
+    #[error("init/git_ops: {0}")]
+    Init(#[from] crate::init::InitError),
     #[error("I/O: {0}")]
     Io(#[from] io::Error),
     #[error("JSON: {0}")]

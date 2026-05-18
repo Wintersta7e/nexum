@@ -5,6 +5,7 @@
 
 pub mod digest;
 pub mod model;
+pub mod pipeline;
 pub mod pricing;
 pub mod prompts;
 pub mod record_io;
