@@ -94,6 +94,8 @@ mod tests {
         assert_eq!(p.logs, root.join("logs"));
         assert_eq!(p.state, root.join("state"));
         assert_eq!(p.lock, root.join(".lock"));
+        assert_eq!(p.extract, root.join("extract"));
+        assert_eq!(p.redaction, root.join("redaction"));
         // Sanity: every subpath must start with the home root (no escapes).
         for sub in [
             &p.notebook_git,
@@ -105,24 +107,12 @@ mod tests {
             &p.logs,
             &p.state,
             &p.lock,
+            &p.extract,
+            &p.redaction,
         ] {
             assert!(sub.starts_with(&root), "{sub:?} escaped {root:?}");
         }
         // Quiet a Path import lint if Path isn't otherwise used.
         let _: &Path = &p.home;
-    }
-
-    #[test]
-    fn with_home_populates_extract_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = Paths::with_home(tmp.path().to_path_buf());
-        assert_eq!(paths.extract, tmp.path().join("extract"));
-    }
-
-    #[test]
-    fn with_home_populates_redaction_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let paths = Paths::with_home(tmp.path().to_path_buf());
-        assert_eq!(paths.redaction, tmp.path().join("redaction"));
     }
 }
