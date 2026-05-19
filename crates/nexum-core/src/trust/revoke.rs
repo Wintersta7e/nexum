@@ -6,26 +6,8 @@ use std::path::Path;
 
 use uuid::Uuid;
 
-use super::events::{Event, EventKind, EventLog, TrustError, load_events_yml};
+use super::events::{Event, EventKind, EventKindTag, EventLog, TrustError, load_events_yml};
 use super::regenerate::{RegenerateOutcome, regenerate_files};
-
-/// Which terminal event this helper is appending. Drives both the
-/// duplicate-event branch gate and the `DuplicateEvent.kind` value
-/// surfaced to callers.
-#[derive(Clone, Copy)]
-enum RevokeKind {
-    Rotated,
-    Compromised,
-}
-
-impl RevokeKind {
-    fn label(self) -> &'static str {
-        match self {
-            RevokeKind::Rotated => "KeyRotatedOut",
-            RevokeKind::Compromised => "KeyCompromised",
-        }
-    }
-}
 
 /// Append a `KeyRotatedOut` event for `fingerprint` to events.yml, then
 /// regenerate the three signer files. Returns the bare file names the caller
@@ -58,7 +40,7 @@ pub fn append_key_rotated_out(
             fingerprint: fingerprint.to_owned(),
             reason: reason.to_owned(),
         },
-        RevokeKind::Rotated,
+        EventKindTag::KeyRotatedOut,
     )
 }
 
@@ -85,7 +67,7 @@ pub fn append_key_compromised(
             fingerprint: fingerprint.to_owned(),
             reason: reason.to_owned(),
         },
-        RevokeKind::Compromised,
+        EventKindTag::KeyCompromised,
     )
 }
 
@@ -94,7 +76,7 @@ fn append_revoke_event(
     trust_dir: &Path,
     fingerprint: &str,
     new_event: EventKind,
-    revoke_kind: RevokeKind,
+    revoke_kind: EventKindTag,
 ) -> Result<Vec<String>, TrustError> {
     let mut log: EventLog = load_events_yml(events_yml)?;
 
@@ -135,13 +117,13 @@ fn append_revoke_event(
             fingerprint: fingerprint.to_owned(),
         });
     }
-    if matches!(revoke_kind, RevokeKind::Rotated) {
+    if matches!(revoke_kind, EventKindTag::KeyRotatedOut) {
         let prior_rotated = log.events.iter().any(|e| {
             matches!(&e.payload, EventKind::KeyRotatedOut { fingerprint: fp, .. } if fp == fingerprint)
         });
         if prior_rotated {
             return Err(TrustError::DuplicateEvent {
-                kind: revoke_kind.label(),
+                kind: revoke_kind.as_db_str(),
                 fingerprint: fingerprint.to_owned(),
             });
         }
