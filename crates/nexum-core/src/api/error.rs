@@ -123,6 +123,17 @@ pub mod error_codes {
     /// Tried to operate on a fingerprint that no `BootstrapKey` or
     /// `KeyAdded` event has ever introduced into the trust state.
     pub const TRUST_FINGERPRINT_NOT_KNOWN: &str = "TRUST_FINGERPRINT_NOT_KNOWN";
+    /// `nexum keys revoke` refused because the target is the sole
+    /// remaining `Active`-role key; revoking it would leave the trust
+    /// store unsignable.
+    pub const KEYS_REVOKE_WOULD_UNSIGN_STORE: &str = "KEYS_REVOKE_WOULD_UNSIGN_STORE";
+    /// `nexum keys revoke` refused because the revoke target equals
+    /// the key git would sign the revoke commit with.
+    pub const KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION: &str = "KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION";
+    /// `nexum keys revoke` refused because the resolved git signer is
+    /// not in `Active` role (rotated, compromised, reanchored, or has
+    /// no `KeyStateView` row).
+    pub const KEYS_REVOKE_SIGNER_NOT_ACTIVE: &str = "KEYS_REVOKE_SIGNER_NOT_ACTIVE";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -161,6 +172,59 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "kind": "trust",
                     "subkind": "regenerate_failed",
                     "stderr": stderr,
+                }),
+            },
+            ApiError::KeysRevokeWouldUnsignStore { fingerprint } => ErrorEnvelope {
+                error_code: error_codes::KEYS_REVOKE_WOULD_UNSIGN_STORE,
+                message: format!(
+                    "revoking {fingerprint} would leave no Active signer for the trust store"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys rotate --new-key <path>".to_owned()),
+                    rationale: "Add a second signing key first, then re-run the revoke.".to_owned(),
+                }),
+                context: serde_json::json!({ "fingerprint": fingerprint }),
+            },
+            ApiError::KeysRevokeWouldSignOwnRevocation {
+                fingerprint,
+                current_signer_fingerprint,
+            } => ErrorEnvelope {
+                error_code: error_codes::KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION,
+                message: format!(
+                    "revoke target {fingerprint} equals the current git signer {current_signer_fingerprint}"
+                ),
+                remediation: Some(Remediation {
+                    command: Some(
+                        "git -C notebook.git config --local user.signingkey \
+                         <path-to-different-Active-key>"
+                            .to_owned(),
+                    ),
+                    rationale:
+                        "Swap user.signingkey to a different Active key, then re-run the revoke."
+                            .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "fingerprint": fingerprint,
+                    "current_signer_fingerprint": current_signer_fingerprint,
+                }),
+            },
+            ApiError::KeysRevokeSignerNotActive {
+                signer_fingerprint,
+                signer_role,
+            } => ErrorEnvelope {
+                error_code: error_codes::KEYS_REVOKE_SIGNER_NOT_ACTIVE,
+                message: format!(
+                    "git signer {signer_fingerprint} has role {signer_role}, not Active"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys list".to_owned()),
+                    rationale: "Run `nexum keys list` to see which keys qualify, then \
+                                swap user.signingkey to an Active key."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "signer_fingerprint": signer_fingerprint,
+                    "signer_role": signer_role,
                 }),
             },
         }
