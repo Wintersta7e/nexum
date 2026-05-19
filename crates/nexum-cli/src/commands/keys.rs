@@ -48,6 +48,11 @@ pub fn run(cmd: &KeysCommand) -> ExitCode {
     }
 }
 
+/// First 12 chars (or the whole string if shorter) for human-readable commit display.
+fn short_commit(commit: &str) -> &str {
+    &commit[..commit.len().min(12)]
+}
+
 fn run_list(args: &ListArgs) -> ExitCode {
     let (paths, cfg) = match resolve_runtime(args.json) {
         Ok(rt) => rt,
@@ -73,16 +78,14 @@ fn run_list(args: &ListArgs) -> ExitCode {
                 }
                 println!();
                 for key in &outcome.keys {
-                    let trunc = key.introduced_commit.len().min(12);
                     println!(
                         "  {fp}  {role:?}  introduced {commit}",
                         fp = key.fingerprint,
                         role = key.role,
-                        commit = &key.introduced_commit[..trunc],
+                        commit = short_commit(&key.introduced_commit),
                     );
                     if let Some(ret_commit) = &key.retired_commit {
-                        let trunc = ret_commit.len().min(12);
-                        println!("       retired in {}", &ret_commit[..trunc]);
+                        println!("       retired in {}", short_commit(ret_commit));
                     }
                 }
             }

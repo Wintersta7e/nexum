@@ -655,11 +655,7 @@ pub fn keys_rotate(
         }
 
         // Read the new key's public-key blob and compute its fingerprint.
-        let pub_path = {
-            let mut s = new_key_path.as_os_str().to_owned();
-            s.push(".pub");
-            std::path::PathBuf::from(s)
-        };
+        let pub_path = crate::ssh_key::pub_path_for(new_key_path);
         let public_key = std::fs::read_to_string(&pub_path)
             .map_err(|e| {
                 ApiError::Indexer(IndexerError::Io {

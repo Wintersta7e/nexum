@@ -98,7 +98,7 @@ fn classify_signingkey(value: &str) -> Result<Option<String>, ApiError> {
     // Branch 3: filesystem path. Expand a leading `~/` against $HOME
     // before deriving the .pub sibling.
     let expanded_path = expand_tilde(value);
-    let pub_path = derive_pub_path(&expanded_path);
+    let pub_path = ssh_key::pub_path_for(&expanded_path);
     let Ok(pub_text) = std::fs::read_to_string(&pub_path) else {
         return Err(ApiError::TrustRegenerateRefused {
             reason: format!(
@@ -125,15 +125,6 @@ fn expand_tilde(value: &str) -> PathBuf {
         return p;
     }
     PathBuf::from(value)
-}
-
-fn derive_pub_path(key_path: &std::path::Path) -> PathBuf {
-    // OpenSSH convention: `<keyfile>.pub`. We append literally rather
-    // than using `with_extension("pub")` (which would replace existing
-    // extensions like `.pem`, producing `id.pub` instead of `id.pem.pub`).
-    let mut s = key_path.as_os_str().to_owned();
-    s.push(".pub");
-    PathBuf::from(s)
 }
 
 /// Whole-string match: `SHA256:` followed by exactly 43 base64 chars,
