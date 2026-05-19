@@ -8,7 +8,7 @@
 
 use rusqlite::Connection;
 
-use super::events::TrustError;
+use super::events::{EventKindTag, TrustError};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyStateView {
@@ -37,36 +37,22 @@ pub enum KeyRole {
 ///
 /// # Errors
 ///
-/// Returns `TrustError::Io` if the SQL prepare or row iteration fails.
-///
-/// # Panics
-///
-/// Panics if a required column (`event_id`, `kind`, `effective_commit`,
-/// `effective_commit_topo_pos`) is missing or of an unexpected type. The
-/// `trust_events` schema is materialized by `events_view::rebuild` and
-/// is expected to be NOT NULL for those columns.
+/// Returns `TrustError::Sqlite` if the SQL prepare, row iteration, or
+/// column read fails.
 // Single pass over the materialized view, then a second pass to apply
 // retirements onto introducer rows. Splitting the two phases into
 // separate helpers would not simplify either side and would force the
 // retirement tuple to grow into a named type for the boundary.
 #[allow(clippy::too_many_lines)]
 pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT event_id, kind, fingerprint, old_fingerprint, new_fingerprint,
-                    public_key, effective_commit, effective_commit_topo_pos, reason
-             FROM trust_events
-             ORDER BY effective_commit_topo_pos ASC",
-        )
-        .map_err(|e| TrustError::Io {
-            path: "<trust_events query>".to_owned(),
-            source: std::io::Error::other(e.to_string()),
-        })?;
+    let mut stmt = conn.prepare(
+        "SELECT event_id, kind, fingerprint, old_fingerprint, new_fingerprint,
+                public_key, effective_commit, effective_commit_topo_pos, reason
+         FROM trust_events
+         ORDER BY effective_commit_topo_pos ASC",
+    )?;
 
-    let mut rows = stmt.query([]).map_err(|e| TrustError::Io {
-        path: "<trust_events query>".to_owned(),
-        source: std::io::Error::other(e.to_string()),
-    })?;
+    let mut rows = stmt.query([])?;
 
     // Use a Vec maintained in SQL-query order (ORDER BY topo_pos ASC).
     // A BTreeMap keyed on topo_pos would silently clobber rows for degenerate
@@ -74,24 +60,29 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
     // trust_events PRIMARY KEY is event_id, not topo_pos.
     let mut introducers: Vec<KeyStateView> = Vec::new();
     // (fingerprint, target_role, event_id, commit, reason) for retirement events.
-    let mut retirements: Vec<(String, String, String, String, String)> = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| TrustError::Io {
-        path: "<trust_events row>".to_owned(),
-        source: std::io::Error::other(e.to_string()),
-    })? {
-        let event_id: String = row.get(0).expect("event_id");
-        let kind: String = row.get(1).expect("kind");
+    let mut retirements: Vec<(String, KeyRole, String, String, String)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let event_id: String = row.get(0)?;
+        let kind: String = row.get(1)?;
         let fingerprint: Option<String> = row.get(2).ok();
         let old_fingerprint: Option<String> = row.get(3).ok();
         let new_fingerprint: Option<String> = row.get(4).ok();
         let public_key: Option<String> = row.get(5).ok();
-        let effective_commit: String = row.get(6).expect("effective_commit");
+        let effective_commit: String = row.get(6)?;
         // topo_pos is not read directly — we trust the SQL ORDER BY
         // ASC clause to deliver rows in topological order.
         let reason: Option<String> = row.get(8).ok();
 
-        match kind.as_str() {
-            "BootstrapKey" | "KeyAdded" => {
+        let Some(tag) = EventKindTag::from_db_str(&kind) else {
+            tracing::warn!(
+                target: "nexum::trust",
+                kind = %kind,
+                "trust_events row has unknown kind; skipping",
+            );
+            continue;
+        };
+        match tag {
+            EventKindTag::BootstrapKey | EventKindTag::KeyAdded => {
                 let fp = fingerprint.unwrap_or_default();
                 let pk = public_key.unwrap_or_default();
                 introducers.push(KeyStateView {
@@ -106,27 +97,27 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
                     retired_reason: None,
                 });
             }
-            "KeyRotatedOut" => {
+            EventKindTag::KeyRotatedOut => {
                 let fp = fingerprint.unwrap_or_default();
                 retirements.push((
                     fp,
-                    "Rotated".to_owned(),
+                    KeyRole::Rotated,
                     event_id,
                     effective_commit,
                     reason.unwrap_or_default(),
                 ));
             }
-            "KeyCompromised" => {
+            EventKindTag::KeyCompromised => {
                 let fp = fingerprint.unwrap_or_default();
                 retirements.push((
                     fp,
-                    "Compromised".to_owned(),
+                    KeyRole::Compromised,
                     event_id,
                     effective_commit,
                     reason.unwrap_or_default(),
                 ));
             }
-            "BootstrapReanchor" => {
+            EventKindTag::BootstrapReanchor => {
                 // The old key gets Reanchored unless already Compromised (D10).
                 // The retired_reason is the hard-coded literal pinned by DESIGN;
                 // the reanchor event's own `reason` field is operator-supplied
@@ -135,7 +126,7 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
                 if let Some(old_fp) = old_fingerprint {
                     retirements.push((
                         old_fp,
-                        "Reanchored".to_owned(),
+                        KeyRole::Reanchored,
                         event_id.clone(),
                         effective_commit.clone(),
                         "anchor moved by BootstrapReanchor".to_owned(),
@@ -156,13 +147,6 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
                 // The reason field is intentionally unused here — see comment above.
                 let _ = reason;
             }
-            other => {
-                tracing::warn!(
-                    target: "nexum::trust",
-                    kind = %other,
-                    "trust_events row has unknown kind; skipping",
-                );
-            }
         }
     }
 
@@ -175,7 +159,7 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
             tracing::warn!(
                 target: "nexum::trust",
                 fingerprint = %fp,
-                role = %new_role,
+                role = ?new_role,
                 "retirement event references unknown fingerprint; skipping",
             );
             continue;
@@ -188,15 +172,10 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
         //     events.yml history but do not overwrite the per-key audit).
         // The `continue` enforces both rules: skip the role swap AND skip
         // the retired_* update.
-        if matches!(view.role, KeyRole::Compromised) && new_role != "Compromised" {
+        if matches!(view.role, KeyRole::Compromised) && new_role != KeyRole::Compromised {
             continue;
         }
-        view.role = match new_role.as_str() {
-            "Rotated" => KeyRole::Rotated,
-            "Compromised" => KeyRole::Compromised,
-            "Reanchored" => KeyRole::Reanchored,
-            _ => unreachable!("retirement role is one of three"),
-        };
+        view.role = new_role;
         view.retired_event_id = Some(ret_event);
         view.retired_commit = Some(ret_commit);
         view.retired_reason = Some(ret_reason);
@@ -551,6 +530,149 @@ mod tests {
         assert_eq!(k1.retired_event_id.as_deref(), Some("ev2"));
         let k2 = view.iter().find(|v| v.fingerprint == "SHA256:K2").unwrap();
         assert_eq!(k2.role, KeyRole::Active);
+    }
+
+    #[test]
+    fn rotated_then_compromised_reclassifies_to_compromised() {
+        let conn = test_helpers::open_with_trust_events_schema();
+        insert_event(
+            &conn,
+            "ev1",
+            "BootstrapKey",
+            0,
+            Some("SHA256:K1"),
+            Some("ssh-ed25519 K1pub"),
+            None,
+            None,
+            Some("init"),
+        );
+        insert_event(
+            &conn,
+            "ev2",
+            "KeyAdded",
+            1,
+            Some("SHA256:K2"),
+            Some("ssh-ed25519 K2pub"),
+            None,
+            None,
+            Some("rotate"),
+        );
+        insert_event(
+            &conn,
+            "ev3",
+            "KeyRotatedOut",
+            2,
+            Some("SHA256:K1"),
+            None,
+            None,
+            None,
+            Some("routine retirement"),
+        );
+        insert_event(
+            &conn,
+            "ev4",
+            "KeyCompromised",
+            3,
+            Some("SHA256:K1"),
+            None,
+            None,
+            None,
+            Some("retroactive compromise"),
+        );
+        let view = project(&conn).expect("project");
+        let k1 = view.iter().find(|v| v.fingerprint == "SHA256:K1").unwrap();
+        // Rotated → Compromised reclassification: role becomes Compromised
+        // and retired_event_id swaps to the compromise event.
+        assert_eq!(k1.role, KeyRole::Compromised);
+        assert_eq!(k1.retired_event_id.as_deref(), Some("ev4"));
+        assert_eq!(k1.retired_reason.as_deref(), Some("retroactive compromise"));
+    }
+
+    #[test]
+    fn reanchored_then_compromised_reclassifies_to_compromised() {
+        let conn = test_helpers::open_with_trust_events_schema();
+        insert_event(
+            &conn,
+            "ev1",
+            "BootstrapKey",
+            0,
+            Some("SHA256:K1"),
+            Some("ssh-ed25519 K1pub"),
+            None,
+            None,
+            Some("init"),
+        );
+        insert_event(
+            &conn,
+            "ev2",
+            "KeyAdded",
+            1,
+            Some("SHA256:K2"),
+            Some("ssh-ed25519 K2pub"),
+            None,
+            None,
+            Some("predecessor"),
+        );
+        insert_event(
+            &conn,
+            "ev3",
+            "BootstrapReanchor",
+            2,
+            None,
+            None,
+            Some("SHA256:K1"),
+            Some("SHA256:K2"),
+            Some("anchor moved"),
+        );
+        insert_event(
+            &conn,
+            "ev4",
+            "KeyCompromised",
+            3,
+            Some("SHA256:K1"),
+            None,
+            None,
+            None,
+            Some("retroactive compromise"),
+        );
+        let view = project(&conn).expect("project");
+        let k1 = view.iter().find(|v| v.fingerprint == "SHA256:K1").unwrap();
+        assert_eq!(k1.role, KeyRole::Compromised);
+        assert_eq!(k1.retired_event_id.as_deref(), Some("ev4"));
+    }
+
+    #[test]
+    fn retirement_event_on_unknown_fingerprint_skipped() {
+        let conn = test_helpers::open_with_trust_events_schema();
+        insert_event(
+            &conn,
+            "ev1",
+            "BootstrapKey",
+            0,
+            Some("SHA256:K1"),
+            Some("ssh-ed25519 K1pub"),
+            None,
+            None,
+            Some("init"),
+        );
+        // KeyRotatedOut on a never-introduced fingerprint — exercise the
+        // `out.iter_mut().find(...) else { warn; continue }` defensive branch.
+        insert_event(
+            &conn,
+            "ev2",
+            "KeyRotatedOut",
+            1,
+            Some("SHA256:UNKNOWN"),
+            None,
+            None,
+            None,
+            Some("orphan retirement"),
+        );
+        let view = project(&conn).expect("project");
+        // The introducer (K1) is unaffected; the orphan retirement is silently dropped.
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].fingerprint, "SHA256:K1");
+        assert_eq!(view[0].role, KeyRole::Active);
     }
 
     #[test]
