@@ -525,7 +525,7 @@ mod tests {
         );
         let view = project(&conn).expect("project");
         let k1 = view.iter().find(|v| v.fingerprint == "SHA256:K1").unwrap();
-        // D10: compromise is terminal; not downgraded to Reanchored.
+        // Compromise is terminal; not downgraded to Reanchored.
         assert_eq!(k1.role, KeyRole::Compromised);
         // retired_* fields point at the COMPROMISE event, not the reanchor.
         assert_eq!(k1.retired_event_id.as_deref(), Some("ev2"));
