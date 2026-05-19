@@ -32,6 +32,15 @@ pub enum KeyRole {
     Reanchored,
 }
 
+/// One pending retirement to apply to an introducer row in the second pass.
+struct Retirement {
+    fingerprint: String,
+    role: KeyRole,
+    event_id: String,
+    commit: String,
+    reason: String,
+}
+
 /// Project the `trust_events` rows currently in `conn` into the per-key
 /// role summary.
 ///
@@ -39,11 +48,8 @@ pub enum KeyRole {
 ///
 /// Returns `TrustError::Sqlite` if the SQL prepare, row iteration, or
 /// column read fails.
-// Single pass over the materialized view, then a second pass to apply
-// retirements onto introducer rows. Splitting the two phases into
-// separate helpers would not simplify either side and would force the
-// retirement tuple to grow into a named type for the boundary.
-#[allow(clippy::too_many_lines)]
+// Two passes: collect introducer rows + pending retirements from the
+// materialized view, then apply each retirement onto its matching introducer.
 pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
     let mut stmt = conn.prepare(
         "SELECT event_id, kind, fingerprint, old_fingerprint, new_fingerprint,
@@ -59,8 +65,7 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
     // hand-crafted test inputs that share a topo_pos; the underlying
     // trust_events PRIMARY KEY is event_id, not topo_pos.
     let mut introducers: Vec<KeyStateView> = Vec::new();
-    // (fingerprint, target_role, event_id, commit, reason) for retirement events.
-    let mut retirements: Vec<(String, KeyRole, String, String, String)> = Vec::new();
+    let mut retirements: Vec<Retirement> = Vec::new();
     while let Some(row) = rows.next()? {
         let event_id: String = row.get(0)?;
         let kind: String = row.get(1)?;
@@ -83,11 +88,9 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
         };
         match tag {
             EventKindTag::BootstrapKey | EventKindTag::KeyAdded => {
-                let fp = fingerprint.unwrap_or_default();
-                let pk = public_key.unwrap_or_default();
                 introducers.push(KeyStateView {
-                    fingerprint: fp,
-                    public_key: pk,
+                    fingerprint: fingerprint.unwrap_or_default(),
+                    public_key: public_key.unwrap_or_default(),
                     role: KeyRole::Active,
                     introduced_event_id: event_id,
                     introduced_commit: effective_commit,
@@ -98,91 +101,85 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
                 });
             }
             EventKindTag::KeyRotatedOut => {
-                let fp = fingerprint.unwrap_or_default();
-                retirements.push((
-                    fp,
-                    KeyRole::Rotated,
+                retirements.push(Retirement {
+                    fingerprint: fingerprint.unwrap_or_default(),
+                    role: KeyRole::Rotated,
                     event_id,
-                    effective_commit,
-                    reason.unwrap_or_default(),
-                ));
+                    commit: effective_commit,
+                    reason: reason.unwrap_or_default(),
+                });
             }
             EventKindTag::KeyCompromised => {
-                let fp = fingerprint.unwrap_or_default();
-                retirements.push((
-                    fp,
-                    KeyRole::Compromised,
+                retirements.push(Retirement {
+                    fingerprint: fingerprint.unwrap_or_default(),
+                    role: KeyRole::Compromised,
                     event_id,
-                    effective_commit,
-                    reason.unwrap_or_default(),
-                ));
+                    commit: effective_commit,
+                    reason: reason.unwrap_or_default(),
+                });
             }
             EventKindTag::BootstrapReanchor => {
-                // The old key gets Reanchored unless already Compromised
-                // (compromise is the more severe terminal classification).
-                // The retired_reason is the hard-coded literal pinned by DESIGN;
-                // the reanchor event's own `reason` field is operator-supplied
-                // prose intended for the chain-break audit, not the per-key
-                // retirement record.
+                // The old key becomes Reanchored unless it's already Compromised
+                // (compromise is the more severe terminal classification, enforced
+                // in the apply loop below). The retired_reason is a fixed audit
+                // literal — the event's own `reason` is operator-supplied prose
+                // for the chain-break audit, not the per-key retirement record.
                 if let Some(old_fp) = old_fingerprint {
-                    retirements.push((
-                        old_fp,
-                        KeyRole::Reanchored,
-                        event_id.clone(),
-                        effective_commit.clone(),
-                        "anchor moved by BootstrapReanchor".to_owned(),
-                    ));
+                    retirements.push(Retirement {
+                        fingerprint: old_fp,
+                        role: KeyRole::Reanchored,
+                        event_id: event_id.clone(),
+                        commit: effective_commit.clone(),
+                        reason: "anchor moved by BootstrapReanchor".to_owned(),
+                    });
                 }
-                // The new_fingerprint is expected to already be in introducers
-                // via a prior KeyAdded; if not, log a warning and skip.
-                if let Some(new_fp) = new_fingerprint {
-                    let known = introducers.iter().any(|k| k.fingerprint == new_fp);
-                    if !known {
-                        tracing::warn!(
-                            target: "nexum::trust",
-                            fingerprint = %new_fp,
-                            "BootstrapReanchor.new_fingerprint has no preceding KeyAdded; skipping",
-                        );
-                    }
+                // new_fingerprint is expected to already be in introducers
+                // via a prior KeyAdded; if not, warn and skip.
+                if let Some(new_fp) = new_fingerprint
+                    && !introducers.iter().any(|k| k.fingerprint == new_fp)
+                {
+                    tracing::warn!(
+                        target: "nexum::trust",
+                        fingerprint = %new_fp,
+                        "BootstrapReanchor.new_fingerprint has no preceding KeyAdded; skipping",
+                    );
                 }
-                // The reason field is intentionally unused here — see comment above.
-                let _ = reason;
             }
         }
     }
 
-    // Apply retirements. Iterate in declaration order so KeyCompromised wins
-    // over later KeyRotatedOut and over BootstrapReanchor (compromise is the
-    // terminal classification).
-    let mut out: Vec<KeyStateView> = introducers;
-    for (fp, new_role, ret_event, ret_commit, ret_reason) in retirements {
-        let Some(view) = out.iter_mut().find(|v| v.fingerprint == fp) else {
+    apply_retirements(&mut introducers, retirements);
+    Ok(introducers)
+}
+
+/// Apply each pending retirement to its matching introducer row.
+///
+/// Retirements are processed in declaration order, which is also topological
+/// commit order from the SQL `ORDER BY` in [`project`]. Compromise is the
+/// terminal classification: once a key is Compromised, later Rotated/Reanchored
+/// events do NOT downgrade it and do NOT overwrite its retired_* audit fields.
+fn apply_retirements(introducers: &mut [KeyStateView], retirements: Vec<Retirement>) {
+    for ret in retirements {
+        let Some(view) = introducers
+            .iter_mut()
+            .find(|v| v.fingerprint == ret.fingerprint)
+        else {
             tracing::warn!(
                 target: "nexum::trust",
-                fingerprint = %fp,
-                role = ?new_role,
+                fingerprint = %ret.fingerprint,
+                role = ?ret.role,
                 "retirement event references unknown fingerprint; skipping",
             );
             continue;
         };
-        // Compromise is terminal. If the key is already Compromised:
-        //   - role does NOT change (no downgrade to Rotated/Reanchored).
-        //   - retired_* fields stay as the compromise event's audit record
-        //     (the compromise is the authoritative retirement; later events
-        //     like BootstrapReanchor.old_fingerprint are visible via the
-        //     events.yml history but do not overwrite the per-key audit).
-        // The `continue` enforces both rules: skip the role swap AND skip
-        // the retired_* update.
-        if matches!(view.role, KeyRole::Compromised) && new_role != KeyRole::Compromised {
+        if view.role == KeyRole::Compromised && ret.role != KeyRole::Compromised {
             continue;
         }
-        view.role = new_role;
-        view.retired_event_id = Some(ret_event);
-        view.retired_commit = Some(ret_commit);
-        view.retired_reason = Some(ret_reason);
+        view.role = ret.role;
+        view.retired_event_id = Some(ret.event_id);
+        view.retired_commit = Some(ret.commit);
+        view.retired_reason = Some(ret.reason);
     }
-
-    Ok(out)
 }
 
 #[cfg(test)]
