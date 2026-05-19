@@ -118,7 +118,8 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
                 ));
             }
             EventKindTag::BootstrapReanchor => {
-                // The old key gets Reanchored unless already Compromised (D10).
+                // The old key gets Reanchored unless already Compromised
+                // (compromise is the more severe terminal classification).
                 // The retired_reason is the hard-coded literal pinned by DESIGN;
                 // the reanchor event's own `reason` field is operator-supplied
                 // prose intended for the chain-break audit, not the per-key
@@ -151,8 +152,8 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
     }
 
     // Apply retirements. Iterate in declaration order so KeyCompromised wins
-    // over later KeyRotatedOut (D10) and over BootstrapReanchor (compromise
-    // is terminal).
+    // over later KeyRotatedOut and over BootstrapReanchor (compromise is the
+    // terminal classification).
     let mut out: Vec<KeyStateView> = introducers;
     for (fp, new_role, ret_event, ret_commit, ret_reason) in retirements {
         let Some(view) = out.iter_mut().find(|v| v.fingerprint == fp) else {
@@ -164,7 +165,7 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
             );
             continue;
         };
-        // D10: compromise is terminal. If the key is already Compromised:
+        // Compromise is terminal. If the key is already Compromised:
         //   - role does NOT change (no downgrade to Rotated/Reanchored).
         //   - retired_* fields stay as the compromise event's audit record
         //     (the compromise is the authoritative retirement; later events
