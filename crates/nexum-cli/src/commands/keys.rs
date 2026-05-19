@@ -212,7 +212,10 @@ fn run_revoke(args: &RevokeArgs) -> ExitCode {
                 rationale: "Pass --yes to acknowledge the compromise prompt non-interactively."
                     .to_owned(),
             }),
-            context: serde_json::json!({ "phase": "strict_yes_required" }),
+            context: serde_json::json!({
+                "kind": "cli",
+                "subkind": "strict_yes_required",
+            }),
         };
         return json_emit::emit_error(&env, 2);
     }
