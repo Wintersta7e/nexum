@@ -2,7 +2,10 @@
 //! the agreed surface table; each opens its own `SQLite` connection — pooling
 //! lands in a later milestone.
 
+pub mod active_signer;
 pub mod error;
+
+pub use active_signer::resolve_active_signer_fingerprint;
 
 use crate::{
     config::types::Config,
@@ -37,6 +40,31 @@ pub enum ApiError {
     TrustRegenerateRefused { reason: String },
     #[error("trust regenerate failed: {stderr}")]
     TrustRegenerateFailed { stderr: String },
+    /// The operator attempted to revoke the sole remaining `Active`-role
+    /// key, which would leave the trust store unsignable.
+    #[error(
+        "revoking {fingerprint} would leave no Active signer; run `nexum keys rotate` to add a second key first"
+    )]
+    KeysRevokeWouldUnsignStore { fingerprint: String },
+    /// The operator attempted to revoke the same key git would sign the
+    /// revoke commit with.
+    #[error(
+        "revoke target {fingerprint} equals the current git signer {current_signer_fingerprint}; swap notebook.git/.git/config user.signingkey to a different Active key first"
+    )]
+    KeysRevokeWouldSignOwnRevocation {
+        fingerprint: String,
+        current_signer_fingerprint: String,
+    },
+    /// The resolved current git signer is not in `Active` role (it's
+    /// `Rotated`, `Compromised`, `Reanchored`, or has no `KeyStateView`
+    /// row — `"unknown"`).
+    #[error(
+        "git signer {signer_fingerprint} has role {signer_role}, not Active; swap user.signingkey to an Active key first"
+    )]
+    KeysRevokeSignerNotActive {
+        signer_fingerprint: String,
+        signer_role: String,
+    },
     // No #[from] — kept as a manual impl below to avoid coherence collision
     // with the existing From<QueryError> which also wraps TrustError.
     #[error(transparent)]
@@ -652,11 +680,7 @@ pub fn keys_rotate(
         }
 
         // Read the new key's public-key blob and compute its fingerprint.
-        let pub_path = {
-            let mut s = new_key_path.as_os_str().to_owned();
-            s.push(".pub");
-            std::path::PathBuf::from(s)
-        };
+        let pub_path = crate::ssh_key::pub_path_for(new_key_path);
         let public_key = std::fs::read_to_string(&pub_path)
             .map_err(|e| {
                 ApiError::Indexer(IndexerError::Io {
@@ -794,6 +818,371 @@ pub fn keys_rotate(
             commit,
             regenerated_files: touched,
             signingkey_updated,
+        })
+    })
+}
+
+/// Outcome of `nexum keys list`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeysListOutcome {
+    pub keys: Vec<crate::trust::key_state::KeyStateView>,
+    /// SHA256 fingerprint of the key git will use for the NEXT commit
+    /// against `notebook.git`. `None` when `user.signingkey` is unset
+    /// in the local config.
+    pub current_signer_fingerprint: Option<String>,
+    /// The bootstrap pin from `~/.nexum/config.toml [trust.bootstrap]`.
+    pub bootstrap_fingerprint: String,
+}
+
+/// List every known signing key with its current trust role.
+///
+/// # Errors
+///
+/// - `ApiError::MigrationRequired { v_disk, v_code }` if the on-disk
+///   index schema is older than the binary — inherited from
+///   `open_for_query`'s contract.
+/// - `ApiError::Trust(TrustError)` if the projection fails.
+/// - `ApiError::TrustRegenerateRefused` from the active-signer resolver
+///   on unsupported `user.signingkey` shapes.
+pub fn keys_list(paths: &Paths, cfg: &Config) -> Result<KeysListOutcome, ApiError> {
+    let conn = open_for_query(paths)?;
+    let keys = crate::trust::key_state::project(&conn).map_err(ApiError::Trust)?;
+    let current_signer_fingerprint = resolve_active_signer_fingerprint(paths)?;
+    Ok(KeysListOutcome {
+        keys,
+        current_signer_fingerprint,
+        bootstrap_fingerprint: cfg.trust.bootstrap.fingerprint.clone(),
+    })
+}
+
+/// Count the records currently signed by `fingerprint`. Drives the prompt
+/// confirmation displayed before a compromise revoke and the value echoed
+/// into `KeysRevokeOutcome::affected_records_estimated`.
+///
+/// **Informational only** — not used for correctness gating. Concurrent
+/// indexer activity may invalidate this count before the revoke commit
+/// lands.
+///
+/// # Errors
+///
+/// Same as `keys_list` for the open path (the `MigrationRequired` lift).
+/// Surfaces `ApiError::Indexer(IndexerError::Rusqlite)` if the count query
+/// fails at `SQLite` level.
+pub fn count_strict_revocation_affected(paths: &Paths, fingerprint: &str) -> Result<u64, ApiError> {
+    let conn = open_for_query(paths)?;
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM records WHERE signer_fingerprint = ?1",
+            [fingerprint],
+            |row| row.get(0),
+        )
+        .map_err(|e| ApiError::Indexer(IndexerError::Rusqlite(e)))?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+/// Mode for `nexum keys revoke`: routine retirement (`Rotation`) or
+/// suspected compromise (`Compromise`). The two modes share the same
+/// preflight + commit shape but differ in the event kind appended to
+/// `events.yml` and whether `affected_records_estimated` is echoed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RevokeMode {
+    Rotation,
+    Compromise,
+}
+
+/// Outcome of `nexum keys revoke`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeysRevokeOutcome {
+    /// SSH fingerprint of the revoked key.
+    pub fingerprint: String,
+    /// Whether the revoke was a routine rotation or a compromise.
+    pub mode: RevokeMode,
+    /// SHA of the signed revoke commit.
+    pub commit: String,
+    /// Bare file names that were staged and committed (`events.yml`
+    /// plus any regenerated signer files).
+    pub regenerated_files: Vec<String>,
+    /// `Some(N)` for `RevokeMode::Compromise` — the count of records
+    /// the strict-revocation overlay would filter after this commit
+    /// lands. Echoed from the caller's `affected_count_predicted`
+    /// argument. `None` for `RevokeMode::Rotation`.
+    pub affected_records_estimated: Option<u64>,
+}
+
+/// Append a `KeyRotatedOut` or `KeyCompromised` event for `fingerprint`
+/// to `events.yml`, regenerate the derived signer files, sign the
+/// revoke commit with the current trusted key, and verify post-commit.
+/// Does NOT update `user.signingkey` — revoke is a retirement op.
+///
+/// `affected_count_predicted` is the caller-supplied count from
+/// `count_strict_revocation_affected` shown in the prompt confirmation;
+/// it is echoed into the outcome for `RevokeMode::Compromise` and
+/// never used for correctness gating. Pass `0` for `RevokeMode::Rotation`.
+///
+/// # Errors
+///
+/// - `ApiError::TrustRegenerateRefused` if an in-progress merge or
+///   pending reanchor is detected.
+/// - `ApiError::Trust(TrustError::FingerprintNotKnown)` if `fingerprint`
+///   has never been introduced into the trust state.
+/// - `ApiError::Trust(TrustError::DuplicateEvent)` if a terminal
+///   revoke event for `fingerprint` already exists.
+/// - `ApiError::KeysRevokeWouldUnsignStore` if the target is the sole
+///   remaining `Active`-role key.
+/// - `ApiError::KeysRevokeWouldSignOwnRevocation` if the resolved git
+///   signer equals the revoke target.
+/// - `ApiError::KeysRevokeSignerNotActive` if the resolved git signer
+///   is not in `Active` role.
+/// - `ApiError::TrustRegenerateFailed` on commit or verify failure
+///   (the worktree is rolled back before this returns).
+/// - `ApiError::Indexer(IndexerError::Io)` on lock failures.
+// Straight-line admin verb mirroring keys_rotate but with eight
+// preflights and no post-verify user.signingkey update. Splitting into
+// sub-functions would hide the preflight ordering that is load-bearing
+// for the trust-chain invariant.
+#[allow(clippy::too_many_lines)]
+pub fn keys_revoke(
+    paths: &Paths,
+    cfg: &Config,
+    fingerprint: &str,
+    mode: RevokeMode,
+    reason: &str,
+    affected_count_predicted: u64,
+) -> Result<KeysRevokeOutcome, ApiError> {
+    // cfg is reserved for future preflight policy; the current preflights
+    // read trust state directly from disk.
+    let _ = cfg;
+    with_writer_lock(paths, || {
+        // Preflight 1: refuse if an in-progress merge is detected.
+        let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
+        if merge_head.exists() {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: "in-progress merge detected; abort or complete it first".into(),
+            });
+        }
+
+        // Preflight 2: refuse if a reanchor sentinel is present.
+        crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
+
+        // Open the DB and project KeyStateView for the projection-dependent
+        // preflights (#3, #5, #7). `open_for_query` already runs
+        // `events_view::ensure_current` internally, so we do NOT call it a
+        // second time. Drop the connection before any file mutation begins;
+        // the writer lock and SQLite locking are independent.
+        let conn = open_for_query(paths)?;
+        let key_states = crate::trust::key_state::project(&conn).map_err(ApiError::Trust)?;
+        drop(conn);
+
+        // Preflight 3: fingerprint must be known to the trust state.
+        let Some(target_view) = key_states.iter().find(|k| k.fingerprint == fingerprint) else {
+            return Err(ApiError::Trust(
+                crate::trust::events::TrustError::FingerprintNotKnown {
+                    fingerprint: fingerprint.to_owned(),
+                },
+            ));
+        };
+
+        // Preflight 4: duplicate-event. Mirror the check inside the append
+        // helper so the failure surfaces before any DB / signer-file work.
+        let events_yml = paths.notebook_git.join(".trust/events.yml");
+        let event_log =
+            crate::trust::events::load_events_yml(&events_yml).map_err(ApiError::Trust)?;
+        let has_compromised = event_log.events.iter().any(|e| {
+            matches!(
+                &e.payload,
+                crate::trust::events::EventKind::KeyCompromised { fingerprint: fp, .. }
+                    if fp == fingerprint
+            )
+        });
+        let has_rotated = event_log.events.iter().any(|e| {
+            matches!(
+                &e.payload,
+                crate::trust::events::EventKind::KeyRotatedOut { fingerprint: fp, .. }
+                    if fp == fingerprint
+            )
+        });
+        match (mode, has_rotated, has_compromised) {
+            (RevokeMode::Rotation, true, _) => {
+                return Err(ApiError::Trust(
+                    crate::trust::events::TrustError::DuplicateEvent {
+                        kind: "KeyRotatedOut",
+                        fingerprint: fingerprint.to_owned(),
+                    },
+                ));
+            }
+            (RevokeMode::Rotation | RevokeMode::Compromise, _, true) => {
+                return Err(ApiError::Trust(
+                    crate::trust::events::TrustError::DuplicateEvent {
+                        kind: "KeyCompromised",
+                        fingerprint: fingerprint.to_owned(),
+                    },
+                ));
+            }
+            _ => {}
+        }
+
+        // Preflight 5: refuse if revoking would leave no Active signer.
+        let active_count = key_states
+            .iter()
+            .filter(|k| matches!(k.role, crate::trust::key_state::KeyRole::Active))
+            .count();
+        if matches!(target_view.role, crate::trust::key_state::KeyRole::Active) && active_count == 1
+        {
+            return Err(ApiError::KeysRevokeWouldUnsignStore {
+                fingerprint: fingerprint.to_owned(),
+            });
+        }
+
+        // Preflights 6 + 7: resolve the current git signer, then refuse if
+        // it equals the revoke target (6) or if its role is not Active (7).
+        // When the resolver returns Ok(None) the operator has no local
+        // signingkey configured; we skip 6 + 7 and let git_commit_signed
+        // surface that downstream.
+        if let Some(signer_fp) = resolve_active_signer_fingerprint(paths)? {
+            // Preflight 6: would-sign-own-revocation.
+            if signer_fp == fingerprint {
+                return Err(ApiError::KeysRevokeWouldSignOwnRevocation {
+                    fingerprint: fingerprint.to_owned(),
+                    current_signer_fingerprint: signer_fp,
+                });
+            }
+            // Preflight 7: signer-is-Active. Three outcomes: matching row
+            // with Active role passes (None means OK); matching row with
+            // non-Active role refuses with that role string; no matching
+            // row refuses with role "unknown".
+            let refusal_role = match key_states.iter().find(|k| k.fingerprint == signer_fp) {
+                Some(view) => match view.role {
+                    crate::trust::key_state::KeyRole::Active => None,
+                    crate::trust::key_state::KeyRole::Rotated => Some("rotated"),
+                    crate::trust::key_state::KeyRole::Compromised => Some("compromised"),
+                    crate::trust::key_state::KeyRole::Reanchored => Some("reanchored"),
+                },
+                None => Some("unknown"),
+            };
+            if let Some(role) = refusal_role {
+                return Err(ApiError::KeysRevokeSignerNotActive {
+                    signer_fingerprint: signer_fp,
+                    signer_role: role.to_owned(),
+                });
+            }
+        }
+
+        // Preflight 8: refuse if the operator has uncommitted changes
+        // outside the trust file set; rollback paths must not destroy
+        // unrelated work.
+        let trust_file_pbs: Vec<std::path::PathBuf> = [
+            ".trust/events.yml",
+            ".trust/historical_signers",
+            ".trust/allowed_signers",
+            ".trust/revoked_signers",
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+        let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        refuse_if_unrelated_dirty(&paths.notebook_git, &trust_file_refs)?;
+
+        // Mutate events.yml + regenerate signer files. On failure the
+        // worktree may be dirty without a commit; restore all four trust
+        // files from HEAD to bring it back to canonical state.
+        let trust_dir = paths.notebook_git.join(".trust");
+        let append_result = match mode {
+            RevokeMode::Rotation => crate::trust::revoke::append_key_rotated_out(
+                &events_yml,
+                &trust_dir,
+                fingerprint,
+                reason,
+            ),
+            RevokeMode::Compromise => crate::trust::revoke::append_key_compromised(
+                &events_yml,
+                &trust_dir,
+                fingerprint,
+                reason,
+            ),
+        };
+        let touched = match append_result {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &trust_file_refs),
+                    ApiError::Trust(e),
+                ));
+            }
+        };
+
+        // Stage with the `.trust/` prefix required by the notebook layout.
+        let staged_pathbufs: Vec<std::path::PathBuf> = touched
+            .iter()
+            .map(|name| std::path::PathBuf::from(format!(".trust/{name}")))
+            .collect();
+        let staged_refs: Vec<&std::path::Path> = staged_pathbufs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+
+        // Build a short fingerprint suffix for the commit message: the
+        // last 12 chars of the base64 body, with trailing `=` padding
+        // stripped. The body is ASCII so byte-slicing is safe.
+        let mode_label = match mode {
+            RevokeMode::Rotation => "rotate out",
+            RevokeMode::Compromise => "mark compromised",
+        };
+        let body = fingerprint
+            .split(':')
+            .next_back()
+            .unwrap_or(fingerprint)
+            .trim_end_matches('=');
+        let short = body.get(body.len().saturating_sub(12)..).unwrap_or(body);
+        let commit_msg = format!("trust: {mode_label} {short}");
+
+        // Sign with the CURRENT (different-from-target) signer.
+        let commit = match crate::init::git_ops::git_commit_signed(
+            &paths.notebook_git,
+            &staged_refs,
+            &commit_msg,
+        ) {
+            Ok(sha) => sha,
+            Err(commit_err) => {
+                return Err(surface_rollback_err(
+                    restore_paths_from_head(&paths.notebook_git, &trust_file_refs),
+                    ApiError::TrustRegenerateFailed {
+                        stderr: format!("git commit failed: {commit_err}"),
+                    },
+                ));
+            }
+        };
+
+        // Verify the revoke commit against historical_signers.
+        let historical = paths.notebook_git.join(".trust/historical_signers");
+        if let Err(verify_err) = crate::init::git_ops::git_verify_commit_with_signers(
+            &paths.notebook_git,
+            "HEAD",
+            &historical,
+        ) {
+            return Err(surface_rollback_err(
+                rollback_last_commit(&paths.notebook_git),
+                ApiError::TrustRegenerateFailed {
+                    stderr: verify_err.to_string(),
+                },
+            ));
+        }
+
+        // Note: revoke does NOT touch user.signingkey. Rotation is the
+        // introduction op; revoke is the retirement op.
+
+        Ok(KeysRevokeOutcome {
+            fingerprint: fingerprint.to_owned(),
+            mode,
+            commit,
+            regenerated_files: touched,
+            affected_records_estimated: match mode {
+                RevokeMode::Compromise => Some(affected_count_predicted),
+                RevokeMode::Rotation => None,
+            },
         })
     })
 }

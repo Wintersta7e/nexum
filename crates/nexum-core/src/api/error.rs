@@ -117,6 +117,23 @@ pub mod error_codes {
     pub const EXTRACT_VALIDATION: &str = "EXTRACT_VALIDATION";
     /// Session selector matched no sessions.
     pub const EXTRACT_NO_SESSIONS: &str = "EXTRACT_NO_SESSIONS";
+    /// Tried to append a trust event whose `(kind, fingerprint)` pair is
+    /// already present in events.yml.
+    pub const TRUST_DUPLICATE_EVENT: &str = "TRUST_DUPLICATE_EVENT";
+    /// Tried to operate on a fingerprint that no `BootstrapKey` or
+    /// `KeyAdded` event has ever introduced into the trust state.
+    pub const TRUST_FINGERPRINT_NOT_KNOWN: &str = "TRUST_FINGERPRINT_NOT_KNOWN";
+    /// `nexum keys revoke` refused because the target is the sole
+    /// remaining `Active`-role key; revoking it would leave the trust
+    /// store unsignable.
+    pub const KEYS_REVOKE_WOULD_UNSIGN_STORE: &str = "KEYS_REVOKE_WOULD_UNSIGN_STORE";
+    /// `nexum keys revoke` refused because the revoke target equals
+    /// the key git would sign the revoke commit with.
+    pub const KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION: &str = "KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION";
+    /// `nexum keys revoke` refused because the resolved git signer is
+    /// not in `Active` role (rotated, compromised, reanchored, or has
+    /// no `KeyStateView` row).
+    pub const KEYS_REVOKE_SIGNER_NOT_ACTIVE: &str = "KEYS_REVOKE_SIGNER_NOT_ACTIVE";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -155,6 +172,67 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "kind": "trust",
                     "subkind": "regenerate_failed",
                     "stderr": stderr,
+                }),
+            },
+            ApiError::KeysRevokeWouldUnsignStore { fingerprint } => ErrorEnvelope {
+                error_code: error_codes::KEYS_REVOKE_WOULD_UNSIGN_STORE,
+                message: format!(
+                    "revoking {fingerprint} would leave no Active signer for the trust store"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys rotate --new-key <path>".to_owned()),
+                    rationale: "Add a second signing key first, then re-run the revoke.".to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "keys_revoke_would_unsign_store",
+                    "fingerprint": fingerprint,
+                }),
+            },
+            ApiError::KeysRevokeWouldSignOwnRevocation {
+                fingerprint,
+                current_signer_fingerprint,
+            } => ErrorEnvelope {
+                error_code: error_codes::KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION,
+                message: format!(
+                    "revoke target {fingerprint} equals the current git signer {current_signer_fingerprint}"
+                ),
+                remediation: Some(Remediation {
+                    command: Some(
+                        "git -C notebook.git config --local user.signingkey \
+                         <path-to-different-Active-key>"
+                            .to_owned(),
+                    ),
+                    rationale:
+                        "Swap user.signingkey to a different Active key, then re-run the revoke."
+                            .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "keys_revoke_would_sign_own_revocation",
+                    "fingerprint": fingerprint,
+                    "current_signer_fingerprint": current_signer_fingerprint,
+                }),
+            },
+            ApiError::KeysRevokeSignerNotActive {
+                signer_fingerprint,
+                signer_role,
+            } => ErrorEnvelope {
+                error_code: error_codes::KEYS_REVOKE_SIGNER_NOT_ACTIVE,
+                message: format!(
+                    "git signer {signer_fingerprint} has role {signer_role}, not Active"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys list".to_owned()),
+                    rationale: "Run `nexum keys list` to see which keys qualify, then \
+                                swap user.signingkey to an Active key."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "keys_revoke_signer_not_active",
+                    "signer_fingerprint": signer_fingerprint,
+                    "signer_role": signer_role,
                 }),
             },
         }
@@ -416,6 +494,11 @@ fn config_envelope(err: &crate::config::ConfigError) -> ErrorEnvelope {
 
 // ───── TrustError variant dispatch ──────────────────────────────────────────
 
+// Flat dispatcher over every `TrustError` variant: each arm is a short
+// literal `ErrorEnvelope` and the per-arm bodies are deliberately
+// inlined for readability over any factoring that would hide the
+// envelope shape behind a helper-call indirection.
+#[allow(clippy::too_many_lines)]
 fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
     use crate::trust::events::TrustError;
     match err {
@@ -513,6 +596,39 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
             context: serde_json::json!({
                 "kind": "trust",
                 "subkind": "duplicate_key",
+                "fingerprint": fingerprint,
+            }),
+        },
+        TrustError::DuplicateEvent { kind, fingerprint } => ErrorEnvelope {
+            error_code: error_codes::TRUST_DUPLICATE_EVENT,
+            message: format!("a {kind} event for fingerprint {fingerprint} already exists"),
+            remediation: Some(Remediation {
+                command: None,
+                rationale: format!(
+                    "Run `nexum keys list` to see the existing trust state; \
+                     if the {kind} classification is wrong, the operator must \
+                     rebuild from a backup of events.yml."
+                ),
+            }),
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "duplicate_event",
+                "event_kind": kind,
+                "fingerprint": fingerprint,
+            }),
+        },
+        TrustError::FingerprintNotKnown { fingerprint } => ErrorEnvelope {
+            error_code: error_codes::TRUST_FINGERPRINT_NOT_KNOWN,
+            message: format!("fingerprint not known to the trust state: {fingerprint}"),
+            remediation: Some(Remediation {
+                command: Some("nexum keys list".to_owned()),
+                rationale: "Run `nexum keys list` to see the known fingerprints; \
+                            the operator may have a typo or stale clipboard."
+                    .to_owned(),
+            }),
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "fingerprint_not_known",
                 "fingerprint": fingerprint,
             }),
         },
