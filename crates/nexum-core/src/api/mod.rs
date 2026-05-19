@@ -655,28 +655,40 @@ pub fn keys_rotate(
         // Pre-flight: refuse if a reanchor sentinel is present.
         crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
 
-        // Pre-flight: the current bootstrap key must still be trusted. If it has a
-        // KeyRotatedOut or KeyCompromised event the rotation commit would be signed
-        // by an untrusted key and verify would fail. Surface a clean refusal rather
-        // than committing then rolling back.
+        // `cfg` was previously consulted for `cfg.trust.bootstrap.fingerprint`
+        // but that check has moved to the current-git-signer fingerprint per
+        // the comment below; the parameter stays for signature stability
+        // across the keys-verb family that the CLI wraps.
+        let _ = cfg;
+
+        // Pre-flight: the key git will actually sign the rotation commit with
+        // must still be trusted. The bootstrap pin
+        // (`cfg.trust.bootstrap.fingerprint`) may have been legitimately
+        // retired via `keys revoke` after successor keys were rotated in;
+        // what matters is the CURRENT signer, not the original pin. When the
+        // resolver returns `Ok(None)` (no `user.signingkey` set),
+        // `git_commit_signed` will surface a clean "no signing key" error
+        // downstream; no preflight refusal needed.
         let events_yml = paths.notebook_git.join(".trust/events.yml");
-        let current_fp = &cfg.trust.bootstrap.fingerprint;
         let event_log =
             crate::trust::events::load_events_yml(&events_yml).map_err(ApiError::Trust)?;
-        let current_trusted = event_log.events.iter().all(|e| match &e.payload {
-            crate::trust::events::EventKind::KeyRotatedOut { fingerprint, .. }
-            | crate::trust::events::EventKind::KeyCompromised { fingerprint, .. } => {
-                fingerprint != current_fp
-            }
-            _ => true,
-        });
-        if !current_trusted {
-            return Err(ApiError::TrustRegenerateRefused {
-                reason: format!(
-                    "current bootstrap key {current_fp} is no longer trusted; \
-                     rotation requires a trusted signer (keys recover is the recovery path)"
-                ),
+        if let Some(signer_fp) = resolve_active_signer_fingerprint(paths)? {
+            let signer_trusted = event_log.events.iter().all(|e| match &e.payload {
+                crate::trust::events::EventKind::KeyRotatedOut { fingerprint, .. }
+                | crate::trust::events::EventKind::KeyCompromised { fingerprint, .. } => {
+                    fingerprint != &signer_fp
+                }
+                _ => true,
             });
+            if !signer_trusted {
+                return Err(ApiError::TrustRegenerateRefused {
+                    reason: format!(
+                        "current git signer {signer_fp} is no longer trusted; \
+                         swap notebook.git/.git/config user.signingkey to an Active key \
+                         (run `nexum keys list` to see which keys qualify)"
+                    ),
+                });
+            }
         }
 
         // Read the new key's public-key blob and compute its fingerprint.

@@ -203,6 +203,76 @@ fn rotate_refuses_when_bootstrap_key_already_revoked() {
     );
 }
 
+#[test]
+fn rotate_succeeds_after_bootstrap_pin_revoked_when_distinct_active_signer_exists() {
+    // After a successor key has been rotated in and the operator legitimately
+    // revokes the original bootstrap key, `keys rotate` must still let them
+    // add further keys — the preflight checks the CURRENT git signer, not the
+    // bootstrap pin. Regression test for the keys_rotate preflight that used
+    // to refuse on bootstrap-pin revocation regardless of signer state.
+    //
+    // initialized_clean (not _no_index) — the revoke verb's KeyStateView
+    // projection needs the index DB.
+    let home = common::TestHome::initialized_clean();
+
+    // Rotate K2 in. After this, user.signingkey points at K2 and both K1+K2
+    // are Active.
+    let k2 = fresh_keypair(home.path(), "rotation-k2");
+    let out = home.run(&[
+        "keys",
+        "rotate",
+        "--new-key",
+        k2.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "rotate K2 failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Read K1's fingerprint from the bootstrap pin and revoke it via the
+    // public CLI surface (NOT a hand-edit of events.yml — the test exercises
+    // the real revoke path that the operator would use).
+    let cfg_raw = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    let k1_fp = cfg_raw
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("fingerprint ="))
+        .expect("[trust.bootstrap].fingerprint in config.toml")
+        .trim()
+        .trim_matches('"')
+        .to_owned();
+    let out = home.run(&["keys", "revoke", &k1_fp, "--rotation", "--json"]);
+    assert!(
+        out.status.success(),
+        "revoke K1 failed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Now rotate K3 in. Pre-fix this would refuse with USAGE because the
+    // preflight saw the revoked bootstrap pin; post-fix it sees the CURRENT
+    // signer (K2, still Active) and proceeds.
+    let k3 = fresh_keypair(home.path(), "rotation-k3");
+    let out = home.run(&[
+        "keys",
+        "rotate",
+        "--new-key",
+        k3.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "rotate K3 after bootstrap-pin revoke should succeed:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "keys.rotate.completed");
+}
+
 // TODO: rotate verify-failure rollback path is not yet covered end-to-end.
 // Triggering a verify failure deterministically from a test requires either
 // a stubbed git_verify_commit_with_signers or constructing a commit signed
