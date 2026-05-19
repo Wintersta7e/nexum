@@ -975,14 +975,13 @@ pub fn keys_revoke(
         drop(conn);
 
         // Preflight 3: fingerprint must be known to the trust state.
-        let target_view = key_states.iter().find(|k| k.fingerprint == fingerprint);
-        if target_view.is_none() {
+        let Some(target_view) = key_states.iter().find(|k| k.fingerprint == fingerprint) else {
             return Err(ApiError::Trust(
                 crate::trust::events::TrustError::FingerprintNotKnown {
                     fingerprint: fingerprint.to_owned(),
                 },
             ));
-        }
+        };
 
         // Preflight 4: duplicate-event. Mirror the check inside the append
         // helper so the failure surfaces before any DB / signer-file work.
@@ -1028,9 +1027,8 @@ pub fn keys_revoke(
             .iter()
             .filter(|k| matches!(k.role, crate::trust::key_state::KeyRole::Active))
             .count();
-        let target_is_active =
-            target_view.is_some_and(|v| matches!(v.role, crate::trust::key_state::KeyRole::Active));
-        if target_is_active && active_count == 1 {
+        if matches!(target_view.role, crate::trust::key_state::KeyRole::Active) && active_count == 1
+        {
             return Err(ApiError::KeysRevokeWouldUnsignStore {
                 fingerprint: fingerprint.to_owned(),
             });
@@ -1050,30 +1048,23 @@ pub fn keys_revoke(
                 });
             }
             // Preflight 7: signer-is-Active. Three outcomes: matching row
-            // with Active role passes; matching row with non-Active role
-            // refuses with that role string; no matching row refuses with
-            // role "unknown".
-            match key_states.iter().find(|k| k.fingerprint == signer_fp) {
-                Some(view) => {
-                    let role_str = match view.role {
-                        crate::trust::key_state::KeyRole::Active => None,
-                        crate::trust::key_state::KeyRole::Rotated => Some("rotated"),
-                        crate::trust::key_state::KeyRole::Compromised => Some("compromised"),
-                        crate::trust::key_state::KeyRole::Reanchored => Some("reanchored"),
-                    };
-                    if let Some(role) = role_str {
-                        return Err(ApiError::KeysRevokeSignerNotActive {
-                            signer_fingerprint: signer_fp,
-                            signer_role: role.to_owned(),
-                        });
-                    }
-                }
-                None => {
-                    return Err(ApiError::KeysRevokeSignerNotActive {
-                        signer_fingerprint: signer_fp,
-                        signer_role: "unknown".to_owned(),
-                    });
-                }
+            // with Active role passes (None means OK); matching row with
+            // non-Active role refuses with that role string; no matching
+            // row refuses with role "unknown".
+            let refusal_role = match key_states.iter().find(|k| k.fingerprint == signer_fp) {
+                Some(view) => match view.role {
+                    crate::trust::key_state::KeyRole::Active => None,
+                    crate::trust::key_state::KeyRole::Rotated => Some("rotated"),
+                    crate::trust::key_state::KeyRole::Compromised => Some("compromised"),
+                    crate::trust::key_state::KeyRole::Reanchored => Some("reanchored"),
+                },
+                None => Some("unknown"),
+            };
+            if let Some(role) = refusal_role {
+                return Err(ApiError::KeysRevokeSignerNotActive {
+                    signer_fingerprint: signer_fp,
+                    signer_role: role.to_owned(),
+                });
             }
         }
 
