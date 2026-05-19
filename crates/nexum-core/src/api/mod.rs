@@ -2,7 +2,10 @@
 //! the agreed surface table; each opens its own `SQLite` connection — pooling
 //! lands in a later milestone.
 
+pub mod active_signer;
 pub mod error;
+
+pub use active_signer::resolve_active_signer_fingerprint;
 
 use crate::{
     config::types::Config,
@@ -795,6 +798,39 @@ pub fn keys_rotate(
             regenerated_files: touched,
             signingkey_updated,
         })
+    })
+}
+
+/// Outcome of `nexum keys list`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeysListOutcome {
+    pub keys: Vec<crate::trust::key_state::KeyStateView>,
+    /// SHA256 fingerprint of the key git will use for the NEXT commit
+    /// against `notebook.git`. `None` when `user.signingkey` is unset
+    /// in the local config.
+    pub current_signer_fingerprint: Option<String>,
+    /// The bootstrap pin from `~/.nexum/config.toml [trust.bootstrap]`.
+    pub bootstrap_fingerprint: String,
+}
+
+/// List every known signing key with its current trust role.
+///
+/// # Errors
+///
+/// - `ApiError::MigrationRequired { v_disk, v_code }` if the on-disk
+///   index schema is older than the binary — inherited from
+///   `open_for_query`'s contract.
+/// - `ApiError::Trust(TrustError)` if the projection fails.
+/// - `ApiError::TrustRegenerateRefused` from the active-signer resolver
+///   on unsupported `user.signingkey` shapes.
+pub fn keys_list(paths: &Paths, cfg: &Config) -> Result<KeysListOutcome, ApiError> {
+    let conn = open_for_query(paths)?;
+    let keys = crate::trust::key_state::project(&conn).map_err(ApiError::Trust)?;
+    let current_signer_fingerprint = resolve_active_signer_fingerprint(paths)?;
+    Ok(KeysListOutcome {
+        keys,
+        current_signer_fingerprint,
+        bootstrap_fingerprint: cfg.trust.bootstrap.fingerprint.clone(),
     })
 }
 

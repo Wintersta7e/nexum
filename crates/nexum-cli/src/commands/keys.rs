@@ -16,6 +16,8 @@ pub enum KeysCommand {
     /// signs the rotation commit and stays trusted; a future revocation
     /// command retires it.
     Rotate(RotateArgs),
+    /// List every known signing key with its current trust role.
+    List(ListArgs),
 }
 
 #[derive(Args, Debug)]
@@ -32,9 +34,70 @@ pub struct RotateArgs {
     pub json: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// Emit a structured JSON envelope to stdout.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 pub fn run(cmd: &KeysCommand) -> ExitCode {
     match cmd {
         KeysCommand::Rotate(args) => run_rotate(args),
+        KeysCommand::List(args) => run_list(args),
+    }
+}
+
+fn run_list(args: &ListArgs) -> ExitCode {
+    let (paths, cfg) = match resolve_runtime(args.json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    match api::keys_list(&paths, &cfg) {
+        Ok(outcome) => {
+            if args.json {
+                let envelope = serde_json::json!({
+                    "ok": true,
+                    "kind": "keys.list.completed",
+                    "keys": outcome.keys,
+                    "current_signer_fingerprint": outcome.current_signer_fingerprint,
+                    "bootstrap_fingerprint": outcome.bootstrap_fingerprint,
+                });
+                println!("{envelope}");
+            } else {
+                println!("bootstrap pin: {}", outcome.bootstrap_fingerprint);
+                match outcome.current_signer_fingerprint.as_deref() {
+                    Some(fp) => println!("current signer: {fp}"),
+                    None => println!("current signer: (none configured)"),
+                }
+                println!();
+                for key in &outcome.keys {
+                    let trunc = key.introduced_commit.len().min(12);
+                    println!(
+                        "  {fp}  {role:?}  introduced {commit}",
+                        fp = key.fingerprint,
+                        role = key.role,
+                        commit = &key.introduced_commit[..trunc],
+                    );
+                    if let Some(ret_commit) = &key.retired_commit {
+                        let trunc = ret_commit.len().min(12);
+                        println!("       retired in {}", &ret_commit[..trunc]);
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
+            let code = exit_codes::for_envelope(&env);
+            if args.json {
+                json_emit::emit_error(&env, code)
+            } else {
+                eprintln!("error: {}", env.message);
+                ExitCode::from(code)
+            }
+        }
     }
 }
 

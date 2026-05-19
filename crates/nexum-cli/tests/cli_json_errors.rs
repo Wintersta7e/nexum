@@ -326,3 +326,12 @@ fn trust_validate_events_emits_empty_array_when_clean() {
     assert_eq!(v.as_array().unwrap().len(), 0);
     assert_eq!(out.status.code().unwrap_or(-1), 0);
 }
+
+#[test]
+fn keys_list_emits_success_envelope() {
+    let home = TestHome::initialized_clean();
+    let (env, code) = run_json(&home, &["keys", "list", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(env["ok"], serde_json::Value::Bool(true));
+    assert_eq!(env["kind"], "keys.list.completed");
+}
