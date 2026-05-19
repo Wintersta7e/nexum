@@ -7,7 +7,25 @@ use std::path::Path;
 use uuid::Uuid;
 
 use super::events::{Event, EventKind, EventLog, TrustError, load_events_yml};
-use super::regenerate::regenerate_files;
+use super::regenerate::{RegenerateOutcome, regenerate_files};
+
+/// Which terminal event this helper is appending. Drives both the
+/// duplicate-event branch gate and the `DuplicateEvent.kind` value
+/// surfaced to callers.
+#[derive(Clone, Copy)]
+enum RevokeKind {
+    Rotated,
+    Compromised,
+}
+
+impl RevokeKind {
+    fn label(self) -> &'static str {
+        match self {
+            RevokeKind::Rotated => "KeyRotatedOut",
+            RevokeKind::Compromised => "KeyCompromised",
+        }
+    }
+}
 
 /// Append a `KeyRotatedOut` event for `fingerprint` to events.yml, then
 /// regenerate the three signer files. Returns the bare file names the caller
@@ -40,7 +58,7 @@ pub fn append_key_rotated_out(
             fingerprint: fingerprint.to_owned(),
             reason: reason.to_owned(),
         },
-        "KeyRotatedOut",
+        RevokeKind::Rotated,
     )
 }
 
@@ -67,7 +85,7 @@ pub fn append_key_compromised(
             fingerprint: fingerprint.to_owned(),
             reason: reason.to_owned(),
         },
-        "KeyCompromised",
+        RevokeKind::Compromised,
     )
 }
 
@@ -76,7 +94,7 @@ fn append_revoke_event(
     trust_dir: &Path,
     fingerprint: &str,
     new_event: EventKind,
-    kind_label: &'static str,
+    revoke_kind: RevokeKind,
 ) -> Result<Vec<String>, TrustError> {
     let mut log: EventLog = load_events_yml(events_yml)?;
 
@@ -117,13 +135,13 @@ fn append_revoke_event(
             fingerprint: fingerprint.to_owned(),
         });
     }
-    if kind_label == "KeyRotatedOut" {
+    if matches!(revoke_kind, RevokeKind::Rotated) {
         let prior_rotated = log.events.iter().any(|e| {
             matches!(&e.payload, EventKind::KeyRotatedOut { fingerprint: fp, .. } if fp == fingerprint)
         });
         if prior_rotated {
             return Err(TrustError::DuplicateEvent {
-                kind: "KeyRotatedOut",
+                kind: revoke_kind.label(),
                 fingerprint: fingerprint.to_owned(),
             });
         }
@@ -140,19 +158,17 @@ fn append_revoke_event(
         source: e,
     })?;
 
-    // Regenerate the three derived signer files. Stage ALL FOUR trust files
-    // unconditionally: events.yml always changed (we just appended an
-    // event), and the three signer files are staged regardless of
-    // `RegenerateOutcome` to defend against half-applied prior states
-    // where on-disk content matches the new projection but was never
-    // committed. Staging an unchanged file is a no-op at commit time.
-    let _ = regenerate_files(events_yml, trust_dir)?;
-    Ok(vec![
-        "events.yml".to_owned(),
-        "historical_signers".to_owned(),
-        "allowed_signers".to_owned(),
-        "revoked_signers".to_owned(),
-    ])
+    // Regenerate the three derived signer files. events.yml is always
+    // staged (we just appended an event); the signer-file names are only
+    // appended when `regenerate_files` reports them rewritten.
+    let regen = regenerate_files(events_yml, trust_dir)?;
+    let mut files = vec!["events.yml".to_owned()];
+    if let RegenerateOutcome::Updated { files: extra } = regen {
+        for f in extra {
+            files.push((*f).to_owned());
+        }
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
