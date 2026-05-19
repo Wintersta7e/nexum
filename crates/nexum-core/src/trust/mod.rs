@@ -10,6 +10,7 @@ pub mod diff;
 pub mod events;
 pub mod events_view;
 pub mod git_history;
+pub mod key_state;
 pub mod pin;
 pub mod reanchor_pending;
 pub mod regenerate;
