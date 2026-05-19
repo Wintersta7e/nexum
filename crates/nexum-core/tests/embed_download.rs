@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write as _};
-use std::net::{SocketAddr, TcpListener};
+use std::net::{Shutdown, SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,6 +15,12 @@ use nexum_core::embed::reporter::NullReporter;
 
 /// Tiny single-threaded HTTP server that serves a fixed map of paths to
 /// payloads. Returns 404 on unknown paths. Runs until the test scope ends.
+///
+/// Every response carries `Connection: close` and the write half is
+/// shut down explicitly before the socket drops. Without that, reqwest's
+/// HTTP/1.1 keep-alive pool re-uses the connection for the next file,
+/// races against the one-shot server thread closing the socket, and
+/// surfaces `ECONNRESET` mid-send on the next request.
 fn serve_fixed_payloads(payloads: HashMap<&'static str, Vec<u8>>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -37,15 +43,17 @@ fn serve_fixed_payloads(payloads: HashMap<&'static str, Vec<u8>>) -> SocketAddr 
                     .unwrap_or("/");
                 if let Some(body) = payloads.get(path.trim_start_matches('/')) {
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(resp.as_bytes());
                     let _ = stream.write_all(body);
                 } else {
-                    let _ =
-                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
                 }
+                let _ = stream.shutdown(Shutdown::Write);
             });
         }
     });
