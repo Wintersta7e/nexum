@@ -345,34 +345,14 @@ impl TestHome {
             nexum_core::config::io::load(&cfg_path).expect("load config");
         let k1_fp = cfg.trust.bootstrap.fingerprint.clone();
 
-        // Step 2: generate K2 keypair via the ssh_key crate (no ssh-keygen
-        // subprocess — same convention as `write_ephemeral_keypair`). Pick
-        // a non-default filename so the K1 keypair stays in place.
+        // Step 2: generate K2 keypair alongside the K1 keypair init wrote.
+        // A non-default basename keeps K1's `id_ed25519` in place so both
+        // keys live under the same `.ssh` dir.
         let ssh_dir = home.ssh_home.join(".ssh");
         std::fs::create_dir_all(&ssh_dir).expect("mkdir ssh-home/.ssh");
-        let k2_path = ssh_dir.join("k2-fixture");
-        let k2_private = {
-            use ssh_key::rand_core::OsRng;
-            ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
-                .expect("generate ed25519 K2")
-        };
-        let priv_pem = k2_private
-            .to_openssh(ssh_key::LineEnding::LF)
-            .expect("to_openssh");
-        let pub_line = k2_private
-            .public_key()
-            .to_openssh()
-            .expect("pub to_openssh");
-        std::fs::write(&k2_path, priv_pem.as_bytes()).expect("write K2 priv");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&k2_path, std::fs::Permissions::from_mode(0o600))
-                .expect("chmod K2 priv");
-        }
-        let k2_pub_path = nexum_core::ssh_key::pub_path_for(&k2_path);
-        std::fs::write(&k2_pub_path, pub_line.as_bytes()).expect("write K2 pub");
-        let k2_pubkey = pub_line;
+        let k2_path = write_named_keypair(&ssh_dir, "k2-fixture");
+        let k2_pubkey = std::fs::read_to_string(nexum_core::ssh_key::pub_path_for(&k2_path))
+            .expect("read K2 pub");
         let k2_fp =
             nexum_core::ssh_key::compute_fingerprint(&k2_pubkey).expect("compute K2 fingerprint");
 
@@ -580,18 +560,27 @@ pub fn run_json(home: &TestHome, args: &[&str]) -> (serde_json::Value, i32) {
 /// the private key path. Mirrors the `nexum-core::tests::common` helper —
 /// duplicated here because `tests/common/` cannot cross crate boundaries.
 pub fn write_ephemeral_keypair(dir: &Path) -> PathBuf {
+    write_named_keypair(dir, "id_ed25519")
+}
+
+/// Generate an ed25519 keypair under `dir/<basename>` (private) +
+/// `dir/<basename>.pub` (public). Shared by `write_ephemeral_keypair`
+/// and any fixture that needs a second keypair sitting alongside the
+/// default `id_ed25519`.
+pub fn write_named_keypair(dir: &Path, basename: &str) -> PathBuf {
     use ssh_key::rand_core::OsRng;
     let private = ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519).unwrap();
     let priv_pem = private.to_openssh(ssh_key::LineEnding::LF).unwrap();
     let pub_line = private.public_key().to_openssh().unwrap();
-    let priv_path = dir.join("id_ed25519");
+    let priv_path = dir.join(basename);
     std::fs::write(&priv_path, priv_pem.as_bytes()).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    std::fs::write(dir.join("id_ed25519.pub"), pub_line).unwrap();
+    let pub_path = nexum_core::ssh_key::pub_path_for(&priv_path);
+    std::fs::write(&pub_path, pub_line.as_bytes()).unwrap();
     priv_path
 }
 

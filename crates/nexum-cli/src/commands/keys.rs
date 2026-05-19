@@ -271,25 +271,22 @@ fn run_revoke(args: &RevokeArgs) -> ExitCode {
         affected_count_predicted,
     ) {
         Ok(outcome) => {
+            let mode_str = match outcome.mode {
+                RevokeMode::Rotation => "rotation",
+                RevokeMode::Compromise => "compromise",
+            };
             if args.json {
                 let env = serde_json::json!({
                     "ok": true,
                     "kind": "keys.revoke.completed",
                     "fingerprint": outcome.fingerprint,
-                    "mode": match outcome.mode {
-                        RevokeMode::Rotation => "rotation",
-                        RevokeMode::Compromise => "compromise",
-                    },
+                    "mode": mode_str,
                     "commit": outcome.commit,
                     "regenerated_files": outcome.regenerated_files,
                     "affected_records_estimated": outcome.affected_records_estimated,
                 });
                 println!("{env}");
             } else {
-                let mode_str = match outcome.mode {
-                    RevokeMode::Rotation => "rotation",
-                    RevokeMode::Compromise => "compromise",
-                };
                 println!(
                     "revoked {fp} as {mode_str} (commit {commit})",
                     fp = outcome.fingerprint,
