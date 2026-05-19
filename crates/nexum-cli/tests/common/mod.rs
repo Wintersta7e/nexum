@@ -23,6 +23,16 @@ pub struct TestHome {
     ssh_home: PathBuf,
 }
 
+/// Companion struct returned alongside `TestHome` from
+/// `initialized_post_reanchor_case_a`. Carries the fingerprints and commit
+/// SHA the test asserts on so callers do not have to re-derive them from
+/// disk after the fixture finishes setup.
+pub struct PostReanchorFixture {
+    pub k1_fp: String,
+    pub k2_fp: String,
+    pub reanchor_commit: String,
+}
+
 impl TestHome {
     /// Allocate a temp dir but skip `nexum init`. Useful for asserting
     /// `NOT_INITIALIZED` errors.
@@ -290,6 +300,244 @@ impl TestHome {
     /// out of the test.
     pub fn ssh_home(&self) -> &Path {
         &self.ssh_home
+    }
+
+    /// Initialize a nexum home and immediately synthesize a Case A
+    /// post-reanchor state (pin preserved across recovery). Uses the
+    /// production two-event pattern: appends a `KeyAdded(K2)` event then
+    /// a `BootstrapReanchor(K1 -> K2)` event, batched into one signed
+    /// commit. `regenerate_files` is called via the production code path
+    /// so the resulting signer-file shape matches byte-for-byte what the
+    /// eventual recovery verb will produce.
+    ///
+    /// If `stale_signingkey == true`, `user.signingkey` is reset to K1
+    /// AFTER the reanchor commit lands — the commit itself is always
+    /// signed by K2 (valid). This exercises the "operator completed the
+    /// reanchor but forgot to update git signingkey" failure mode tested
+    /// by the keys revoke preflights.
+    // Straight-line setup of the Case A post-reanchor fixture: K2 keypair,
+    // two split commits (KeyAdded then BootstrapReanchor), pin update, and
+    // optional stale-signingkey reset. Splitting it would scatter the ordered
+    // setup across helpers without making the sequence easier to follow.
+    #[allow(clippy::too_many_lines)]
+    pub fn initialized_post_reanchor_case_a(stale_signingkey: bool) -> (Self, PostReanchorFixture) {
+        let home = Self::initialized_no_index();
+
+        // Step 1: capture K1 path BEFORE any signingkey change.
+        let nb_git = home.nexum_home.join("notebook.git");
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&nb_git)
+            .args(["config", "--local", "--get", "user.signingkey"])
+            .output()
+            .expect("git config user.signingkey");
+        assert!(out.status.success(), "user.signingkey unset after init");
+        let k1_path = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        assert!(
+            k1_path.exists(),
+            "K1 path '{}' does not exist",
+            k1_path.display()
+        );
+
+        // K1 fingerprint from the bootstrap pin.
+        let cfg_path = home.nexum_home.join("config.toml");
+        let cfg: nexum_core::config::types::Config =
+            nexum_core::config::io::load(&cfg_path).expect("load config");
+        let k1_fp = cfg.trust.bootstrap.fingerprint.clone();
+
+        // Step 2: generate K2 keypair via the ssh_key crate (no ssh-keygen
+        // subprocess — same convention as `write_ephemeral_keypair`). Pick
+        // a non-default filename so the K1 keypair stays in place.
+        let ssh_dir = home.ssh_home.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).expect("mkdir ssh-home/.ssh");
+        let k2_path = ssh_dir.join("k2-fixture");
+        let k2_private = {
+            use ssh_key::rand_core::OsRng;
+            ssh_key::PrivateKey::random(&mut OsRng, ssh_key::Algorithm::Ed25519)
+                .expect("generate ed25519 K2")
+        };
+        let priv_pem = k2_private
+            .to_openssh(ssh_key::LineEnding::LF)
+            .expect("to_openssh");
+        let pub_line = k2_private
+            .public_key()
+            .to_openssh()
+            .expect("pub to_openssh");
+        std::fs::write(&k2_path, priv_pem.as_bytes()).expect("write K2 priv");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&k2_path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod K2 priv");
+        }
+        let k2_pub_path = nexum_core::ssh_key::pub_path_for(&k2_path);
+        std::fs::write(&k2_pub_path, pub_line.as_bytes()).expect("write K2 pub");
+        let k2_pubkey = pub_line;
+        let k2_fp =
+            nexum_core::ssh_key::compute_fingerprint(&k2_pubkey).expect("compute K2 fingerprint");
+
+        // Step 3: pin a local git identity inside the notebook repo so the
+        // signed commits below succeed even on hosts (and CI runners) that
+        // ship without a global gitconfig. `git_commit_signed` shells out to
+        // git without the GIT_AUTHOR_* env scaffolding that `run_nexum` sets,
+        // so the identity has to live in `.git/config`.
+        for kv in [
+            ("user.name", "nexum-test"),
+            ("user.email", "nexum-test@example.invalid"),
+        ] {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&nb_git)
+                .args(["config", "--local", kv.0, kv.1])
+                .status()
+                .expect("git config local identity");
+            assert!(status.success());
+        }
+
+        // Step 4: append KeyAdded(K2) via the production load/serialize
+        // round-trip and regenerate signer files. The materializer enforces
+        // one new event per commit (multi-event appends classify as
+        // `Diff::Forbidden{ReorderedDeleted}` and freeze the chain), so the
+        // reanchor lands in a separate commit further down.
+        let events_path = nb_git.join(".trust/events.yml");
+        let trust_dir = nb_git.join(".trust");
+        {
+            let mut log =
+                nexum_core::trust::events::load_events_yml(&events_path).expect("load events.yml");
+            log.events.push(nexum_core::trust::events::Event {
+                event_id: uuid::Uuid::now_v7(),
+                payload: nexum_core::trust::events::EventKind::KeyAdded {
+                    fingerprint: k2_fp.clone(),
+                    public_key: k2_pubkey.clone(),
+                    reason: "reanchor predecessor (test fixture)".to_owned(),
+                },
+            });
+            let yaml = serde_yaml::to_string(&log).expect("serialize events.yml");
+            std::fs::write(&events_path, yaml).expect("write events.yml (KeyAdded)");
+            nexum_core::trust::regenerate::regenerate_files(&events_path, &trust_dir)
+                .expect("regenerate_files (KeyAdded)");
+        }
+
+        // Step 5: commit KeyAdded signed by K1 (user.signingkey still points
+        // at K1 from init). Stage all four trust files.
+        nexum_core::init::git_ops::git_commit_signed(
+            &nb_git,
+            &[
+                Path::new(".trust/events.yml"),
+                Path::new(".trust/historical_signers"),
+                Path::new(".trust/allowed_signers"),
+                Path::new(".trust/revoked_signers"),
+            ],
+            "trust: add signing key (test fixture KeyAdded)",
+        )
+        .expect("git_commit_signed (KeyAdded)");
+
+        // Step 6: append BootstrapReanchor(K1 -> K2) and regenerate again.
+        {
+            let mut log =
+                nexum_core::trust::events::load_events_yml(&events_path).expect("load events.yml");
+            log.events.push(nexum_core::trust::events::Event {
+                event_id: uuid::Uuid::now_v7(),
+                payload: nexum_core::trust::events::EventKind::BootstrapReanchor {
+                    old_fingerprint: k1_fp.clone(),
+                    new_fingerprint: k2_fp.clone(),
+                    reason: "test fixture chain-break".to_owned(),
+                    acknowledge_chain_anchor_lost: false,
+                },
+            });
+            let yaml = serde_yaml::to_string(&log).expect("serialize events.yml");
+            std::fs::write(&events_path, yaml).expect("write events.yml (Reanchor)");
+            nexum_core::trust::regenerate::regenerate_files(&events_path, &trust_dir)
+                .expect("regenerate_files (Reanchor)");
+        }
+
+        // Step 7: switch user.signingkey to K2 for the reanchor commit.
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&nb_git)
+            .args(["config", "--local", "user.signingkey"])
+            .arg(&k2_path)
+            .status()
+            .expect("git config user.signingkey K2");
+        assert!(status.success());
+
+        // Step 7b: commit BootstrapReanchor signed by K2. The reanchor
+        // authorization rule (Case A: new key already in chain via the
+        // prior KeyAdded + bootstrap pin preserved) accepts this signer.
+        let reanchor_commit = nexum_core::init::git_ops::git_commit_signed(
+            &nb_git,
+            &[
+                Path::new(".trust/events.yml"),
+                Path::new(".trust/historical_signers"),
+                Path::new(".trust/allowed_signers"),
+                Path::new(".trust/revoked_signers"),
+            ],
+            "trust: reanchor (test fixture)",
+        )
+        .expect("git_commit_signed (Reanchor)");
+
+        // Step 7c: verify the reanchor commit (K2 is in historical_signers).
+        nexum_core::init::git_ops::git_verify_commit_with_signers(
+            &nb_git,
+            "HEAD",
+            &trust_dir.join("historical_signers"),
+        )
+        .expect("verify reanchor commit");
+
+        // Step 8: update config.toml [trust.bootstrap] to K2 via production I/O
+        // AND rewrite the `.bootstrap-fingerprint` cache so it agrees. The
+        // reanchor authorization (in the materializer's `verify_reanchor_*`
+        // path) refuses when the cache disagrees with config.toml, so both
+        // pinned files must move together.
+        let mut cfg = cfg;
+        cfg.trust.bootstrap.fingerprint.clone_from(&k2_fp);
+        cfg.trust.bootstrap.public_key.clone_from(&k2_pubkey);
+        "ssh-ed25519".clone_into(&mut cfg.trust.bootstrap.key_type);
+        nexum_core::config::io::save(&cfg_path, &cfg).expect("save config");
+        std::fs::write(home.nexum_home.join(".bootstrap-fingerprint"), &k2_fp)
+            .expect("write .bootstrap-fingerprint cache");
+
+        // Step 9: if stale, reset user.signingkey back to K1 to simulate the
+        // operator who completed the reanchor but forgot to update git's
+        // signingkey config.
+        if stale_signingkey {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&nb_git)
+                .args(["config", "--local", "user.signingkey"])
+                .arg(&k1_path)
+                .status()
+                .expect("git config user.signingkey K1 (stale)");
+            assert!(status.success());
+        }
+
+        // Step 10: index + rebuild the trust_events view.
+        let out = home.run(&["index"]);
+        assert!(
+            out.status.success(),
+            "post-reanchor index failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        (
+            home,
+            PostReanchorFixture {
+                k1_fp,
+                k2_fp,
+                reanchor_commit,
+            },
+        )
+    }
+
+    /// Read the bootstrap-pin fingerprint from `config.toml`. Surfaces the
+    /// K1 fingerprint planted by `nexum init` so tests can target it
+    /// without re-deriving from the SSH keypair on disk.
+    pub fn bootstrap_pin_fingerprint(&self) -> String {
+        let cfg: nexum_core::config::types::Config =
+            nexum_core::config::io::load(&self.nexum_home.join("config.toml"))
+                .expect("load config.toml");
+        cfg.trust.bootstrap.fingerprint
     }
 
     /// Pre-seed `state/extract_acked.json` so the consent gate accepts

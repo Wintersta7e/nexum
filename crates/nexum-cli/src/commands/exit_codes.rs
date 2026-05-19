@@ -72,9 +72,15 @@ pub(crate) const EXTRACT_NO_SESSIONS: u8 = 28;
 pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
     use nexum_core::api::error::error_codes as ec;
     match env.error_code {
-        ec::USAGE => USAGE,
+        ec::USAGE | ec::TRUST_FINGERPRINT_NOT_KNOWN => USAGE,
         ec::NOT_INITIALIZED => NOT_INITIALIZED,
-        ec::STORE_INTEGRITY | ec::INVALID_FILTER | ec::TAMPERING_DETECTED => STORE_INTEGRITY,
+        ec::STORE_INTEGRITY
+        | ec::INVALID_FILTER
+        | ec::TAMPERING_DETECTED
+        | ec::KEYS_REVOKE_WOULD_UNSIGN_STORE
+        | ec::KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION
+        | ec::KEYS_REVOKE_SIGNER_NOT_ACTIVE
+        | ec::TRUST_DUPLICATE_EVENT => STORE_INTEGRITY,
         ec::MIGRATION_REQUIRED => MIGRATION_REQUIRED,
         ec::REANCHOR_PENDING => REANCHOR_PENDING,
         ec::TRUST_SCHEMA_UNSUPPORTED => TRUST_SCHEMA_UNSUPPORTED,

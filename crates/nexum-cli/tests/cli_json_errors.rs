@@ -335,3 +335,43 @@ fn keys_list_emits_success_envelope() {
     assert_eq!(env["ok"], serde_json::Value::Bool(true));
     assert_eq!(env["kind"], "keys.list.completed");
 }
+
+#[test]
+fn keys_revoke_would_unsign_store_envelope() {
+    let home = TestHome::initialized_clean();
+    let k1_fp = home.bootstrap_pin_fingerprint();
+    let (env, code) = run_json(&home, &["keys", "revoke", &k1_fp, "--rotation", "--json"]);
+    assert_eq!(code, 4);
+    assert_eq!(env["error_code"], "KEYS_REVOKE_WOULD_UNSIGN_STORE");
+    assert!(env["context"]["fingerprint"].as_str().is_some());
+}
+
+#[test]
+fn keys_revoke_fingerprint_not_known_envelope() {
+    let home = TestHome::initialized_clean();
+    let bogus = "SHA256:0000000000000000000000000000000000000000000";
+    let (env, code) = run_json(&home, &["keys", "revoke", bogus, "--rotation", "--json"]);
+    assert_eq!(code, 2);
+    assert_eq!(env["error_code"], "TRUST_FINGERPRINT_NOT_KNOWN");
+}
+
+#[test]
+fn keys_revoke_signer_not_active_envelope_via_reanchor() {
+    // Stale-signingkey + target == signer → preflight surfaces
+    // WouldSignOwnRevocation first. Exercising the bare SignerNotActive
+    // envelope shape exclusively needs a 3-key fixture (deferred); this
+    // test pins the WouldSignOwnRevocation envelope shape instead.
+    let (home, post) = TestHome::initialized_post_reanchor_case_a(true);
+    let (env, code) = run_json(
+        &home,
+        &["keys", "revoke", &post.k1_fp, "--rotation", "--json"],
+    );
+    assert_eq!(code, 4);
+    assert_eq!(env["error_code"], "KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION");
+    assert!(env["context"]["fingerprint"].as_str().is_some());
+    assert!(
+        env["context"]["current_signer_fingerprint"]
+            .as_str()
+            .is_some()
+    );
+}
