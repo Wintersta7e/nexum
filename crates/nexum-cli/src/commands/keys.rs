@@ -198,20 +198,23 @@ fn run_revoke(args: &RevokeArgs) -> ExitCode {
     // CLI-layer USAGE refusal: --json + --strict requires --yes.
     // Single guarded branch; nesting an inner `if args.json` here would
     // produce a dead `else` arm (the outer guard already requires it),
-    // which `clippy -D warnings` rejects.
+    // which `clippy -D warnings` rejects. Routed through the wire-stable
+    // ErrorEnvelope shape (NOT a hand-rolled JSON object) so agents see
+    // the same envelope discriminator they get from every other USAGE
+    // failure.
     if args.json && matches!(mode, RevokeMode::Compromise) && !args.yes {
-        let env = serde_json::json!({
-            "ok": false,
-            "error_code": "USAGE",
-            "message": "--strict + --json requires --yes (no interactive prompt available)",
-            "remediation": {
-                "command": null,
-                "rationale": "Pass --yes to acknowledge the compromise prompt non-interactively.",
-            },
-            "context": {},
-        });
-        println!("{env}");
-        return ExitCode::from(2);
+        let env = nexum_core::api::error::ErrorEnvelope {
+            error_code: nexum_core::api::error::error_codes::USAGE,
+            message: "--strict + --json requires --yes (no interactive prompt available)"
+                .to_owned(),
+            remediation: Some(nexum_core::api::error::Remediation {
+                command: None,
+                rationale: "Pass --yes to acknowledge the compromise prompt non-interactively."
+                    .to_owned(),
+            }),
+            context: serde_json::json!({ "phase": "strict_yes_required" }),
+        };
+        return json_emit::emit_error(&env, 2);
     }
 
     // Pre-mutation count for the prompt display. Rotation mode skips the
