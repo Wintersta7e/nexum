@@ -182,6 +182,17 @@ pub enum TrustError {
     /// across the full event log.
     #[error("duplicate key fingerprint in events.yml: {fingerprint}")]
     DuplicateKey { fingerprint: String },
+    /// Tried to append a trust event whose `(kind, fingerprint)` pair is
+    /// already present in events.yml.
+    #[error("duplicate trust event: a {kind} event for fingerprint {fingerprint} already exists")]
+    DuplicateEvent {
+        kind: &'static str,
+        fingerprint: String,
+    },
+    /// Tried to operate on a fingerprint that no `BootstrapKey` or `KeyAdded`
+    /// event has ever introduced into the trust state.
+    #[error("fingerprint not known to the trust state: {fingerprint}")]
+    FingerprintNotKnown { fingerprint: String },
 }
 
 impl From<crate::index::meta::MetaError> for TrustError {

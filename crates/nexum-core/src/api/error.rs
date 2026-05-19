@@ -117,6 +117,12 @@ pub mod error_codes {
     pub const EXTRACT_VALIDATION: &str = "EXTRACT_VALIDATION";
     /// Session selector matched no sessions.
     pub const EXTRACT_NO_SESSIONS: &str = "EXTRACT_NO_SESSIONS";
+    /// Tried to append a trust event whose `(kind, fingerprint)` pair is
+    /// already present in events.yml.
+    pub const TRUST_DUPLICATE_EVENT: &str = "TRUST_DUPLICATE_EVENT";
+    /// Tried to operate on a fingerprint that no `BootstrapKey` or
+    /// `KeyAdded` event has ever introduced into the trust state.
+    pub const TRUST_FINGERPRINT_NOT_KNOWN: &str = "TRUST_FINGERPRINT_NOT_KNOWN";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -416,6 +422,11 @@ fn config_envelope(err: &crate::config::ConfigError) -> ErrorEnvelope {
 
 // ───── TrustError variant dispatch ──────────────────────────────────────────
 
+// Flat dispatcher over every `TrustError` variant: each arm is a short
+// literal `ErrorEnvelope` and the per-arm bodies are deliberately
+// inlined for readability over any factoring that would hide the
+// envelope shape behind a helper-call indirection.
+#[allow(clippy::too_many_lines)]
 fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
     use crate::trust::events::TrustError;
     match err {
@@ -513,6 +524,39 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
             context: serde_json::json!({
                 "kind": "trust",
                 "subkind": "duplicate_key",
+                "fingerprint": fingerprint,
+            }),
+        },
+        TrustError::DuplicateEvent { kind, fingerprint } => ErrorEnvelope {
+            error_code: error_codes::TRUST_DUPLICATE_EVENT,
+            message: format!("a {kind} event for fingerprint {fingerprint} already exists"),
+            remediation: Some(Remediation {
+                command: None,
+                rationale: format!(
+                    "Run `nexum keys list` to see the existing trust state; \
+                     if the {kind} classification is wrong, the operator must \
+                     rebuild from a backup of events.yml."
+                ),
+            }),
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "duplicate_event",
+                "event_kind": kind,
+                "fingerprint": fingerprint,
+            }),
+        },
+        TrustError::FingerprintNotKnown { fingerprint } => ErrorEnvelope {
+            error_code: error_codes::TRUST_FINGERPRINT_NOT_KNOWN,
+            message: format!("fingerprint not known to the trust state: {fingerprint}"),
+            remediation: Some(Remediation {
+                command: Some("nexum keys list".to_owned()),
+                rationale: "Run `nexum keys list` to see the known fingerprints; \
+                            the operator may have a typo or stale clipboard."
+                    .to_owned(),
+            }),
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "fingerprint_not_known",
                 "fingerprint": fingerprint,
             }),
         },

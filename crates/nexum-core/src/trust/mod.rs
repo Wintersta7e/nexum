@@ -14,6 +14,7 @@ pub mod key_state;
 pub mod pin;
 pub mod reanchor_pending;
 pub mod regenerate;
+pub mod revoke;
 pub mod rotate;
 
 pub use events::{Event, EventKind, EventLog, TrustError, load_events_yml, write_seed_yaml};
