@@ -183,7 +183,11 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     command: Some("nexum keys rotate --new-key <path>".to_owned()),
                     rationale: "Add a second signing key first, then re-run the revoke.".to_owned(),
                 }),
-                context: serde_json::json!({ "fingerprint": fingerprint }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "keys_revoke_would_unsign_store",
+                    "fingerprint": fingerprint,
+                }),
             },
             ApiError::KeysRevokeWouldSignOwnRevocation {
                 fingerprint,
@@ -204,6 +208,8 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                             .to_owned(),
                 }),
                 context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "keys_revoke_would_sign_own_revocation",
                     "fingerprint": fingerprint,
                     "current_signer_fingerprint": current_signer_fingerprint,
                 }),
@@ -223,6 +229,8 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                         .to_owned(),
                 }),
                 context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "keys_revoke_signer_not_active",
                     "signer_fingerprint": signer_fingerprint,
                     "signer_role": signer_role,
                 }),
