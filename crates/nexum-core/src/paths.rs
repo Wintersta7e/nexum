@@ -22,6 +22,9 @@ pub struct Paths {
     pub models: PathBuf,
     pub config: PathBuf,
     pub bootstrap_pin: PathBuf,
+    /// `~/.nexum/state/trust_warnings_acked.json`. Created lazily on
+    /// first write by `dismiss_pre_recovery_warning`.
+    pub trust_warnings_acked: PathBuf,
     pub projects: PathBuf,
     pub logs: PathBuf,
     pub state: PathBuf,
@@ -41,6 +44,7 @@ impl Paths {
             models: home.join("models"),
             config: home.join("config.toml"),
             bootstrap_pin: home.join(".bootstrap-fingerprint"),
+            trust_warnings_acked: home.join("state").join("trust_warnings_acked.json"),
             projects: home.join("projects"),
             logs: home.join("logs"),
             state: home.join("state"),
@@ -90,6 +94,10 @@ mod tests {
         assert_eq!(p.models, root.join("models"));
         assert_eq!(p.config, root.join("config.toml"));
         assert_eq!(p.bootstrap_pin, root.join(".bootstrap-fingerprint"));
+        assert_eq!(
+            p.trust_warnings_acked,
+            root.join("state").join("trust_warnings_acked.json")
+        );
         assert_eq!(p.projects, root.join("projects"));
         assert_eq!(p.logs, root.join("logs"));
         assert_eq!(p.state, root.join("state"));
@@ -103,6 +111,7 @@ mod tests {
             &p.models,
             &p.config,
             &p.bootstrap_pin,
+            &p.trust_warnings_acked,
             &p.projects,
             &p.logs,
             &p.state,

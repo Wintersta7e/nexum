@@ -113,6 +113,14 @@ pub enum ApiError {
     /// `nexum keys recover` encountered a failure after writing the sentinel.
     #[error("recovery failed mid-flight: {stderr}")]
     KeysRecoverFailed { stderr: String },
+    /// `~/.nexum/state/trust_warnings_acked.json` exists but contains
+    /// invalid JSON. The file is not overwritten; the operator must inspect
+    /// or delete it before acking new warnings.
+    #[error("trust warnings ack file at {path} is malformed: {reason}")]
+    PreRecoveryAckFileMalformed {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -1678,6 +1686,134 @@ pub fn keys_recover(
             regenerated_files: touched,
         })
     })
+}
+
+// ───── Pre-recovery warning ack helpers ─────────────────────────────────────
+
+/// Persisted shape of `~/.nexum/state/trust_warnings_acked.json`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct TrustWarningsAcked {
+    #[serde(default)]
+    acked_codes: Vec<String>,
+    #[serde(default)]
+    acked_at: std::collections::BTreeMap<String, String>,
+}
+
+/// Outcome of `nexum trust dismiss-pre-recovery-warning`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DismissOutcome {
+    /// Codes that were newly added by this call.
+    pub added: Vec<String>,
+    /// Codes that were already present and left unchanged.
+    pub already_present: Vec<String>,
+    /// All acked codes after this call (sorted).
+    pub total: Vec<String>,
+}
+
+/// Append warning codes to `~/.nexum/state/trust_warnings_acked.json`,
+/// creating the state directory and file on first invocation.
+///
+/// # Errors
+///
+/// `ApiError::PreRecoveryAckFileMalformed` if the file exists but is not
+/// valid JSON. `ApiError::Indexer(IndexerError::Io)` on filesystem
+/// failures. `ApiError::Concurrent` if the writer lock is held by another
+/// process.
+pub fn dismiss_pre_recovery_warning(
+    paths: &Paths,
+    codes: &[String],
+) -> Result<DismissOutcome, ApiError> {
+    // Read-modify-write under the writer lock so concurrent dismiss
+    // calls cannot lost-update each other.
+    with_writer_lock(paths, || {
+        let mut state = read_acked_state(paths)?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let mut added = Vec::new();
+        let mut already_present = Vec::new();
+        for code in codes {
+            if state.acked_codes.iter().any(|c| c == code) {
+                already_present.push(code.clone());
+            } else {
+                state.acked_codes.push(code.clone());
+                state.acked_at.insert(code.clone(), now.clone());
+                added.push(code.clone());
+            }
+        }
+
+        if !added.is_empty() {
+            write_acked_state(paths, &state)?;
+        }
+
+        state.acked_codes.sort();
+        Ok(DismissOutcome {
+            added,
+            already_present,
+            total: state.acked_codes,
+        })
+    })
+}
+
+/// Read the current list of acked warning codes.
+///
+/// # Errors
+///
+/// `ApiError::PreRecoveryAckFileMalformed` if the file exists but is not
+/// valid JSON. `ApiError::Indexer(IndexerError::Io)` on other read failures.
+pub fn list_pre_recovery_acks(paths: &Paths) -> Result<Vec<String>, ApiError> {
+    let state = read_acked_state(paths)?;
+    Ok(state.acked_codes)
+}
+
+fn read_acked_state(paths: &Paths) -> Result<TrustWarningsAcked, ApiError> {
+    match std::fs::read_to_string(&paths.trust_warnings_acked) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|e| ApiError::PreRecoveryAckFileMalformed {
+            path: paths.trust_warnings_acked.clone(),
+            reason: e.to_string(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TrustWarningsAcked::default()),
+        Err(e) => Err(ApiError::Indexer(IndexerError::Io {
+            path: paths.trust_warnings_acked.clone(),
+            source: e,
+        })),
+    }
+}
+
+fn write_acked_state(paths: &Paths, state: &TrustWarningsAcked) -> Result<(), ApiError> {
+    let parent = paths.trust_warnings_acked.parent().ok_or_else(|| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.trust_warnings_acked.clone(),
+            source: std::io::Error::other("no parent dir"),
+        })
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })
+    })?;
+
+    let json =
+        serde_json::to_string_pretty(state).map_err(|e| ApiError::PreRecoveryAckFileMalformed {
+            path: paths.trust_warnings_acked.clone(),
+            reason: format!("serialize: {e}"),
+        })?;
+
+    // Atomic write: temp file in same directory, then rename into place.
+    let tmp = paths.trust_warnings_acked.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: tmp.clone(),
+            source: e,
+        })
+    })?;
+    std::fs::rename(&tmp, &paths.trust_warnings_acked).map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.trust_warnings_acked.clone(),
+            source: e,
+        })
+    })?;
+    Ok(())
 }
 
 /// Open the index DB and prime the trust-events view for a read verb.

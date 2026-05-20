@@ -164,6 +164,9 @@ pub mod error_codes {
     pub const KEYS_RECOVER_AGENT_UNAVAILABLE: &str = "KEYS_RECOVER_AGENT_UNAVAILABLE";
     /// `nexum keys recover` failed mid-flight after writing the sentinel.
     pub const KEYS_RECOVER_FAILED: &str = "KEYS_RECOVER_FAILED";
+    /// `~/.nexum/state/trust_warnings_acked.json` exists but is not valid JSON.
+    /// Delete the file to reset acked warnings, or inspect and repair it by hand.
+    pub const PRE_RECOVERY_ACK_FILE_MALFORMED: &str = "PRE_RECOVERY_ACK_FILE_MALFORMED";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -401,6 +404,23 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "kind": "api",
                     "subkind": "keys_recover_failed",
                     "stderr": stderr,
+                }),
+            },
+            ApiError::PreRecoveryAckFileMalformed { path, reason } => ErrorEnvelope {
+                error_code: error_codes::PRE_RECOVERY_ACK_FILE_MALFORMED,
+                message: format!(
+                    "trust warnings ack file at {} is malformed: {reason}",
+                    path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Inspect the file by hand; delete it to reset acked warnings."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "dismiss_pre_recovery_warning",
+                    "path": path.display().to_string(),
                 }),
             },
         }
