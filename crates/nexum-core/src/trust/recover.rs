@@ -337,13 +337,7 @@ mod tests {
             .iter()
             .find(|e| matches!(e.payload, EventKind::BootstrapReanchor { .. }))
             .expect("must find reanchor event");
-        // UUIDv7 has version field = 7; byte 6's high nibble.
-        let bytes = reanchor_event.event_id.as_bytes();
-        assert_eq!(
-            bytes[6] >> 4,
-            7,
-            "event_id must be UUIDv7, got version {}",
-            bytes[6] >> 4
-        );
+        let version = reanchor_event.event_id.get_version_num();
+        assert_eq!(version, 7, "event_id must be UUIDv7, got version {version}");
     }
 }
