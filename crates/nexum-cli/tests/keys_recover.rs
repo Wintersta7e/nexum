@@ -2,7 +2,7 @@
 //! `--reanchor-without-pin`. Builds on the existing `TestHome` harness.
 
 mod common;
-use common::{write_named_keypair, TestHome};
+use common::{TestHome, write_named_keypair};
 
 /// Generate a fresh ed25519 keypair inside the test home's `.ssh` dir and
 /// return the private-key path. The tag becomes the filename basename so
