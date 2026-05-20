@@ -109,21 +109,11 @@ fn run_regenerate_files(args: &RegenerateFilesArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            // Inline routing rather than super::json_emit::route_api_error:
-            // that helper's prose path is read-verb-shaped (it hints "rerun
-            // nexum index" on MigrationRequired etc.), which would mislead
-            // operators of this admin write verb. JSON mode is identical;
-            // prose mode just prints the envelope message and maps the code.
-            let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
-            let code = super::exit_codes::for_envelope(&env);
-            if args.json {
-                super::json_emit::emit_error(&env, code)
-            } else {
-                eprintln!("error: {}", env.message);
-                ExitCode::from(code)
-            }
-        }
+        // Route via render_error rather than super::json_emit::route_api_error:
+        // that helper's prose path is read-verb-shaped (it hints "rerun nexum
+        // index" on MigrationRequired etc.), which would mislead operators of
+        // this admin write verb.
+        Err(e) => render_error(&e, args.json),
     }
 }
 
@@ -190,13 +180,12 @@ fn run_dismiss(args: &DismissArgs) -> ExitCode {
                         "total": outcome.total,
                     })
                 );
-            } else if outcome.added.is_empty() {
-                println!("no new codes acked (all already present)");
-                if !outcome.already_present.is_empty() {
-                    println!("already present: {}", outcome.already_present.join(", "));
-                }
             } else {
-                println!("acked: {}", outcome.added.join(", "));
+                if outcome.added.is_empty() {
+                    println!("no new codes acked (all already present)");
+                } else {
+                    println!("acked: {}", outcome.added.join(", "));
+                }
                 if !outcome.already_present.is_empty() {
                     println!("already present: {}", outcome.already_present.join(", "));
                 }
