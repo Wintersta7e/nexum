@@ -742,27 +742,18 @@ mod tests {
             None,
             Some("init"),
         );
-        // BootstrapReanchor with new_public_key populated (pk arg = K2pub).
-        conn.execute(
-            "INSERT INTO trust_events (event_id, kind, fingerprint, old_fingerprint,
-                                       new_fingerprint, public_key, effective_commit,
-                                       effective_commit_topo_pos, introduced_by_signer,
-                                       reason, materialized_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '2026-05-20T00:00:00Z')",
-            rusqlite::params![
-                "ev2",
-                "BootstrapReanchor",
-                Option::<&str>::None,
-                "SHA256:K1",
-                "SHA256:K2",
-                "ssh-ed25519 K2pub",
-                "commit_1",
-                1_i64,
-                "SHA256:K1",
-                "chain-break note",
-            ],
-        )
-        .expect("insert reanchor");
+        // BootstrapReanchor with new_public_key populated.
+        insert_event(
+            &conn,
+            "ev2",
+            "BootstrapReanchor",
+            1,
+            None,
+            Some("ssh-ed25519 K2pub"),
+            Some("SHA256:K1"),
+            Some("SHA256:K2"),
+            Some("chain-break note"),
+        );
 
         let view = project(&conn).expect("project");
         assert_eq!(view.len(), 2, "K1 and K2 both present");
@@ -804,26 +795,17 @@ mod tests {
             Some("recover predecessor"),
         );
         // BootstrapReanchor also carries K2pub — the idempotent guard must fire.
-        conn.execute(
-            "INSERT INTO trust_events (event_id, kind, fingerprint, old_fingerprint,
-                                       new_fingerprint, public_key, effective_commit,
-                                       effective_commit_topo_pos, introduced_by_signer,
-                                       reason, materialized_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, '2026-05-20T00:00:00Z')",
-            rusqlite::params![
-                "ev3",
-                "BootstrapReanchor",
-                Option::<&str>::None,
-                "SHA256:K1",
-                "SHA256:K2",
-                "ssh-ed25519 K2pub",
-                "commit_2",
-                2_i64,
-                "SHA256:K2",
-                "chain-break note",
-            ],
-        )
-        .expect("insert reanchor");
+        insert_event(
+            &conn,
+            "ev3",
+            "BootstrapReanchor",
+            2,
+            None,
+            Some("ssh-ed25519 K2pub"),
+            Some("SHA256:K1"),
+            Some("SHA256:K2"),
+            Some("chain-break note"),
+        );
 
         let view = project(&conn).expect("project");
         assert_eq!(view.len(), 2, "no duplicate introducer for K2");
