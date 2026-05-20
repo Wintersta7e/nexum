@@ -134,6 +134,12 @@ pub mod error_codes {
     /// not in `Active` role (rotated, compromised, reanchored, or has
     /// no `KeyStateView` row).
     pub const KEYS_REVOKE_SIGNER_NOT_ACTIVE: &str = "KEYS_REVOKE_SIGNER_NOT_ACTIVE";
+    /// `nexum keys recover` refused because `old_fingerprint` doesn't
+    /// match the chain's current bootstrap key.
+    pub const RECOVER_OLD_FP_MISMATCH: &str = "RECOVER_OLD_FP_MISMATCH";
+    /// `nexum keys recover` refused because a `BootstrapReanchor` event
+    /// for the same `(old_fp, new_fp)` pair already exists.
+    pub const RECOVER_DUPLICATE_CHAIN: &str = "RECOVER_DUPLICATE_CHAIN";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -630,6 +636,37 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
                 "kind": "trust",
                 "subkind": "fingerprint_not_known",
                 "fingerprint": fingerprint,
+            }),
+        },
+        TrustError::RecoverOldFpMismatch { expected, supplied } => ErrorEnvelope {
+            error_code: error_codes::RECOVER_OLD_FP_MISMATCH,
+            message: format!(
+                "recovery old_fingerprint {supplied} doesn't match the chain's current bootstrap {expected}"
+            ),
+            remediation: Some(Remediation {
+                command: Some("nexum keys list".to_owned()),
+                rationale: "Verify the current bootstrap fingerprint with `nexum keys list` \
+                            and resubmit with the correct old_fingerprint."
+                    .to_owned(),
+            }),
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "recover_old_fp_mismatch",
+                "expected": expected,
+                "supplied": supplied,
+            }),
+        },
+        TrustError::RecoverDuplicateChain { old_fp, new_fp } => ErrorEnvelope {
+            error_code: error_codes::RECOVER_DUPLICATE_CHAIN,
+            message: format!(
+                "a BootstrapReanchor event for ({old_fp} -> {new_fp}) already exists in events.yml"
+            ),
+            remediation: None,
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "recover_duplicate_chain",
+                "old_fp": old_fp,
+                "new_fp": new_fp,
             }),
         },
     }

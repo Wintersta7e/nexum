@@ -203,6 +203,21 @@ pub enum TrustError {
     /// event has ever introduced into the trust state.
     #[error("fingerprint not known to the trust state: {fingerprint}")]
     FingerprintNotKnown { fingerprint: String },
+    /// Recovery requested with an `old_fingerprint` that doesn't match the
+    /// chain's most recent prior bootstrap. Either the operator supplied
+    /// the wrong key (in the pin-intact case, the supplied `old_fp` must
+    /// equal `cfg.trust.bootstrap.fingerprint`), or events.yml has drifted —
+    /// `nexum doctor` should run first.
+    #[error(
+        "recovery old_fingerprint {supplied} doesn't match the chain's current bootstrap {expected}"
+    )]
+    RecoverOldFpMismatch { expected: String, supplied: String },
+    /// A `BootstrapReanchor` event for the supplied `(old_fp, new_fp)`
+    /// pair already exists. Re-emitting the same chain break would be a
+    /// duplicate event and the materializer would freeze the chain at
+    /// the second occurrence.
+    #[error("a BootstrapReanchor event for ({old_fp} -> {new_fp}) already exists in events.yml")]
+    RecoverDuplicateChain { old_fp: String, new_fp: String },
 }
 
 impl From<crate::index::meta::MetaError> for TrustError {
