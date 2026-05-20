@@ -1747,7 +1747,7 @@ pub fn dismiss_pre_recovery_warning(
         let mut added = Vec::new();
         let mut already_present = Vec::new();
         for code in codes {
-            if state.acked_codes.iter().any(|c| c == code) {
+            if state.acked_codes.contains(code) {
                 already_present.push(code.clone());
             } else {
                 state.acked_codes.push(code.clone());
