@@ -277,9 +277,10 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                 ),
                 remediation: Some(Remediation {
                     command: None,
-                    rationale: "Wait for the other process to finish, or investigate \
-                                whether a stale lock exists via \
-                                `nexum doctor --break-stale-lock`."
+                    rationale: "Wait for the other nexum process to finish before retrying. \
+                                If you believe the holder has exited, inspect running nexum \
+                                processes and the lockfile listed in `context.lock_path` \
+                                before any manual cleanup."
                         .to_owned(),
                 }),
                 context: serde_json::json!({
