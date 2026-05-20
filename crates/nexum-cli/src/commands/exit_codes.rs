@@ -86,7 +86,8 @@ pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
         | ec::KEYS_REVOKE_SIGNER_NOT_ACTIVE
         | ec::TRUST_DUPLICATE_EVENT
         | ec::KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A
-        | ec::KEYS_RECOVER_FAILED => STORE_INTEGRITY,
+        | ec::KEYS_RECOVER_FAILED
+        | ec::PRE_RECOVERY_ACK_FILE_MALFORMED => STORE_INTEGRITY,
         ec::CONCURRENT => CONCURRENT,
         ec::MIGRATION_REQUIRED => MIGRATION_REQUIRED,
         ec::REANCHOR_PENDING => REANCHOR_PENDING,

@@ -5,7 +5,7 @@
 
 mod common;
 
-use crate::common::{run_json, TestHome};
+use crate::common::{TestHome, run_json};
 use serde_json::Value;
 
 #[test]
@@ -197,11 +197,13 @@ fn search_emits_reanchor_pending_envelope_under_json() {
         serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
     assert_eq!(env["error_code"], "REANCHOR_PENDING");
     assert_eq!(out.status.code().unwrap_or(-1), 8);
-    assert!(env["message"]
-        .as_str()
-        .unwrap()
-        .to_lowercase()
-        .contains("reanchor"));
+    assert!(
+        env["message"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("reanchor")
+    );
 }
 
 #[test]
@@ -367,9 +369,11 @@ fn keys_revoke_signer_not_active_envelope_via_reanchor() {
     assert_eq!(code, 4);
     assert_eq!(env["error_code"], "KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION");
     assert!(env["context"]["fingerprint"].as_str().is_some());
-    assert!(env["context"]["current_signer_fingerprint"]
-        .as_str()
-        .is_some());
+    assert!(
+        env["context"]["current_signer_fingerprint"]
+            .as_str()
+            .is_some()
+    );
 }
 
 #[test]
@@ -455,4 +459,23 @@ fn keys_recover_pin_missing_emits_usage_envelope() {
         "keys_recover_pin_missing_for_case_a"
     );
     assert!(env["context"]["path"].as_str().is_some());
+}
+
+#[test]
+fn dismiss_with_malformed_ack_file_emits_envelope() {
+    let home = TestHome::initialized_no_index();
+    let state_dir = home.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("trust_warnings_acked.json"), "{not json").unwrap();
+
+    let out = home.run(&[
+        "trust",
+        "dismiss-pre-recovery-warning",
+        "--code",
+        "pre-recovery-record",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(4));
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(payload["error_code"], "PRE_RECOVERY_ACK_FILE_MALFORMED");
 }
