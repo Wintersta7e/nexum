@@ -61,7 +61,8 @@ impl RecordType {
     /// boundary.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "decision" => Some(RecordType::Decision),
             "recommendation" => Some(RecordType::Recommendation),
             "failure" => Some(RecordType::Failure),
@@ -109,7 +110,8 @@ impl Source {
     /// boundary.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "local" => Some(Source::Local),
             "cc-native" => Some(Source::CcNative),
             "codex-native" => Some(Source::CodexNative),
@@ -159,7 +161,8 @@ impl Confidence {
     /// boundary.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "low" => Some(Confidence::Low),
             "medium" => Some(Confidence::Medium),
             "high" => Some(Confidence::High),
@@ -232,7 +235,8 @@ impl Outcome {
     /// alongside the DB encoding (`"n-a"`) for symmetry with the other variants.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "working" => Some(Outcome::Working),
             "reverted" => Some(Outcome::Reverted),
             "superseded" => Some(Outcome::Superseded),
@@ -282,7 +286,8 @@ impl Agent {
     /// boundary.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "codex" => Some(Agent::Codex),
             "claude-code" => Some(Agent::ClaudeCode),
             "manual" => Some(Agent::Manual),
@@ -338,7 +343,8 @@ impl SignatureStatus {
     /// boundary.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "verified" => Some(SignatureStatus::Verified),
             "unsigned" => Some(SignatureStatus::Unsigned),
             "invalid" => Some(SignatureStatus::Invalid),
@@ -451,7 +457,8 @@ impl TrustPolicy {
     /// for unrecognized values rather than silently defaulting.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "warn-but-show" => Some(TrustPolicy::WarnButShow),
             "hide" => Some(TrustPolicy::Hide),
             "show-silent" => Some(TrustPolicy::ShowSilent),
@@ -619,7 +626,8 @@ impl TrustBasis {
     /// boundary.
     #[must_use]
     pub fn try_from_user_str(s: &str) -> Option<Self> {
-        match s {
+        let lowered = s.to_ascii_lowercase();
+        match lowered.as_str() {
             "current" => Some(TrustBasis::Current),
             "rotated-historical" => Some(TrustBasis::RotatedHistorical),
             "rotated-historical-compromised" => Some(TrustBasis::RotatedHistoricalCompromised),
@@ -1123,6 +1131,73 @@ mod tests {
             Some(SignatureStatus::Unknown)
         );
         assert_eq!(SignatureStatus::try_from_user_str("rotated"), None);
+    }
+
+    #[test]
+    fn try_from_user_str_is_ascii_case_insensitive() {
+        // Agents that emit log-line capitalisation, MCP clients that
+        // titlecase enum names, and humans typing `--type Untyped` all
+        // converge on the same record type via case-folding. The kebab
+        // separator stays intact (matching is ASCII-case only, not shape).
+        assert_eq!(
+            RecordType::try_from_user_str("DECISION"),
+            Some(RecordType::Decision)
+        );
+        assert_eq!(
+            RecordType::try_from_user_str("Recommendation"),
+            Some(RecordType::Recommendation)
+        );
+        assert_eq!(
+            RecordType::try_from_user_str("untyped"),
+            Some(RecordType::Untyped)
+        );
+        assert_eq!(
+            RecordType::try_from_user_str("Untyped"),
+            Some(RecordType::Untyped)
+        );
+
+        assert_eq!(
+            Source::try_from_user_str("CC-Native"),
+            Some(Source::CcNative)
+        );
+        assert_eq!(
+            Source::try_from_user_str("CODEX-NATIVE"),
+            Some(Source::CodexNative)
+        );
+        assert_eq!(Source::try_from_user_str("Local"), Some(Source::Local));
+
+        assert_eq!(
+            Confidence::try_from_user_str("HIGH"),
+            Some(Confidence::High)
+        );
+        assert_eq!(
+            Outcome::try_from_user_str("Working"),
+            Some(Outcome::Working)
+        );
+        assert_eq!(
+            Outcome::try_from_user_str("NOT-APPLICABLE"),
+            Some(Outcome::NotApplicable)
+        );
+        assert_eq!(
+            Agent::try_from_user_str("Claude-Code"),
+            Some(Agent::ClaudeCode)
+        );
+        assert_eq!(
+            SignatureStatus::try_from_user_str("Verified"),
+            Some(SignatureStatus::Verified)
+        );
+        assert_eq!(
+            TrustPolicy::try_from_user_str("WARN-BUT-SHOW"),
+            Some(TrustPolicy::WarnButShow)
+        );
+        assert_eq!(
+            TrustBasis::try_from_user_str("Rotated-Historical"),
+            Some(TrustBasis::RotatedHistorical)
+        );
+
+        // Garbage still rejects.
+        assert_eq!(RecordType::try_from_user_str("not-a-type"), None);
+        assert_eq!(Source::try_from_user_str("CcNative"), None);
     }
 
     #[test]

@@ -71,7 +71,8 @@ pub fn list(
         "SELECT records.rowid, records.id, records.record_type, records.title, records.summary, \
                 records.source, records.project_id, records.crypto_result, records.updated, \
                 records.record_commit_sha, records.signer_fingerprint, \
-                records.relevant_trust_events_commit \
+                records.relevant_trust_events_commit, \
+                json_extract(records.extras, '$.cc_type') \
          FROM records \
          WHERE (records.updated, records.rowid) < (?1, ?2) {filter_sql} \
          ORDER BY records.updated DESC, records.rowid DESC \
@@ -158,6 +159,9 @@ struct ListRow {
     /// SHA of the events.yml commit effective at the record's commit time.
     /// Forwarded into [`CachedCrypto`] for the read-time projection.
     relevant_trust_events_commit: Option<String>,
+    /// `json_extract(records.extras, '$.cc_type')` — adapter-specific
+    /// metadata type. `None` for sources that don't store it.
+    metadata_type: Option<String>,
 }
 
 fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
@@ -174,6 +178,7 @@ fn row_to_raw(r: &rusqlite::Row<'_>) -> rusqlite::Result<ListRow> {
         record_commit_sha: r.get(9)?,
         signer_fingerprint: r.get(10)?,
         relevant_trust_events_commit: r.get(11)?,
+        metadata_type: r.get(12)?,
     })
 }
 
@@ -184,6 +189,7 @@ fn row_to_search_result(raw: ListRow, projected: ProjectedTrust) -> SearchResult
     SearchResult {
         id: raw.id,
         record_type: RecordType::from_db_str(&raw.record_type),
+        metadata_type: raw.metadata_type,
         title: raw.title,
         summary: raw.summary,
         score: 0.0,
@@ -297,6 +303,70 @@ mod tests {
         let rs = list(&conn, &filters, TrustPolicy::WarnButShow, 10, None).unwrap();
         assert_eq!(rs.results.len(), 1);
         assert_eq!(rs.results[0].id, "r1");
+    }
+
+    #[test]
+    fn list_filter_by_metadata_type_filters_by_extras_cc_type() {
+        // Surface and filter on `metadata_type`: the `extras.cc_type`
+        // frontmatter field for cc-native records. Two cc-native rows with
+        // distinct cc_types + one local row without extras. The filter
+        // should keep only the matching cc-native row and surface
+        // `metadata_type` on it.
+        let (_dir, conn) = open();
+        let insert_with_extras = |id: &str, source: &str, extras: &str, updated: &str| {
+            conn.execute(
+                "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+                 tags_fts, agent, session_refs, files, commits, confidence, outcome, created, \
+                 updated, content_hash, index_hash, crypto_result, indexed_at, extras) VALUES \
+                 (?1, ?2, 'p', 'untyped', ?1, '', '[]', '', 'manual', '[]', '[]', '[]', \
+                  'medium', 'n-a', ?3, ?3, 'h', 'ih', 'good', '2026-04-29T00:01:00Z', ?4)",
+                rusqlite::params![id, source, updated, extras],
+            )
+            .unwrap();
+        };
+        insert_with_extras(
+            "cc-feedback",
+            "cc-native",
+            r#"{"cc_type":"feedback"}"#,
+            "2026-04-29T00:00:00Z",
+        );
+        insert_with_extras(
+            "cc-reference",
+            "cc-native",
+            r#"{"cc_type":"reference"}"#,
+            "2026-04-29T00:00:01Z",
+        );
+        insert_with_extras("local-row", "local", "{}", "2026-04-29T00:00:02Z");
+
+        // Filter for cc_type=feedback: only cc-feedback matches.
+        let filters = Filters {
+            metadata_type: Some("feedback".into()),
+            ..Filters::default()
+        };
+        let rs = list(&conn, &filters, TrustPolicy::WarnButShow, 10, None).unwrap();
+        assert_eq!(rs.results.len(), 1, "{rs:?}");
+        assert_eq!(rs.results[0].id, "cc-feedback");
+        assert_eq!(rs.results[0].metadata_type.as_deref(), Some("feedback"));
+
+        // Without filter: every row appears; metadata_type surfaces where
+        // present.
+        let rs_all = list(
+            &conn,
+            &Filters::default(),
+            TrustPolicy::WarnButShow,
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rs_all.results.len(), 3);
+        let local = rs_all.results.iter().find(|r| r.id == "local-row").unwrap();
+        assert!(local.metadata_type.is_none());
+        let feedback = rs_all
+            .results
+            .iter()
+            .find(|r| r.id == "cc-feedback")
+            .unwrap();
+        assert_eq!(feedback.metadata_type.as_deref(), Some("feedback"));
     }
 
     /// Regression: pagination must remain correct when insertion order

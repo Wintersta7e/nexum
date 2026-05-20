@@ -45,8 +45,6 @@ pub(crate) const STORE_INTEGRITY: u8 = 4;
 #[allow(dead_code)]
 pub(crate) const BUSY: u8 = 5;
 pub(crate) const MIGRATION_REQUIRED: u8 = 6;
-// Reserved slot wired up by future lock-holder work; see module docs.
-#[allow(dead_code)]
 pub(crate) const CONCURRENT: u8 = 7;
 pub(crate) const REANCHOR_PENDING: u8 = 8;
 pub(crate) const TRUST_SCHEMA_UNSUPPORTED: u8 = 9;
@@ -72,9 +70,25 @@ pub(crate) const EXTRACT_NO_SESSIONS: u8 = 28;
 pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
     use nexum_core::api::error::error_codes as ec;
     match env.error_code {
-        ec::USAGE => USAGE,
+        ec::USAGE
+        | ec::TRUST_FINGERPRINT_NOT_KNOWN
+        | ec::KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED
+        | ec::KEYS_RECOVER_PIN_MISSING_FOR_CASE_A
+        | ec::KEYS_RECOVER_IN_PROGRESS
+        | ec::KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN
+        | ec::KEYS_RECOVER_AGENT_UNAVAILABLE => USAGE,
         ec::NOT_INITIALIZED => NOT_INITIALIZED,
-        ec::STORE_INTEGRITY | ec::INVALID_FILTER | ec::TAMPERING_DETECTED => STORE_INTEGRITY,
+        ec::STORE_INTEGRITY
+        | ec::INVALID_FILTER
+        | ec::TAMPERING_DETECTED
+        | ec::KEYS_REVOKE_WOULD_UNSIGN_STORE
+        | ec::KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION
+        | ec::KEYS_REVOKE_SIGNER_NOT_ACTIVE
+        | ec::TRUST_DUPLICATE_EVENT
+        | ec::KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A
+        | ec::KEYS_RECOVER_FAILED
+        | ec::PRE_RECOVERY_ACK_FILE_MALFORMED => STORE_INTEGRITY,
+        ec::CONCURRENT => CONCURRENT,
         ec::MIGRATION_REQUIRED => MIGRATION_REQUIRED,
         ec::REANCHOR_PENDING => REANCHOR_PENDING,
         ec::TRUST_SCHEMA_UNSUPPORTED => TRUST_SCHEMA_UNSUPPORTED,

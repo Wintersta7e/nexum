@@ -139,6 +139,7 @@ impl Adapter for CcAdapter {
                     records.push(RecordSummary {
                         id: record.id.clone(),
                         content_hash: record.content_hash.clone(),
+                        project_id: Some(record.project_id.clone()),
                     });
                 }
                 ParseOutcome::Skipped(reason) => skipped.push(reason),
@@ -187,6 +188,52 @@ impl Adapter for CcAdapter {
                 source: std::io::Error::other("record outside max-age cutoff"),
             }),
         }
+    }
+
+    fn read_by_summary(
+        &self,
+        summary: &crate::records::RecordSummary,
+    ) -> Result<UnifiedRecord, AdapterError> {
+        // Two CC projects can hold a record file with the same `id` (e.g.
+        // `user_profile.md` under different slugs). When the summary
+        // carries a `project_id` hint, parse each same-id candidate and
+        // return the one whose post-resolution `project_id` matches —
+        // otherwise the first-match-wins `read(&summary.id)` silently
+        // shadows the colliding sibling.
+        let Some(project) = &summary.project_id else {
+            return self.read(&summary.id);
+        };
+        let mut last_skip: Option<AdapterError> = None;
+        for (slug, path) in self.discover() {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem != summary.id {
+                continue;
+            }
+            match parse_per_topic_file(&slug, &path, self.max_age_years) {
+                ParseOutcome::Ok(record) => {
+                    if record.project_id == *project {
+                        return Ok(*record);
+                    }
+                }
+                ParseOutcome::Skipped(reason) => {
+                    last_skip = Some(AdapterError::MalformedRecord {
+                        path: reason.path,
+                        detail: format!("cc frontmatter parse failure ({:?})", reason.kind),
+                    });
+                }
+                ParseOutcome::TooOld => {}
+            }
+        }
+        if let Some(err) = last_skip {
+            return Err(err);
+        }
+        Err(AdapterError::Io {
+            path: PathBuf::from(&summary.id),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("cc record {id} under project {project}", id = summary.id),
+            ),
+        })
     }
 }
 

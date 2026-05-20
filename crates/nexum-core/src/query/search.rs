@@ -320,7 +320,8 @@ fn hydrate_rows_by_rowid(
                 records.body, records.source, records.project_id, \
                 records.crypto_result, records.updated, \
                 records.record_commit_sha, records.signer_fingerprint, \
-                records.relevant_trust_events_commit \
+                records.relevant_trust_events_commit, \
+                json_extract(records.extras, '$.cc_type') \
          FROM records WHERE records.rowid IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -344,6 +345,7 @@ fn hydrate_rows_by_rowid(
             record_commit_sha: row.get::<_, Option<String>>(10)?,
             signer_fingerprint: row.get::<_, Option<String>>(11)?,
             relevant_trust_events_commit: row.get::<_, Option<String>>(12)?,
+            metadata_type: row.get::<_, Option<String>>(13)?,
         })
     })?;
     let raw_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -384,7 +386,8 @@ fn fetch_and_project(
                 records.body, records.source, records.project_id, \
                 records.crypto_result, records.updated, \
                 records.record_commit_sha, records.signer_fingerprint, \
-                records.relevant_trust_events_commit \
+                records.relevant_trust_events_commit, \
+                json_extract(records.extras, '$.cc_type') \
          FROM records_fts \
          JOIN records ON records.rowid = records_fts.rowid \
          WHERE records_fts MATCH ?1 \
@@ -416,6 +419,7 @@ fn fetch_and_project(
             record_commit_sha: row.get::<_, Option<String>>(10)?,
             signer_fingerprint: row.get::<_, Option<String>>(11)?,
             relevant_trust_events_commit: row.get::<_, Option<String>>(12)?,
+            metadata_type: row.get::<_, Option<String>>(13)?,
         })
     })?;
     let fts_rows: Vec<FtsRow> = rows.collect::<Result<Vec<_>, _>>()?;
@@ -445,6 +449,7 @@ fn project_row(r: FtsRow, p: ProjectedTrust, score: f64, include_body: bool) -> 
     SearchResult {
         id: r.id,
         record_type: RecordType::from_db_str(&r.record_type),
+        metadata_type: r.metadata_type,
         title: r.title,
         summary: r.summary,
         score,
@@ -483,6 +488,9 @@ struct FtsRow {
     /// `None` for adapters with no events.yml correlation (cc-native /
     /// codex-native) or for records indexed before the column was wired.
     relevant_trust_events_commit: Option<String>,
+    /// `json_extract(records.extras, '$.cc_type')` — adapter-specific
+    /// metadata type. `None` for sources that don't store it.
+    metadata_type: Option<String>,
 }
 
 /// Build the per-table filter clause + bound params for the SQL pushdown.
@@ -499,6 +507,18 @@ pub(crate) fn build_filter_sql(filters: &Filters) -> (String, Vec<rusqlite::type
         next_idx += 1;
         clauses.push(format!("AND records.record_type = ?{i}"));
         params.push(rusqlite::types::Value::Text(rt.as_db_str().to_owned()));
+    }
+    if let Some(mt) = &filters.metadata_type {
+        let i = next_idx;
+        next_idx += 1;
+        // `extras.cc_type` is the cc adapter's frontmatter type. Other
+        // sources never store this key, so NULL = ? is false and they
+        // drop out — which is the right behaviour for a filter that's
+        // only meaningful on cc-native today.
+        clauses.push(format!(
+            "AND json_extract(records.extras, '$.cc_type') = ?{i}"
+        ));
+        params.push(rusqlite::types::Value::Text(mt.clone()));
     }
     if let Some(pid) = &filters.project_id {
         let i = next_idx;

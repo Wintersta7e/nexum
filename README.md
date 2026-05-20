@@ -29,7 +29,10 @@ your memory files — and your agent will trust whatever's there.
   `~/.codex/memories/` as upstream — no replacement, no fragmentation.
 - **Structured search** on the unioned corpus:
   `nexum search "concurrency" --type failure --since 30d` plus
-  `nexum list / get / recent / by-session`.
+  `nexum list / get / recent / by-session`. The `--metadata-type` filter
+  slices by adapter-specific frontmatter type (e.g. CC's `feedback`,
+  `reference`, `user`); every result row surfaces it as `metadata_type`
+  alongside `record_type`.
 - **Cryptographic provenance** — every record nexum writes is signed
   with your SSH key (commits to `~/.nexum/notebook.git/`), so a
   malicious npm postinstall can't quietly inject memory your agent
@@ -62,14 +65,20 @@ your memory files — and your agent will trust whatever's there.
   (`search`, `get`, `list`, `recent`, `by_session`, `list_projects`)
   over the rmcp stdio transport, wrapping the same core read verbs the
   CLI uses. Drop it into any MCP-aware host.
-- **Admin / recovery commands** — `nexum keys rotate`,
+- **Admin / recovery commands** — `nexum keys list`,
+  `nexum keys rotate`, `nexum keys revoke <fp> --rotation | --strict`,
   `nexum trust regenerate-files`, `nexum doctor --resolve-pending-reanchor`,
   `nexum index --sweep [--aggressive]`, `nexum index --reembed`, and
-  `nexum migrate` cover the operational surface (key rotation,
-  trust-file regeneration, sentinel resolution, stale-row sweep,
-  embedding backfill, schema migration). Every mutation runs under a
-  writer-process lock and rolls back on failure so the worktree
-  stays clean.
+  `nexum migrate` cover the operational surface (key listing with the
+  current git signer surfaced alongside the bootstrap pin, additive
+  rotation, two-mode revocation with an estimated affected-records
+  prompt under `--strict`, trust-file regeneration, sentinel
+  resolution, stale-row sweep, embedding backfill, schema migration).
+  Every mutation runs under a writer-process lock and rolls back on
+  failure so the worktree stays clean. Revocation enforces eight
+  preflights (would-unsign-store, would-sign-own-revocation,
+  signer-is-Active, and five more) so misconfigured signing setups
+  surface as wire-stable error codes instead of broken commits.
 - **Typed extraction** — `nexum extract --session <id>` / `--since <duration>` /
   `--backfill --dry-run` / `--backfill --dry-run-id <hash>`. Reads CC transcripts
   and Codex rollouts, scrubs common secret shapes, sends a 10-30 KB digest to the
@@ -77,7 +86,8 @@ your memory files — and your agent will trust whatever's there.
   commits each record to `notebook.git` via the existing signed-commit pipeline.
   Hash-bound two-step backfill flow gives an explicit cost-acknowledgement loop;
   first-run consent is recorded per (provider, model family) for `--quiet` and
-  cron-style use.
+  cron-style use. Committed records are immediately queryable via the standard
+  read verbs (`get` / `list` / `search`).
 
 ## Quick start
 
@@ -98,6 +108,9 @@ cargo build --release
 ./target/release/nexum search "concurrency"
 ./target/release/nexum recent --limit 20 --json
 ./target/release/nexum trust validate-events
+
+# Inspect trust state (each known key + role + current git signer)
+./target/release/nexum keys list
 ```
 
 The MCP stdio server lives in the same workspace:

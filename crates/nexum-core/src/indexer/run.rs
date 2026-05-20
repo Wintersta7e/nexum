@@ -24,8 +24,8 @@ use tracing::{info, warn};
 
 use crate::{
     adapter::{
-        Adapter, AdapterPass, PassCompleteness, cc::CcAdapter, codex::CodexAdapter,
-        local::LocalAdapter,
+        Adapter, AdapterPass, PassCompleteness, SkipKind, SkipReason, cc::CcAdapter,
+        codex::CodexAdapter, local::LocalAdapter,
     },
     config::types::Config,
     embed::{Embedder, f32_slice_to_le_bytes},
@@ -38,7 +38,7 @@ use crate::{
         },
     },
     paths::Paths,
-    records::{RecordId, Source, UnifiedRecord, hash::compute_index_hash},
+    records::{RecordSummary, Source, UnifiedRecord, hash::compute_index_hash},
 };
 
 impl From<IndexStateError> for IndexerError {
@@ -84,6 +84,30 @@ impl std::fmt::Display for PerSourceCompleteness {
     }
 }
 
+/// One bucket in `PerSourceOutcome.partial_reasons` — a `SkipKind` with its
+/// running count from a `PassCompleteness::Partial` adapter pass. JSON-form:
+/// `{"kind": "file-malformed", "count": 3}`. The kind is the same kebab
+/// string `SkipKind` serializes as, so agents can match on a stable
+/// enumeration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartialReasonSummary {
+    pub kind: SkipKind,
+    pub count: u32,
+}
+
+/// Bucket `skipped` reasons by `SkipKind` and emit one summary per kind,
+/// ordered by `SkipKind` declaration order so the JSON output is stable.
+fn summarize_skip_reasons(skipped: &[SkipReason]) -> Vec<PartialReasonSummary> {
+    let mut counts: std::collections::BTreeMap<SkipKind, u32> = std::collections::BTreeMap::new();
+    for r in skipped {
+        *counts.entry(r.kind).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| PartialReasonSummary { kind, count })
+        .collect()
+}
+
 /// Per-source slice of the reindex outcome. Surfaces what each adapter
 /// contributed so the CLI can render a structured summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +132,14 @@ pub struct PerSourceOutcome {
     /// colliding ids.
     #[serde(default)]
     pub duplicate_ids_skipped: u32,
+    /// When `completeness` is `partial`, an ordered breakdown of the
+    /// `SkipReason` kinds the adapter surfaced — e.g. how many files were
+    /// `file-malformed` vs `file-transient` vs `lock-contention`. Empty for
+    /// every other completeness state. Agents read this to decide whether
+    /// a partial pass is worth retrying (transient) or escalating
+    /// (malformed).
+    #[serde(default)]
+    pub partial_reasons: Vec<PartialReasonSummary>,
 }
 
 /// Aggregate outcome of one reindex pass across all enabled adapters.
@@ -188,6 +220,7 @@ pub fn run_with_opts(
     run_inner(conn, cfg, paths, false, opts)
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_inner(
     conn: &mut Connection,
     cfg: &Config,
@@ -225,7 +258,11 @@ fn run_inner(
             conn,
             Source::CcNative,
             &pass,
-            |id| build_cc_adapter(&cfg_for_read).read(id).ok(),
+            |summary| {
+                build_cc_adapter(&cfg_for_read)
+                    .read_by_summary(summary)
+                    .ok()
+            },
             force,
             opts,
             embedder.as_ref(),
@@ -238,7 +275,11 @@ fn run_inner(
             conn,
             Source::CodexNative,
             &pass,
-            |id| build_codex_adapter(&cfg_for_read).read(id).ok(),
+            |summary| {
+                build_codex_adapter(&cfg_for_read)
+                    .read_by_summary(summary)
+                    .ok()
+            },
             force,
             opts,
             embedder.as_ref(),
@@ -274,8 +315,8 @@ fn run_inner(
             conn,
             Source::Local,
             &pass,
-            |id| {
-                let mut record = local_adapter.read(id).ok()?;
+            |summary| {
+                let mut record = local_adapter.read_by_summary(summary).ok()?;
                 let Some(sha) = record.provenance.record_commit_sha.clone() else {
                     // Record's path is not in git history — leave the
                     // adapter's placeholder Provenance and proceed.
@@ -360,7 +401,7 @@ fn apply_pass<F>(
     outcome: &mut IndexerOutcome,
 ) -> Result<(), IndexerError>
 where
-    F: Fn(&RecordId) -> Option<UnifiedRecord>,
+    F: Fn(&RecordSummary) -> Option<UnifiedRecord>,
 {
     let completeness = match &pass.completeness {
         PassCompleteness::Authoritative => PerSourceCompleteness::Authoritative,
@@ -368,6 +409,10 @@ where
         PassCompleteness::Failed { .. } => PerSourceCompleteness::Failed,
         PassCompleteness::MissingRoot { .. } => PerSourceCompleteness::MissingRoot,
         PassCompleteness::Unreadable { .. } => PerSourceCompleteness::Unreadable,
+    };
+    let partial_reasons = match &pass.completeness {
+        PassCompleteness::Partial { skipped } => summarize_skip_reasons(skipped),
+        _ => Vec::new(),
     };
     let mut per_source = PerSourceOutcome {
         source,
@@ -378,6 +423,7 @@ where
         deferred_deletes: 0,
         embed_failures: 0,
         duplicate_ids_skipped: 0,
+        partial_reasons,
     };
 
     if let PassCompleteness::Failed { reason } = &pass.completeness {
@@ -475,32 +521,25 @@ fn apply_pass_inside_tx<F>(
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError>
 where
-    F: Fn(&RecordId) -> Option<UnifiedRecord>,
+    F: Fn(&RecordSummary) -> Option<UnifiedRecord>,
 {
     let indexed = load_indexed_for_source(tx, source)?;
 
-    // The candidate key is just `id` because adapters cannot universally
-    // resolve `project_id` at list time without doing the read-full work
-    // (e.g., Codex derives it from the threads index inside
-    // `build_record`). The composite UNIQUE on the records table prevents
-    // silent overwrite at upsert time, but within a single pass two list
-    // entries that share an id collapse here. The two records compete on
-    // the same `read_full(id)` call: the adapter's first-match-wins
-    // behaviour returns one and silently drops the other.
-    //
-    // Surface the collision via a warn + a `SkipReason` so operators
-    // notice that one of their records is being shadowed. Renaming one
-    // of the colliding files is the documented workaround until the
-    // adapter / indexer plumb a composite `(project_id, id)` key end to
-    // end.
-    let mut candidates: std::collections::HashMap<String, String> =
+    // Candidates are keyed on `(project_id, id)` so two records that share
+    // `id` across project buckets both survive — the records-table's
+    // `UNIQUE (source, project_id, id)` index can hold both. Adapters that
+    // can't resolve project_id at list time (codex resolves later inside
+    // `build_record`) emit `RecordSummary.project_id == None`; those
+    // collapse on bare `id`, matching the pre-fix behaviour for that one
+    // source. The remaining same-key duplicates (true id-and-project
+    // collisions, e.g. two parser passes hitting the same file) still
+    // surface as a `tracing::warn` so operators see the colliding ids.
+    let mut candidates: std::collections::HashMap<(Option<String>, String), RecordSummary> =
         std::collections::HashMap::with_capacity(pass.records.len());
     let mut duplicate_ids: Vec<String> = Vec::new();
     for r in &pass.records {
-        if candidates
-            .insert(r.id.clone(), r.content_hash.clone())
-            .is_some()
-        {
+        let key = (r.project_id.clone(), r.id.clone());
+        if candidates.insert(key, r.clone()).is_some() {
             duplicate_ids.push(r.id.clone());
         }
     }
@@ -509,8 +548,8 @@ where
             target: "nexum::indexer",
             ?source,
             ?duplicate_ids,
-            "adapter pass contained duplicate record ids across projects; the indexer keeps the last \
-             observed copy for each id and skips the others. Rename one of the colliding files to \
+            "adapter pass contained records sharing the same (project_id, id) — the indexer keeps \
+             the last observed copy and skips the rest. Rename one of the colliding files to \
              avoid silent shadowing."
         );
         per_source.duplicate_ids_skipped += u32::try_from(duplicate_ids.len()).unwrap_or(u32::MAX);
@@ -527,11 +566,15 @@ where
         per_source,
     )?;
 
-    // `indexed` is keyed by (project_id, id); a candidate id absent from
-    // the candidate set is "gone" REGARDLESS of project_id.
+    // `indexed` is keyed by `(project_id, id)`. A row is "gone" when no
+    // candidate has a matching `(Some(project_id), id)` AND no candidate
+    // has a project-blind `(None, id)` (the codex fallback).
     let gone: Vec<(String, String)> = indexed
         .keys()
-        .filter(|(_pid, id)| !candidates.contains_key(id))
+        .filter(|(pid, id)| {
+            !candidates.contains_key(&(Some(pid.clone()), id.clone()))
+                && !candidates.contains_key(&(None, id.clone()))
+        })
         .cloned()
         .collect();
 
@@ -582,7 +625,7 @@ fn load_indexed_for_source(
 fn apply_upserts<F>(
     tx: &Transaction<'_>,
     source: Source,
-    candidates: &std::collections::HashMap<String, String>,
+    candidates: &std::collections::HashMap<(Option<String>, String), RecordSummary>,
     indexed: &IndexedHashes,
     read_full: &F,
     embedder: Option<&Embedder>,
@@ -590,28 +633,34 @@ fn apply_upserts<F>(
     per_source: &mut PerSourceOutcome,
 ) -> Result<(), IndexerError>
 where
-    F: Fn(&RecordId) -> Option<UnifiedRecord>,
+    F: Fn(&RecordSummary) -> Option<UnifiedRecord>,
 {
-    // Build a secondary index keyed by bare `id` so the per-candidate lookup
-    // is O(1) rather than O(N). Cross-project same-id collisions within a
-    // source are not modeled here — last-write-wins on collision, matching the
-    // existing TODO on `candidates` in `apply_pass_inside_tx`.
+    // Fallback secondary index for candidates whose summary lacks a
+    // `project_id` (codex resolves it at read time). Keyed by bare `id` —
+    // ambiguous when multiple indexed rows share an id, but this is the
+    // pre-fix behaviour for that one source and the codex adapter's ids
+    // are already unique across projects in practice.
     let indexed_by_id: std::collections::HashMap<&str, &(String, String)> = indexed
         .iter()
         .map(|((_pid, id), v)| (id.as_str(), v))
         .collect();
 
-    for (id, candidate_content_hash) in candidates {
-        // Look up cached hashes for any indexed row under this source with
-        // this id.
-        let cached_hashes = indexed_by_id.get(id.as_str()).copied();
+    for ((project_id_opt, id), summary) in candidates {
+        // Cached hashes lookup: project-aware when the adapter provided a
+        // project_id hint (local, cc); project-blind fallback otherwise
+        // (codex resolves project_id later).
+        let cached_hashes = match project_id_opt {
+            Some(pid) => indexed.get(&(pid.clone(), id.clone())),
+            None => indexed_by_id.get(id.as_str()).copied(),
+        };
+        let candidate_content_hash = &summary.content_hash;
         // TODO: every candidate now pays a `read_full` + `compute_index_hash`
         // because the dual-hash skip requires the full record. For corpora that
         // are mostly unchanged between passes this is the dominant per-pass cost.
         // Caching `index_hash` alongside `content_hash` on `AdapterPass.records`
         // would restore the cheap pre-`read_full` skip path; needs adapters to
         // surface enough state to compute the hash without the full read.
-        let Some(record) = read_full(id) else {
+        let Some(record) = read_full(summary) else {
             warn!(
                 ?source,
                 ?id,
@@ -1162,6 +1211,69 @@ mod tests {
     }
 
     #[test]
+    fn cross_project_same_id_records_both_index() {
+        // Regression: two distinct records that share `id` but live under
+        // different project buckets must both land in SQLite — the
+        // composite `UNIQUE (source, project_id, id)` index admits them
+        // both. The pre-fix indexer dedup keyed on bare `id` alone and
+        // silently dropped one of the two.
+        let dir = TempDir::new().unwrap();
+        let nb = dir.path().join("notebook.git");
+        // Per-project layout: notebook.git/<project>/<type>/<id>.yml
+        let write_under_project = |project: &str, body: &str| {
+            let p = nb.join(project).join("decisions").join("collision.yml");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let yaml = format!(
+                "schema_version: 1\n\
+                 id: collision\n\
+                 record_type: decision\n\
+                 title: collision under {project}\n\
+                 body: {body}\n\
+                 tags: []\n\
+                 agent: manual\n\
+                 created: 2026-04-29T00:00:00Z\n\
+                 updated: 2026-04-29T00:00:00Z\n"
+            );
+            std::fs::write(&p, yaml).unwrap();
+        };
+        write_under_project("alpha", "alpha body");
+        write_under_project("beta", "beta body");
+
+        let mut conn = open_or_create(&dir.path().join("index.db")).unwrap();
+        let mut cfg = cfg_with_adapters_off();
+        cfg.adapters.local.enabled = true;
+        let paths = Paths::with_home(dir.path().to_owned());
+
+        let outcome = run(&mut conn, &cfg, &paths).unwrap();
+        assert_eq!(
+            outcome.upserts, 2,
+            "both per-project records must upsert; outcome={outcome:?}"
+        );
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM records WHERE id = 'collision'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "two SQLite rows expected, one per project");
+        let mut rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT project_id, body FROM records WHERE id = 'collision' ORDER BY project_id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.sort();
+        assert_eq!(rows[0].0, "alpha");
+        assert!(rows[0].1.contains("alpha body"));
+        assert_eq!(rows[1].0, "beta");
+        assert!(rows[1].1.contains("beta body"));
+    }
+
+    #[test]
     fn second_pass_with_unchanged_record_is_noop() {
         let dir = TempDir::new().unwrap();
         let nb = dir.path().join("notebook.git");
@@ -1254,6 +1366,7 @@ mod tests {
             deferred_deletes: 0,
             embed_failures: 0,
             duplicate_ids_skipped: 0,
+            partial_reasons: Vec::new(),
         };
         assert_eq!(outcome.embed_failures, 0);
     }
@@ -1269,7 +1382,67 @@ mod tests {
             deferred_deletes: 0,
             embed_failures: 0,
             duplicate_ids_skipped: 1,
+            partial_reasons: Vec::new(),
         };
         assert_eq!(outcome.duplicate_ids_skipped, 1);
+    }
+
+    #[test]
+    fn summarize_skip_reasons_buckets_by_kind() {
+        // Two `file-malformed` and one `file-transient` collapse into two
+        // summary rows. Order follows `SkipKind`'s declaration order, which
+        // is the stable ABI we hand agents.
+        use std::path::PathBuf;
+        let skipped = vec![
+            SkipReason {
+                path: PathBuf::from("a.yml"),
+                kind: SkipKind::FileMalformed,
+                at: chrono::Utc::now(),
+            },
+            SkipReason {
+                path: PathBuf::from("b.yml"),
+                kind: SkipKind::FileMalformed,
+                at: chrono::Utc::now(),
+            },
+            SkipReason {
+                path: PathBuf::from("c.yml"),
+                kind: SkipKind::FileTransient,
+                at: chrono::Utc::now(),
+            },
+        ];
+        let summary = summarize_skip_reasons(&skipped);
+        assert_eq!(summary.len(), 2);
+        // BTreeMap iteration follows `SkipKind`'s declared order:
+        // FileTransient, FileMalformed, LockContention.
+        assert_eq!(summary[0].kind, SkipKind::FileTransient);
+        assert_eq!(summary[0].count, 1);
+        assert_eq!(summary[1].kind, SkipKind::FileMalformed);
+        assert_eq!(summary[1].count, 2);
+    }
+
+    #[test]
+    fn per_source_outcome_carries_partial_reasons_field() {
+        // The field defaults to empty for non-partial completeness states
+        // and round-trips through serde so existing JSON consumers see no
+        // change unless `partial_reasons` is populated.
+        let outcome = PerSourceOutcome {
+            source: Source::Local,
+            completeness: PerSourceCompleteness::Partial,
+            ingested: 3,
+            upserts: 2,
+            deletes: 0,
+            deferred_deletes: 0,
+            embed_failures: 0,
+            duplicate_ids_skipped: 0,
+            partial_reasons: vec![PartialReasonSummary {
+                kind: SkipKind::FileMalformed,
+                count: 1,
+            }],
+        };
+        let json = serde_json::to_string(&outcome).expect("serialize");
+        assert!(json.contains(r#""partial_reasons":[{"kind":"file-malformed","count":1}]"#));
+        let parsed: PerSourceOutcome = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.partial_reasons.len(), 1);
+        assert_eq!(parsed.partial_reasons[0].count, 1);
     }
 }

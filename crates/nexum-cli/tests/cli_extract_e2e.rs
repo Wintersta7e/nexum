@@ -191,3 +191,92 @@ async fn extract_session_writes_committed_yaml_on_disk() {
         String::from_utf8_lossy(&status.stderr)
     );
 }
+
+#[tokio::test]
+async fn extract_session_record_is_reachable_via_get() {
+    // The discovery walk extension at `crates/nexum-core/src/adapter/local.rs`
+    // is meant to make extract-committed records reachable through the read
+    // path. This test pins the full extract -> commit -> index -> get
+    // round-trip: an `--json`-friendly contract that any future refactor of
+    // the on-disk layout or YAML schema must keep alive.
+    let record_id = "2026-05-17-reachable";
+    let server = MockServer::start().await;
+    let session_uuid = Uuid::now_v7();
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "content": [{"type": "text", "text": mock_recommendation_yaml(session_uuid, record_id)}],
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        })))
+        .mount(&server)
+        .await;
+
+    let home = TestHome::initialized_no_index();
+    let projects_dir = home.path().join("cc-projects");
+    let session_dir = projects_dir.join("test-slug");
+    std::fs::create_dir_all(&session_dir).expect("mkdir cc projects fixture");
+    let transcript_path = session_dir.join(format!("{session_uuid}.jsonl"));
+    std::fs::write(&transcript_path, cc_transcript_jsonl()).expect("write transcript");
+    rewrite_cc_projects_dir(home.path(), &projects_dir);
+    home.write_extract_ack("anthropic", "claude-opus")
+        .expect("write extract ack");
+
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_nexum"));
+    let extract_out = Command::new(&exe)
+        .args([
+            "extract",
+            "--session",
+            &session_uuid.to_string(),
+            "--json",
+            "--quiet",
+        ])
+        .env("NEXUM_HOME", home.nexum_home())
+        .env("HOME", home.ssh_home())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("NEXUM_ANTHROPIC_BASE_URL", server.uri())
+        .env("GIT_AUTHOR_NAME", "nexum-test")
+        .env("GIT_AUTHOR_EMAIL", "nexum-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "nexum-test")
+        .env("GIT_COMMITTER_EMAIL", "nexum-test@example.invalid")
+        .output()
+        .expect("spawn nexum extract");
+    assert!(
+        extract_out.status.success(),
+        "extract exit={}\nstdout={}\nstderr={}",
+        extract_out.status,
+        String::from_utf8_lossy(&extract_out.stdout),
+        String::from_utf8_lossy(&extract_out.stderr)
+    );
+
+    // The extract pipeline auto-runs the incremental indexer; the record must
+    // be addressable via its bare id from this point forward.
+    let get_out = home.run(&["get", record_id, "--json"]);
+    assert!(
+        get_out.status.success(),
+        "get failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&get_out.stdout),
+        String::from_utf8_lossy(&get_out.stderr)
+    );
+    let payload: Value = serde_json::from_slice(&get_out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "get stdout was not JSON: {e}\nstdout={}",
+            String::from_utf8_lossy(&get_out.stdout)
+        )
+    });
+    assert_eq!(
+        payload["record"]["id"], record_id,
+        "round-trip record id mismatch: {payload}"
+    );
+    assert_eq!(
+        payload["record"]["record_type"], "recommendation",
+        "round-trip record_type mismatch: {payload}"
+    );
+    assert_eq!(
+        payload["record"]["project_id"], "_inbox",
+        "round-trip project_id should be derived from the per-project subdir: {payload}"
+    );
+    assert!(
+        payload["_meta"].is_object(),
+        "`_meta` envelope must be present alongside `record`: {payload}"
+    );
+}

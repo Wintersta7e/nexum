@@ -29,15 +29,21 @@ use super::options::{InitError, InitOpts, InitOutcome};
 ///
 /// # Errors
 ///
-/// Returns `InitError::AlreadyInitialized` if root exists and `force` is false.
+/// Returns `InitError::AlreadyInitialized` if `<root>/config.toml` exists and
+/// `force` is false. An empty or partially-populated directory at `root` is
+/// accepted — the marker for "already initialized" is the presence of the
+/// config file, not the directory itself, so callers that pre-create the
+/// directory (a common scripting idiom) are not refused.
 // `opts` is taken by value as the public API contract — callers construct InitOpts
 // and pass ownership; the fields are moved/borrowed inside run_all_steps.
 #[allow(clippy::needless_pass_by_value)]
 pub fn run(opts: InitOpts) -> Result<InitOutcome, InitError> {
     let root = resolve_root(&opts)?;
 
-    // Step 1: refuse if root exists without --force.
-    if root.exists() {
+    // Step 1: refuse if `<root>/config.toml` exists without --force. A bare
+    // empty directory does NOT count as initialized — the config file is the
+    // post-success marker that all later steps write.
+    if root.join("config.toml").exists() {
         if opts.force {
             std::fs::remove_dir_all(&root).map_err(|e| InitError::Io {
                 path: root.display().to_string(),
@@ -262,10 +268,11 @@ mod tests {
     }
 
     #[test]
-    fn already_initialized_without_force_returns_error() {
+    fn pre_existing_config_toml_refuses_without_force() {
         let home = tempdir().unwrap();
         let root = home.path().join(".nexum");
         std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("config.toml"), "stub").unwrap();
         let err = run(InitOpts {
             ssh_key: None,
             root: Some(root),
@@ -273,6 +280,20 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, InitError::AlreadyInitialized { .. }));
+    }
+
+    #[test]
+    fn empty_pre_existing_dir_does_not_block_init() {
+        // The common scripted idiom `mkdir -p $NEXUM_HOME && nexum init ...`
+        // must not be treated as already-initialized: only the presence of
+        // `<root>/config.toml` (the post-success marker) signals that.
+        let home = tempdir().unwrap();
+        let root = home.path().join(".nexum");
+        std::fs::create_dir_all(&root).unwrap();
+        let (_root, result) = run_init(home.path());
+        let outcome = result.expect("init must succeed against an empty pre-existing root");
+        assert_eq!(outcome.bootstrap_commit_sha.len(), 40);
+        let _ = root; // silence unused
     }
 
     #[test]

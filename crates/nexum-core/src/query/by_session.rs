@@ -76,7 +76,8 @@ pub fn by_session(
     let sql = "SELECT records.id, records.record_type, records.title, records.summary, \
                       records.source, records.project_id, records.crypto_result, records.updated, \
                       records.record_commit_sha, records.signer_fingerprint, \
-                      records.relevant_trust_events_commit \
+                      records.relevant_trust_events_commit, \
+                      json_extract(records.extras, '$.cc_type') \
                FROM records \
                WHERE session_refs LIKE ?1 ESCAPE '\\' \
                ORDER BY records.updated DESC";
@@ -95,6 +96,7 @@ pub fn by_session(
                 record_commit_sha: r.get::<_, Option<String>>(8)?,
                 signer_fingerprint: r.get::<_, Option<String>>(9)?,
                 relevant_trust_events_commit: r.get::<_, Option<String>>(10)?,
+                metadata_type: r.get::<_, Option<String>>(11)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -144,6 +146,7 @@ pub fn by_session(
         .map(|(raw, projected)| SearchResult {
             id: raw.id,
             record_type: RecordType::from_db_str(&raw.record_type),
+            metadata_type: raw.metadata_type,
             title: raw.title,
             summary: raw.summary,
             score: 0.0,
@@ -190,6 +193,9 @@ struct SessionRow {
     /// SHA of the events.yml commit effective at the record's commit time.
     /// Forwarded into [`CachedCrypto`] for the read-time projection.
     relevant_trust_events_commit: Option<String>,
+    /// `json_extract(records.extras, '$.cc_type')` — adapter-specific
+    /// metadata type. `None` for sources that don't store it.
+    metadata_type: Option<String>,
 }
 
 #[cfg(test)]

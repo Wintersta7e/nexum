@@ -62,6 +62,7 @@ enum Commands {
 }
 
 fn main() -> ExitCode {
+    install_pipe_friendly_panic_hook();
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
@@ -80,6 +81,34 @@ fn main() -> ExitCode {
         Commands::Doctor(args) => commands::doctor::run(&args),
         Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
+}
+
+/// Replace the default panic hook so the broken-pipe panic that
+/// `println!`/`eprintln!` triggers when a downstream pipe closes early
+/// (e.g. `nexum list --json | head -1`) terminates with exit 0 instead
+/// of the default 101. Every other panic still routes through the
+/// original hook.
+fn install_pipe_friendly_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&'static str>().copied())
+            .unwrap_or("");
+        // The stdlib panics on broken pipe from `print!`/`println!`/
+        // `eprintln!` with the format "failed printing to <stream>: <io
+        // error>". Catch only that specific shape; everything else
+        // continues to the default hook (which prints the panic and exits
+        // 101).
+        if msg.starts_with("failed printing to ")
+            && (msg.contains("Broken pipe") || msg.contains("broken pipe"))
+        {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
 }
 
 /// Initialize the tracing subscriber so warns from the core library

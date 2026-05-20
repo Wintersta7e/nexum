@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::types::{ContentHash, RecordId, UnifiedRecord};
+use super::types::{ContentHash, ProjectId, RecordId, UnifiedRecord};
 
 /// Deterministic sha256 of `title`, `summary` (or empty), and `body`, joined
 /// with `\n`. Output is lowercase hex (64 chars).
@@ -111,20 +111,23 @@ pub fn compute_index_hash(r: &UnifiedRecord) -> String {
     out
 }
 
-/// `(id, content_hash)` tuple — the lightweight row `AdapterPass.records`
-/// carries. The indexer joins these against the cached `records` table to
-/// compute the new / changed / gone sets per the reindex algorithm.
-///
-/// The summary deliberately omits `project_id`: adapters cannot always
-/// resolve it without doing the read-full work (e.g., Codex resolves it
-/// from the threads index in `build_record`). The composite identity is
-/// still enforced at upsert / delete time via the records-table
-/// `UNIQUE (source, project_id, id)` and the `read_full` `project_id` is
-/// authoritative.
+/// `(id, content_hash, project_id)` tuple — the lightweight row
+/// `AdapterPass.records` carries. The indexer joins these against the
+/// cached `records` table to compute the new / changed / gone sets per
+/// the reindex algorithm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordSummary {
     pub id: RecordId,
     pub content_hash: ContentHash,
+    /// Project identity at list time. Set by adapters that can resolve it
+    /// cheaply (local, cc). The codex adapter resolves the project later
+    /// inside `build_record` and leaves this `None` — its ids are already
+    /// unique across projects. The indexer keys its pre-upsert dedup on
+    /// `(project_id, id)` so two records that share `id` across project
+    /// buckets both land in `SQLite` under the records table's
+    /// `UNIQUE (source, project_id, id)` index.
+    #[serde(default)]
+    pub project_id: Option<ProjectId>,
 }
 
 #[cfg(test)]
@@ -316,6 +319,7 @@ mod tests {
         let s = RecordSummary {
             id: "rec-1".into(),
             content_hash: "deadbeef".into(),
+            project_id: Some("rec-project".into()),
         };
         let j = serde_json::to_string(&s).unwrap();
         let back: RecordSummary = serde_json::from_str(&j).unwrap();

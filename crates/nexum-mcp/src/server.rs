@@ -159,6 +159,7 @@ impl NexumServer {
             require_signed: params.require_signed,
             strict_revocation: params.strict_revocation,
             record_type,
+            metadata_type: params.metadata_type,
             source,
             min_confidence,
             ..Filters::default()
@@ -213,6 +214,7 @@ impl NexumServer {
             require_signed: params.require_signed,
             strict_revocation: params.strict_revocation,
             record_type,
+            metadata_type: params.metadata_type,
             source,
             ..Filters::default()
         };
