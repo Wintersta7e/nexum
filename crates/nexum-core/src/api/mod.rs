@@ -2256,17 +2256,32 @@ pub enum ReanchorResolveOutcome {
     },
 }
 
-/// Returns `true` if HEAD's most recent commit touching `.trust/events.yml`
-/// appended a `BootstrapReanchor` event whose `new_fingerprint` equals
+/// Returns `true` if the committed `.trust/events.yml` blob at HEAD ends
+/// with a `BootstrapReanchor` event whose `new_fingerprint` equals
 /// `expected_new_fp`. Used by the doctor `--resolve-pending-reanchor`
 /// path to detect "commit landed but sentinel transition missed" drift.
 ///
-/// Returns `false` on any read or parse failure — no events.yml means no
-/// reanchor commit exists.
+/// Reads the HEAD blob via `git show HEAD:.trust/events.yml`, NOT the
+/// working-tree file: if recovery crashed after writing the working tree
+/// but before the signed commit landed, an uncommitted reanchor event
+/// must not be mistaken for a committed one (else `--continue` could
+/// write the pin without a signed commit and `--revert` could refuse).
+///
+/// Returns `false` on any read or parse failure — no committed events.yml
+/// means no reanchor commit exists.
 fn head_carries_matching_reanchor(notebook_git: &std::path::Path, expected_new_fp: &str) -> bool {
-    let events_yml = notebook_git.join(".trust/events.yml");
-    let Ok(log) = crate::trust::events::load_events_yml(&events_yml) else {
-        return false; // no events.yml = no reanchor
+    let Ok(output) = std::process::Command::new("git")
+        .args(["show", "HEAD:.trust/events.yml"])
+        .current_dir(notebook_git)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(log) = serde_yaml::from_slice::<crate::trust::events::EventLog>(&output.stdout) else {
+        return false;
     };
     log.events.last().is_some_and(|e| {
         matches!(&e.payload,
