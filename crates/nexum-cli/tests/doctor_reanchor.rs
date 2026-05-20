@@ -233,7 +233,7 @@ fn doctor_no_flags_json_emits_ok_envelope() {
     assert!(out.status.success(), "expected exit 0");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
     assert_eq!(payload["ok"], serde_json::Value::Bool(true));
-    assert_eq!(payload["kind"], "doctor.ok");
+    assert_eq!(payload["kind"], "doctor.report");
 }
 
 #[test]
