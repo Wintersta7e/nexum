@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::trust::events::TrustError;
 
@@ -16,7 +16,7 @@ use crate::trust::events::TrustError;
 ///
 /// Wire form is the bare letter (`"A"` / `"B"`); deserialization rejects
 /// every other value, routing through the malformed-sentinel branch.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Case {
     /// Existing pin known; reanchor is rotating from a known-good fingerprint.
     A,
@@ -39,7 +39,7 @@ impl Case {
 ///
 /// Wire form is `snake_case` (`"init"` / `"events_committed"` / `"pin_updated"`);
 /// deserialization rejects every other value.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Sentinel created; no events committed yet.
@@ -68,7 +68,7 @@ impl Phase {
 /// `None` in that case. Unknown values for `case` or `phase_completed` fail
 /// deserialization, which routes through the malformed-sentinel branch in
 /// [`check`].
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ReanchorPending {
     case: Case,
     /// Previous bootstrap fingerprint, `None` for case B.
@@ -84,13 +84,28 @@ pub struct ReanchorPending {
     #[serde(default)]
     pub pid: Option<u64>,
     phase_completed: Phase,
+    /// The `user.signingkey` value recorded when the sentinel was written.
+    /// Used on rollback paths so the keys-recover flow can revert (or
+    /// unset, when `None`) the signingkey change.
+    #[serde(default)]
+    prior_signingkey: Option<String>,
 }
 
 impl ReanchorPending {
-    /// The phase at which the reanchor was last checkpointed.
+    /// The phase last durably observed.
     #[must_use]
     pub fn phase_completed(&self) -> Phase {
         self.phase_completed
+    }
+
+    #[must_use]
+    pub fn case(&self) -> Case {
+        self.case
+    }
+
+    #[must_use]
+    pub fn old_pin_fp(&self) -> Option<&str> {
+        self.old_pin_fp.as_deref()
     }
 
     /// New bootstrap fingerprint being installed.
@@ -104,6 +119,76 @@ impl ReanchorPending {
     pub fn new_pubkey(&self) -> &str {
         &self.new_pubkey
     }
+
+    /// The `user.signingkey` value recorded when the sentinel was
+    /// written. Read on rollback paths so the keys-recover flow can
+    /// revert (or unset, when None) the signingkey change.
+    #[must_use]
+    pub fn prior_signingkey(&self) -> Option<&str> {
+        self.prior_signingkey.as_deref()
+    }
+}
+
+/// Write a fresh `.reanchor_pending` sentinel with phase Init.
+///
+/// # Errors
+///
+/// Returns `TrustError::Io` on write failure, `TrustError::ReanchorPending`
+/// on JSON serialization failure.
+pub fn write_sentinel(
+    home: &Path,
+    case: Case,
+    old_pin_fp: Option<&str>,
+    new_pin_fp: &str,
+    new_pubkey: &str,
+    prior_signingkey: Option<&str>,
+) -> Result<(), TrustError> {
+    let sentinel = ReanchorPending {
+        case,
+        old_pin_fp: old_pin_fp.map(str::to_owned),
+        new_pin_fp: new_pin_fp.to_owned(),
+        new_pubkey: new_pubkey.to_owned(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        pid: Some(u64::from(std::process::id())),
+        phase_completed: Phase::Init,
+        prior_signingkey: prior_signingkey.map(str::to_owned),
+    };
+    let json =
+        serde_json::to_string_pretty(&sentinel).map_err(|e| TrustError::ReanchorPending {
+            message: format!("could not serialize .reanchor_pending: {e}"),
+        })?;
+    let path = home.join(".reanchor_pending");
+    std::fs::write(&path, json).map_err(|e| TrustError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })
+}
+
+/// Update the `phase_completed` field of an existing sentinel.
+///
+/// # Errors
+///
+/// `TrustError::ReanchorPending` if the sentinel is missing or
+/// malformed.
+pub fn update_sentinel_phase(home: &Path, new_phase: Phase) -> Result<(), TrustError> {
+    let Some(mut sentinel) = read_sentinel(home)? else {
+        return Err(TrustError::ReanchorPending {
+            message: format!(
+                ".reanchor_pending missing when attempting phase update to {}",
+                new_phase.as_str()
+            ),
+        });
+    };
+    sentinel.phase_completed = new_phase;
+    let json =
+        serde_json::to_string_pretty(&sentinel).map_err(|e| TrustError::ReanchorPending {
+            message: format!("could not re-serialize .reanchor_pending: {e}"),
+        })?;
+    let path = home.join(".reanchor_pending");
+    std::fs::write(&path, json).map_err(|e| TrustError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })
 }
 
 /// Returns `Ok(())` when no `.reanchor_pending` sentinel is present.
@@ -330,5 +415,65 @@ mod tests {
             }
             other => panic!("expected ReanchorPending, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn write_sentinel_round_trips_with_prior_signingkey() {
+        use super::{Case, Phase, read_sentinel, write_sentinel};
+        let dir = tempdir().unwrap();
+        write_sentinel(
+            dir.path(),
+            Case::A,
+            Some("SHA256:old"),
+            "SHA256:new",
+            "ssh-ed25519 AAAA test",
+            Some("/home/user/.ssh/id_ed25519"),
+        )
+        .unwrap();
+        let s = read_sentinel(dir.path()).unwrap().unwrap();
+        assert_eq!(s.phase_completed(), Phase::Init);
+        assert_eq!(s.case(), Case::A);
+        assert_eq!(s.old_pin_fp(), Some("SHA256:old"));
+        assert_eq!(s.new_pin_fp(), "SHA256:new");
+        assert_eq!(
+            s.prior_signingkey(),
+            Some("/home/user/.ssh/id_ed25519"),
+            "prior_signingkey must survive round-trip"
+        );
+    }
+
+    #[test]
+    fn update_sentinel_phase_advances_then_back() {
+        use super::{Case, Phase, read_sentinel, update_sentinel_phase, write_sentinel};
+        let dir = tempdir().unwrap();
+        write_sentinel(
+            dir.path(),
+            Case::B,
+            None,
+            "SHA256:fp",
+            "ssh-ed25519 BBBB test",
+            None,
+        )
+        .unwrap();
+
+        // Advance to EventsCommitted.
+        update_sentinel_phase(dir.path(), Phase::EventsCommitted).unwrap();
+        assert_eq!(
+            read_sentinel(dir.path())
+                .unwrap()
+                .unwrap()
+                .phase_completed(),
+            Phase::EventsCommitted
+        );
+
+        // Advance to PinUpdated.
+        update_sentinel_phase(dir.path(), Phase::PinUpdated).unwrap();
+        assert_eq!(
+            read_sentinel(dir.path())
+                .unwrap()
+                .unwrap()
+                .phase_completed(),
+            Phase::PinUpdated
+        );
     }
 }
