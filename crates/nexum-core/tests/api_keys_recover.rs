@@ -13,13 +13,13 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{write_ephemeral_keypair, NexumTestHome};
+use common::{NexumTestHome, write_ephemeral_keypair};
 use nexum_core::{
     api::{self, RecoverCase},
     config::types::Config,
-    init::{run as init_run, InitOpts},
+    init::{InitOpts, run as init_run},
     paths::Paths,
-    trust::events::{load_events_yml, EventKind},
+    trust::events::{EventKind, load_events_yml},
     trust::reanchor_pending::read_sentinel,
 };
 
@@ -60,7 +60,7 @@ fn make_fixture() -> Fixture {
 /// Write a second ephemeral keypair alongside K1. Returns the private-key path.
 fn add_k2_keypair(key_dir: &Path) -> PathBuf {
     // Write a keypair with a different name so K1's files are not overwritten.
-    use ssh_key::{rand_core::OsRng, Algorithm, PrivateKey};
+    use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
     let private = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let priv_pem = private.to_openssh(ssh_key::LineEnding::LF).unwrap();
     let pub_line = private.public_key().to_openssh().unwrap();
@@ -503,5 +503,43 @@ fn recover_case_a_records_acknowledge_chain_anchor_lost_false() {
     assert!(
         !acknowledge_chain_anchor_lost,
         "Case A must record acknowledge_chain_anchor_lost: false"
+    );
+}
+
+#[test]
+fn recover_case_a_commit_is_signed_by_new_key() {
+    // Regression for the materializer's reanchor-authorization rule:
+    // BootstrapReanchor commits must be signed by `new_fingerprint`. Case A
+    // previously signed with the old bootstrap key (which the API accepted)
+    // but the next read-time view rebuild would have frozen the chain.
+    let fix = make_fixture();
+    let key_dir = tempfile::tempdir().unwrap();
+    let k2_path = add_k2_keypair(key_dir.path());
+
+    let outcome = api::keys_recover(
+        &fix.paths,
+        &fix.cfg,
+        &k2_path,
+        RecoverCase::A,
+        "rotating bootstrap to new key",
+        true,
+    )
+    .expect("Case A recovery succeeds");
+
+    // Read HEAD's signer fingerprint via the same `%GF` format git_ops uses
+    // internally. The fingerprint must equal the new key's fp, NOT the old.
+    let signer_fp = std::process::Command::new("git")
+        .args(["log", "-1", "HEAD", "--format=%GF"])
+        .current_dir(&fix.paths.notebook_git)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .expect("git log HEAD --format=%GF");
+    assert_eq!(
+        signer_fp, outcome.new_fingerprint,
+        "Case A reanchor commit must be signed by new_fingerprint"
+    );
+    assert_ne!(
+        signer_fp, outcome.old_fingerprint,
+        "Case A reanchor commit must NOT be signed by old_fingerprint"
     );
 }

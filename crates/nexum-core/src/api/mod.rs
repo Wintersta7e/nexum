@@ -1341,9 +1341,13 @@ fn recover_rollback(paths: &Paths, prior_signingkey: Option<&str>) {
 }
 
 /// Append a `BootstrapReanchor` event for a lost or replaced bootstrap key,
-/// sign the reanchor commit with the correct signer (old key for Case A,
-/// new key for Case B), update the bootstrap pin and `user.signingkey`, and
-/// transition the `.reanchor_pending` sentinel through its phases.
+/// sign the reanchor commit with the new key, update the bootstrap pin and
+/// `user.signingkey`, and transition the `.reanchor_pending` sentinel
+/// through its phases. The signer rule matches the materializer's reanchor
+/// authorization (commit must be signed by `new_fingerprint`); both cases
+/// swap `user.signingkey` before signing. Case A vs Case B differs only in
+/// the preflight (pin-match vs operator acknowledgement) and in the event
+/// payload's `acknowledge_chain_anchor_lost` flag.
 ///
 /// # Errors
 ///
@@ -1550,24 +1554,25 @@ pub fn keys_recover(
             }
         };
 
-        // For Case B: swap user.signingkey to the new key BEFORE signing,
-        // since the old key is unavailable.
-        if case == RecoverCase::B {
-            let outcome = std::process::Command::new("git")
-                .args([
-                    "config",
-                    "--local",
-                    "user.signingkey",
-                    &new_key_path.display().to_string(),
-                ])
-                .current_dir(&paths.notebook_git)
-                .status();
-            if outcome.map_or(true, |s| !s.success()) {
-                recover_rollback(paths, prior_signingkey.as_deref());
-                return Err(ApiError::KeysRecoverFailed {
-                    stderr: "failed to update user.signingkey to new key".into(),
-                });
-            }
+        // Both cases: swap `user.signingkey` to the new key BEFORE signing.
+        // The materializer's reanchor authorization rule requires the commit
+        // to be signed by `new_fingerprint`; signing with the old key (even
+        // when it is still available, as in Case A) freezes the chain on the
+        // next read-time projection.
+        let outcome = std::process::Command::new("git")
+            .args([
+                "config",
+                "--local",
+                "user.signingkey",
+                &new_key_path.display().to_string(),
+            ])
+            .current_dir(&paths.notebook_git)
+            .status();
+        if outcome.map_or(true, |s| !s.success()) {
+            recover_rollback(paths, prior_signingkey.as_deref());
+            return Err(ApiError::KeysRecoverFailed {
+                stderr: "failed to update user.signingkey to new key".into(),
+            });
         }
 
         // Stage + sign the reanchor commit.
@@ -1649,34 +1654,16 @@ pub fn keys_recover(
             });
         }
 
-        // Confirm the signer fingerprint matches the expected signer.
-        // For Case A: should be signed by old key (current_bootstrap).
-        // For Case B: should be signed by new key (new_fp).
-        let expected_signer = match case {
-            RecoverCase::A => &current_bootstrap,
-            RecoverCase::B => &new_fp,
-        };
+        // The materializer's reanchor authorization (events_view.rs) accepts
+        // only commits signed by `new_fingerprint`; reject anything else
+        // before the chain rebuild would.
         if let Some(signer_fp) = &verify_outcome.signer_fingerprint
-            && signer_fp != expected_signer
+            && signer_fp != &new_fp
         {
-            let stderr =
-                format!("signer fingerprint {signer_fp} does not match expected {expected_signer}");
+            let stderr = format!("signer fingerprint {signer_fp} does not match expected {new_fp}");
             let _ = rollback_last_commit(&paths.notebook_git);
             recover_rollback(paths, prior_signingkey.as_deref());
             return Err(ApiError::KeysRecoverFailed { stderr });
-        }
-
-        // For Case A: swap user.signingkey to the new key post-verify.
-        if case == RecoverCase::A {
-            let _ = std::process::Command::new("git")
-                .args([
-                    "config",
-                    "--local",
-                    "user.signingkey",
-                    &new_key_path.display().to_string(),
-                ])
-                .current_dir(&paths.notebook_git)
-                .status();
         }
 
         // Write the new bootstrap pin to config.toml and the pin cache.
