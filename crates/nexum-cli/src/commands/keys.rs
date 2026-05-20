@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 use nexum_core::api;
-use nexum_core::api::RevokeMode;
+use nexum_core::api::{RecoverCase, RevokeMode};
 
 use super::common::resolve_runtime;
 use super::exit_codes;
@@ -371,12 +371,12 @@ fn run_recover(args: &RecoverArgs) -> ExitCode {
     };
 
     // Dispatch on which case flag is set. Clap enforces exactly one.
-    let (new_key_path, case): (&Path, nexum_core::api::RecoverCase) = match (
+    let (new_key_path, case): (&Path, RecoverCase) = match (
         args.reanchor.as_deref(),
         args.reanchor_without_pin.as_deref(),
     ) {
-        (Some(path), None) => (path, nexum_core::api::RecoverCase::A),
-        (None, Some(path)) => (path, nexum_core::api::RecoverCase::B),
+        (Some(path), None) => (path, RecoverCase::A),
+        (None, Some(path)) => (path, RecoverCase::B),
         _ => unreachable!("clap mutex group prevents both/neither"),
     };
 
@@ -403,8 +403,8 @@ fn run_recover(args: &RecoverArgs) -> ExitCode {
     // Interactive confirm in prose mode (skipped under --json or --yes).
     if !args.json && !args.yes {
         let case_label = match case {
-            nexum_core::api::RecoverCase::A => "Case A (pin-intact)",
-            nexum_core::api::RecoverCase::B => "Case B (chain-anchor-lost)",
+            RecoverCase::A => "Case A (pin-intact)",
+            RecoverCase::B => "Case B (chain-anchor-lost)",
         };
         eprintln!("About to RECOVER the trust chain via {case_label}.");
         eprintln!();
@@ -438,11 +438,11 @@ fn run_recover(args: &RecoverArgs) -> ExitCode {
         true,
     ) {
         Ok(outcome) => {
+            let case_str = match outcome.case {
+                RecoverCase::A => "A",
+                RecoverCase::B => "B",
+            };
             if args.json {
-                let case_str = match outcome.case {
-                    nexum_core::api::RecoverCase::A => "A",
-                    nexum_core::api::RecoverCase::B => "B",
-                };
                 let env = serde_json::json!({
                     "ok": true,
                     "kind": "keys.recover.completed",
@@ -456,12 +456,8 @@ fn run_recover(args: &RecoverArgs) -> ExitCode {
                 });
                 println!("{env}");
             } else {
-                let case_short = match outcome.case {
-                    nexum_core::api::RecoverCase::A => "A",
-                    nexum_core::api::RecoverCase::B => "B",
-                };
                 println!(
-                    "recovered chain via case {case_short}; new bootstrap {fp} (commit {commit})",
+                    "recovered chain via case {case_str}; new bootstrap {fp} (commit {commit})",
                     fp = outcome.new_fingerprint,
                     commit = short_commit(&outcome.commit),
                 );
