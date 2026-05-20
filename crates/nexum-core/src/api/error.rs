@@ -140,10 +140,14 @@ pub mod error_codes {
     /// `nexum keys recover` refused because a `BootstrapReanchor` event
     /// for the same `(old_fp, new_fp)` pair already exists.
     pub const RECOVER_DUPLICATE_CHAIN: &str = "RECOVER_DUPLICATE_CHAIN";
+    /// Another nexum process holds the global mutation lock; the verb cannot
+    /// proceed until the other process releases it.
+    pub const CONCURRENT: &str = "CONCURRENT";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
 
+#[allow(clippy::too_many_lines)]
 impl From<&crate::api::ApiError> for ErrorEnvelope {
     fn from(err: &crate::api::ApiError) -> Self {
         use crate::api::ApiError;
@@ -239,6 +243,25 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "subkind": "keys_revoke_signer_not_active",
                     "signer_fingerprint": signer_fingerprint,
                     "signer_role": signer_role,
+                }),
+            },
+            ApiError::Concurrent { lock_path } => ErrorEnvelope {
+                error_code: error_codes::CONCURRENT,
+                message: format!(
+                    "another nexum process holds the writer lock at {}",
+                    lock_path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Wait for the other process to finish, or investigate \
+                                whether a stale lock exists via \
+                                `nexum doctor --break-stale-lock`."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "writer_lock",
+                    "lock_path": lock_path.display().to_string(),
                 }),
             },
         }

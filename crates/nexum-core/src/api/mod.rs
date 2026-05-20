@@ -71,6 +71,10 @@ pub enum ApiError {
     Trust(crate::trust::events::TrustError),
     #[error(transparent)]
     Extraction(#[from] crate::extract::model::ExtractError),
+    /// Another nexum process holds the global mutation lock. Maps to
+    /// exit code 7 (`Error::Concurrent`).
+    #[error("another nexum process holds the writer lock at {lock_path}")]
+    Concurrent { lock_path: std::path::PathBuf },
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -114,19 +118,29 @@ pub(crate) fn with_writer_lock<T>(
 ) -> Result<T, ApiError> {
     use fs2::FileExt as _;
 
-    let lock_io_err = |e: std::io::Error| {
-        ApiError::Indexer(IndexerError::Io {
-            path: paths.lock.clone(),
-            source: e,
-        })
-    };
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&paths.lock)
-        .map_err(lock_io_err)?;
-    lock_file.try_lock_exclusive().map_err(lock_io_err)?;
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        })?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            ApiError::Concurrent {
+                lock_path: paths.lock.clone(),
+            }
+        } else {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        }
+    })?;
 
     let result = body();
     if let Err(unlock_err) = lock_file.unlock() {
@@ -2130,6 +2144,23 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let paths = Paths::with_home(dir.path().to_owned());
         (dir, paths)
+    }
+
+    #[test]
+    fn with_writer_lock_returns_concurrent_when_lock_held() {
+        let (dir, paths) = paths_with_temp_home();
+
+        // Acquire the lock from this thread so the second attempt WouldBlock.
+        let f = std::fs::File::create(&paths.lock).unwrap();
+        fs2::FileExt::try_lock_exclusive(&f).unwrap();
+
+        let result = with_writer_lock(&paths, || Ok::<_, ApiError>(()));
+        drop(f);
+        drop(dir);
+        assert!(
+            matches!(result, Err(ApiError::Concurrent { .. })),
+            "expected Concurrent when lock is held, got {result:?}"
+        );
     }
 
     #[test]
