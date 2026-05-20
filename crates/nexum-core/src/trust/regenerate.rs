@@ -192,6 +192,13 @@ mod tests {
     const FAKE_PK: &str =
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyForTesting test@example.invalid";
 
+    // Reanchor-test fixtures: two distinct keys sharing a fingerprint
+    // prefix so failures point at the right key.
+    const K1_FP: &str = "SHA256:K1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const K1_PK: &str = "ssh-ed25519 AAAAC3K1 test1@example.invalid";
+    const K2_FP: &str = "SHA256:K2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    const K2_PK: &str = "ssh-ed25519 AAAAC3K2 test2@example.invalid";
+
     #[test]
     fn seed_generates_three_files() {
         let dir = tempdir().unwrap();
@@ -301,28 +308,23 @@ mod tests {
         let dir = tempdir().unwrap();
         let events_path = dir.path().join("events.yml");
 
-        let k1_fp = "SHA256:K1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        let k1_pk = "ssh-ed25519 AAAAC3K1 test1@example.invalid";
-        let k2_fp = "SHA256:K2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        let k2_pk = "ssh-ed25519 AAAAC3K2 test2@example.invalid";
-
         let log = EventLog {
             schema_version: 1,
             events: vec![
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::BootstrapKey {
-                        fingerprint: k1_fp.into(),
-                        public_key: k1_pk.into(),
+                        fingerprint: K1_FP.into(),
+                        public_key: K1_PK.into(),
                         reason: "Initial bootstrap".into(),
                     },
                 },
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::BootstrapReanchor {
-                        old_fingerprint: k1_fp.into(),
-                        new_fingerprint: k2_fp.into(),
-                        new_public_key: k2_pk.into(),
+                        old_fingerprint: K1_FP.into(),
+                        new_fingerprint: K2_FP.into(),
+                        new_public_key: K2_PK.into(),
                         reason: "single-event reanchor".into(),
                         acknowledge_chain_anchor_lost: false,
                     },
@@ -335,11 +337,11 @@ mod tests {
 
         let hist = std::fs::read_to_string(dir.path().join("historical_signers")).unwrap();
         assert!(
-            hist.contains(k1_pk),
+            hist.contains(K1_PK),
             "historical_signers must still contain K1 (append-only): {hist}"
         );
         assert!(
-            hist.contains(k2_pk),
+            hist.contains(K2_PK),
             "historical_signers must contain K2 from BootstrapReanchor.new_public_key: {hist}"
         );
     }
@@ -349,28 +351,23 @@ mod tests {
         let dir = tempdir().unwrap();
         let events_path = dir.path().join("events.yml");
 
-        let k1_fp = "SHA256:K1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        let k1_pk = "ssh-ed25519 AAAAC3K1 test1@example.invalid";
-        let k2_fp = "SHA256:K2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        let k2_pk = "ssh-ed25519 AAAAC3K2 test2@example.invalid";
-
         let log = EventLog {
             schema_version: 1,
             events: vec![
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::BootstrapKey {
-                        fingerprint: k1_fp.into(),
-                        public_key: k1_pk.into(),
+                        fingerprint: K1_FP.into(),
+                        public_key: K1_PK.into(),
                         reason: "Initial bootstrap".into(),
                     },
                 },
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::BootstrapReanchor {
-                        old_fingerprint: k1_fp.into(),
-                        new_fingerprint: k2_fp.into(),
-                        new_public_key: k2_pk.into(),
+                        old_fingerprint: K1_FP.into(),
+                        new_fingerprint: K2_FP.into(),
+                        new_public_key: K2_PK.into(),
                         reason: "single-event reanchor".into(),
                         acknowledge_chain_anchor_lost: false,
                     },
@@ -384,15 +381,15 @@ mod tests {
         let allowed = std::fs::read_to_string(dir.path().join("allowed_signers")).unwrap();
         let revoked = std::fs::read_to_string(dir.path().join("revoked_signers")).unwrap();
         assert!(
-            !allowed.contains(k1_pk),
+            !allowed.contains(K1_PK),
             "K1 must be excluded from allowed_signers post-reanchor: {allowed}"
         );
         assert!(
-            allowed.contains(k2_pk),
+            allowed.contains(K2_PK),
             "K2 must be in allowed_signers: {allowed}"
         );
         assert!(
-            revoked.contains(k1_pk),
+            revoked.contains(K1_PK),
             "K1 must appear in revoked_signers post-reanchor: {revoked}"
         );
     }
@@ -409,35 +406,30 @@ mod tests {
         let dir = tempdir().unwrap();
         let events_path = dir.path().join("events.yml");
 
-        let k1_fp = "SHA256:K1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        let k1_pk = "ssh-ed25519 AAAAC3K1 test1@example.invalid";
-        let k2_fp = "SHA256:K2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        let k2_pk = "ssh-ed25519 AAAAC3K2 test2@example.invalid";
-
         let log = EventLog {
             schema_version: 1,
             events: vec![
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::BootstrapKey {
-                        fingerprint: k1_fp.into(),
-                        public_key: k1_pk.into(),
+                        fingerprint: K1_FP.into(),
+                        public_key: K1_PK.into(),
                         reason: "Initial bootstrap".into(),
                     },
                 },
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::KeyAdded {
-                        fingerprint: k2_fp.into(),
-                        public_key: k2_pk.into(),
+                        fingerprint: K2_FP.into(),
+                        public_key: K2_PK.into(),
                         reason: "legacy two-event reanchor predecessor".into(),
                     },
                 },
                 Event {
                     event_id: Uuid::now_v7(),
                     payload: EventKind::BootstrapReanchor {
-                        old_fingerprint: k1_fp.into(),
-                        new_fingerprint: k2_fp.into(),
+                        old_fingerprint: K1_FP.into(),
+                        new_fingerprint: K2_FP.into(),
                         new_public_key: String::new(), // legacy shape
                         reason: "legacy two-event reanchor".into(),
                         acknowledge_chain_anchor_lost: false,
@@ -452,16 +444,16 @@ mod tests {
         let hist = std::fs::read_to_string(dir.path().join("historical_signers")).unwrap();
         let allowed = std::fs::read_to_string(dir.path().join("allowed_signers")).unwrap();
         let revoked = std::fs::read_to_string(dir.path().join("revoked_signers")).unwrap();
-        assert!(hist.contains(k1_pk), "historical contains K1: {hist}");
+        assert!(hist.contains(K1_PK), "historical contains K1: {hist}");
         assert!(
-            hist.contains(k2_pk),
+            hist.contains(K2_PK),
             "historical contains K2 from KeyAdded: {hist}"
         );
         assert!(
-            !allowed.contains(k1_pk),
+            !allowed.contains(K1_PK),
             "K1 excluded from allowed via BootstrapReanchor->revoked_fps: {allowed}"
         );
-        assert!(allowed.contains(k2_pk), "K2 in allowed: {allowed}");
-        assert!(revoked.contains(k1_pk), "K1 in revoked: {revoked}");
+        assert!(allowed.contains(K2_PK), "K2 in allowed: {allowed}");
+        assert!(revoked.contains(K1_PK), "K1 in revoked: {revoked}");
     }
 }
