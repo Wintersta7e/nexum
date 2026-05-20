@@ -70,7 +70,13 @@ pub(crate) const EXTRACT_NO_SESSIONS: u8 = 28;
 pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
     use nexum_core::api::error::error_codes as ec;
     match env.error_code {
-        ec::USAGE | ec::TRUST_FINGERPRINT_NOT_KNOWN => USAGE,
+        ec::USAGE
+        | ec::TRUST_FINGERPRINT_NOT_KNOWN
+        | ec::KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED
+        | ec::KEYS_RECOVER_PIN_MISSING_FOR_CASE_A
+        | ec::KEYS_RECOVER_IN_PROGRESS
+        | ec::KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN
+        | ec::KEYS_RECOVER_AGENT_UNAVAILABLE => USAGE,
         ec::NOT_INITIALIZED => NOT_INITIALIZED,
         ec::STORE_INTEGRITY
         | ec::INVALID_FILTER
@@ -78,7 +84,9 @@ pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
         | ec::KEYS_REVOKE_WOULD_UNSIGN_STORE
         | ec::KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION
         | ec::KEYS_REVOKE_SIGNER_NOT_ACTIVE
-        | ec::TRUST_DUPLICATE_EVENT => STORE_INTEGRITY,
+        | ec::TRUST_DUPLICATE_EVENT
+        | ec::KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A
+        | ec::KEYS_RECOVER_FAILED => STORE_INTEGRITY,
         ec::CONCURRENT => CONCURRENT,
         ec::MIGRATION_REQUIRED => MIGRATION_REQUIRED,
         ec::REANCHOR_PENDING => REANCHOR_PENDING,

@@ -5,7 +5,7 @@
 
 mod common;
 
-use crate::common::{TestHome, run_json};
+use crate::common::{run_json, TestHome};
 use serde_json::Value;
 
 #[test]
@@ -197,13 +197,11 @@ fn search_emits_reanchor_pending_envelope_under_json() {
         serde_json::from_slice(&out.stdout).expect("stdout should parse as JSON envelope");
     assert_eq!(env["error_code"], "REANCHOR_PENDING");
     assert_eq!(out.status.code().unwrap_or(-1), 8);
-    assert!(
-        env["message"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("reanchor")
-    );
+    assert!(env["message"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("reanchor"));
 }
 
 #[test]
@@ -369,9 +367,92 @@ fn keys_revoke_signer_not_active_envelope_via_reanchor() {
     assert_eq!(code, 4);
     assert_eq!(env["error_code"], "KEYS_REVOKE_WOULD_SIGN_OWN_REVOCATION");
     assert!(env["context"]["fingerprint"].as_str().is_some());
-    assert!(
-        env["context"]["current_signer_fingerprint"]
-            .as_str()
-            .is_some()
+    assert!(env["context"]["current_signer_fingerprint"]
+        .as_str()
+        .is_some());
+}
+
+#[test]
+fn keys_recover_json_without_yes_emits_usage_envelope() {
+    // --json + --reanchor without --yes: CLI refuses before reaching the api.
+    // Exercises the USAGE envelope shape and exit-code arm for recover.
+    let home = TestHome::initialized_no_index();
+    // We need a key path that exists on disk — generate one under the home.
+    let ssh_dir = home.ssh_home().join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).expect("mkdir ssh-home/.ssh");
+    let k2_path = common::write_named_keypair(&ssh_dir, "k2-envelope-test");
+    let (env, code) = run_json(
+        &home,
+        &[
+            "keys",
+            "recover",
+            "--reanchor",
+            k2_path.to_str().unwrap(),
+            "--acknowledge-chain-break",
+            "--json",
+            // no --yes
+        ],
     );
+    assert_eq!(code, 2);
+    assert_eq!(env["error_code"], "USAGE");
+    assert_eq!(env["context"]["reason"], "json_yes_required");
+}
+
+#[test]
+fn keys_recover_new_key_already_known_emits_usage_envelope() {
+    // Passing the existing bootstrap key as the recovery target hits
+    // KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN → USAGE (exit 2).
+    let home = TestHome::initialized_no_index();
+    let notebook_git_config = home.path().join("notebook.git/.git/config");
+    let config_text = std::fs::read_to_string(&notebook_git_config).unwrap();
+    let bootstrap_key = config_text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("signingkey = "))
+        .expect("signingkey in git config")
+        .trim()
+        .to_owned();
+    let (env, code) = run_json(
+        &home,
+        &[
+            "keys",
+            "recover",
+            "--reanchor",
+            &bootstrap_key,
+            "--acknowledge-chain-break",
+            "--yes",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 2);
+    assert_eq!(env["error_code"], "KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN");
+}
+
+#[test]
+fn keys_recover_pin_missing_emits_usage_envelope() {
+    // Case A without the bootstrap-pin cache file → KEYS_RECOVER_PIN_MISSING_FOR_CASE_A
+    // which routes to USAGE (exit 2).
+    let home = TestHome::initialized_no_index();
+    std::fs::remove_file(home.path().join(".bootstrap-fingerprint")).ok();
+    let ssh_dir = home.ssh_home().join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).expect("mkdir ssh-home/.ssh");
+    let k2_path = common::write_named_keypair(&ssh_dir, "k2-pin-missing-test");
+    let (env, code) = run_json(
+        &home,
+        &[
+            "keys",
+            "recover",
+            "--reanchor",
+            k2_path.to_str().unwrap(),
+            "--acknowledge-chain-break",
+            "--yes",
+            "--json",
+        ],
+    );
+    assert_eq!(code, 2);
+    assert_eq!(env["error_code"], "KEYS_RECOVER_PIN_MISSING_FOR_CASE_A");
+    assert_eq!(
+        env["context"]["subkind"],
+        "keys_recover_pin_missing_for_case_a"
+    );
+    assert!(env["context"]["path"].as_str().is_some());
 }

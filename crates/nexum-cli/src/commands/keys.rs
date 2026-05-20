@@ -1,7 +1,7 @@
 //! `nexum keys` parent + subcommands.
 
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
@@ -23,6 +23,11 @@ pub enum KeysCommand {
     /// Revoke a signing key. Requires exactly one of --rotation
     /// (routine retirement) or --strict (suspected compromise).
     Revoke(RevokeArgs),
+    /// Recover from a lost signing key OR a lost bootstrap pin.
+    /// Writes a new `BootstrapReanchor` event chained from the current
+    /// bootstrap to the supplied new key. Requires explicit chain-break
+    /// acknowledgement.
+    Recover(RecoverArgs),
 }
 
 #[derive(Args, Debug)]
@@ -84,11 +89,60 @@ pub struct RevokeArgs {
     pub json: bool,
 }
 
+#[derive(Args, Debug)]
+#[command(group(
+    clap::ArgGroup::new("case")
+        .required(true)
+        .args(["reanchor", "reanchor_without_pin"]),
+))]
+// The four bool flags are the natural surface for the recover verb
+// (case picker + ack flags + confirmation skip + JSON output). Splitting
+// them into sub-structs would invert the clap derive ergonomics for no payoff.
+#[allow(clippy::struct_excessive_bools)]
+pub struct RecoverArgs {
+    /// Case A: pin-intact recovery. Path to the new SSH private key.
+    /// The wrapper reads `<path>.pub` to derive the public-key blob
+    /// and fingerprint.
+    #[arg(long, requires = "acknowledge_chain_break")]
+    pub reanchor: Option<PathBuf>,
+
+    /// Case B: chain-anchor-lost recovery. Path to the new SSH private
+    /// key. Same shape as `--reanchor`; differs only in semantics —
+    /// pre-reanchor records are flagged `chain-anchor-lost`.
+    #[arg(long, requires = "acknowledge_chain_anchor_lost")]
+    pub reanchor_without_pin: Option<PathBuf>,
+
+    /// Required acknowledgement when pin is intact. The user understands
+    /// the chain breaks and pre-reanchor records get the
+    /// `pre-recovery-record` warning.
+    #[arg(long)]
+    pub acknowledge_chain_break: bool,
+
+    /// Required acknowledgement when pin is lost. The user understands
+    /// the chain breaks AND pre-reanchor records become unverifiable.
+    #[arg(long)]
+    pub acknowledge_chain_anchor_lost: bool,
+
+    /// Human-readable reason recorded on the trust event.
+    #[arg(long, default_value = "operator-initiated recovery")]
+    pub reason: String,
+
+    /// Skip the second interactive confirmation. Required when running
+    /// in --json mode (no prompt available).
+    #[arg(long, default_value_t = false)]
+    pub yes: bool,
+
+    /// Emit a structured JSON envelope to stdout.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 pub fn run(cmd: &KeysCommand) -> ExitCode {
     match cmd {
         KeysCommand::Rotate(args) => run_rotate(args),
         KeysCommand::List(args) => run_list(args),
         KeysCommand::Revoke(args) => run_revoke(args),
+        KeysCommand::Recover(args) => run_recover(args),
     }
 }
 
@@ -305,9 +359,122 @@ fn run_revoke(args: &RevokeArgs) -> ExitCode {
     }
 }
 
+// Single linear flow: resolve runtime, dispatch on which case flag clap set,
+// enforce the json-requires-yes invariant, prompt-confirm in prose mode,
+// run the api, render the outcome. Splitting this would scatter the JSON /
+// TTY rendering without making the behaviour easier to follow.
+#[allow(clippy::too_many_lines)]
+fn run_recover(args: &RecoverArgs) -> ExitCode {
+    let (paths, cfg) = match resolve_runtime(args.json) {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    // Dispatch on which case flag is set. Clap enforces exactly one.
+    let (new_key_path, case): (&Path, nexum_core::api::RecoverCase) = match (
+        args.reanchor.as_deref(),
+        args.reanchor_without_pin.as_deref(),
+    ) {
+        (Some(path), None) => (path, nexum_core::api::RecoverCase::A),
+        (None, Some(path)) => (path, nexum_core::api::RecoverCase::B),
+        _ => unreachable!("clap mutex group prevents both/neither"),
+    };
+
+    // CLI-layer USAGE refusal: --json without --yes (no prompt available).
+    if args.json && !args.yes {
+        let env = nexum_core::api::error::ErrorEnvelope {
+            error_code: nexum_core::api::error::error_codes::USAGE,
+            message: "--json requires --yes for keys recover (no interactive prompt available)"
+                .to_owned(),
+            remediation: Some(nexum_core::api::error::Remediation {
+                command: None,
+                rationale: "Pass --yes to acknowledge the recovery prompt non-interactively."
+                    .to_owned(),
+            }),
+            context: serde_json::json!({
+                "kind": "keys",
+                "subkind": "recover",
+                "reason": "json_yes_required",
+            }),
+        };
+        return json_emit::emit_error(&env, 2);
+    }
+
+    // Interactive confirm in prose mode (skipped under --json or --yes).
+    if !args.json && !args.yes {
+        let case_label = match case {
+            nexum_core::api::RecoverCase::A => "Case A (pin-intact)",
+            nexum_core::api::RecoverCase::B => "Case B (chain-anchor-lost)",
+        };
+        eprintln!("About to RECOVER the trust chain via {case_label}.");
+        eprintln!();
+        eprintln!("This writes a BootstrapReanchor event signed by the new key.");
+        eprintln!("Pre-reanchor records will carry warnings on every read.");
+        eprintln!();
+        eprintln!("new key path: {}", new_key_path.display());
+        eprintln!();
+        eprint!("Continue? [y/N] ");
+        let _ = io::stderr().flush();
+        let mut buf = String::new();
+        if io::stdin().lock().read_line(&mut buf).is_err() {
+            eprintln!("aborted: could not read confirmation");
+            return ExitCode::from(2);
+        }
+        let trimmed = buf.trim().to_ascii_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            eprintln!("aborted by operator");
+            return ExitCode::from(2);
+        }
+    }
+
+    match nexum_core::api::keys_recover(
+        &paths,
+        &cfg,
+        new_key_path,
+        case,
+        &args.reason,
+        // The clap flag-pair + the prose-mode prompt-confirm together constitute
+        // the human acknowledgement; pass acknowledge_yes=true into the api.
+        true,
+    ) {
+        Ok(outcome) => {
+            if args.json {
+                let case_str = match outcome.case {
+                    nexum_core::api::RecoverCase::A => "A",
+                    nexum_core::api::RecoverCase::B => "B",
+                };
+                let env = serde_json::json!({
+                    "ok": true,
+                    "kind": "keys.recover.completed",
+                    "case": case_str,
+                    "old_fingerprint": outcome.old_fingerprint,
+                    "new_fingerprint": outcome.new_fingerprint,
+                    "commit": outcome.commit,
+                    "regenerated_files": outcome.regenerated_files,
+                    "pin_updated": true,
+                    "sentinel_state": "removed",
+                });
+                println!("{env}");
+            } else {
+                let case_short = match outcome.case {
+                    nexum_core::api::RecoverCase::A => "A",
+                    nexum_core::api::RecoverCase::B => "B",
+                };
+                println!(
+                    "recovered chain via case {case_short}; new bootstrap {fp} (commit {commit})",
+                    fp = outcome.new_fingerprint,
+                    commit = short_commit(&outcome.commit),
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => render_error(&e, args.json),
+    }
+}
+
 /// Render an `ApiError` either as a JSON envelope on stdout or as prose on
-/// stderr. Shared by `run_rotate`, `run_list`, and `run_revoke` so the three
-/// keys verbs route failures the same way.
+/// stderr. Shared by `run_rotate`, `run_list`, `run_revoke`, and `run_recover`
+/// so all four keys verbs route failures the same way.
 fn render_error(e: &api::ApiError, json: bool) -> ExitCode {
     let env: nexum_core::api::error::ErrorEnvelope = e.into();
     let code = exit_codes::for_envelope(&env);
