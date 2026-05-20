@@ -109,11 +109,14 @@ fn round_trip_read_back_via_keys_list() {
 #[test]
 fn synthetic_post_reanchor_fixture_self_test() {
     let (home, post) = TestHome::initialized_post_reanchor_case_a(false);
-    // events.yml has both events.
+    // events.yml has a single BootstrapReanchor event (production shape).
     let events_path = home.nexum_home().join("notebook.git/.trust/events.yml");
     let body = std::fs::read_to_string(&events_path).expect("read events.yml");
-    assert!(body.contains("KeyAdded"));
     assert!(body.contains("BootstrapReanchor"));
+    assert!(
+        !body.contains("KeyAdded"),
+        "single-event fixture must not contain KeyAdded"
+    );
     // config.toml has K2.
     let cfg: nexum_core::config::types::Config =
         nexum_core::config::io::load(&home.nexum_home().join("config.toml")).expect("load config");

@@ -303,12 +303,11 @@ impl TestHome {
     }
 
     /// Initialize a nexum home and immediately synthesize a Case A
-    /// post-reanchor state (pin preserved across recovery). Uses the
-    /// production two-event pattern: appends a `KeyAdded(K2)` event then
-    /// a `BootstrapReanchor(K1 -> K2)` event, batched into one signed
-    /// commit. `regenerate_files` is called via the production code path
-    /// so the resulting signer-file shape matches byte-for-byte what the
-    /// eventual recovery verb will produce.
+    /// post-reanchor state (pin preserved across recovery). Appends a single
+    /// `BootstrapReanchor(K1 -> K2, new_public_key=K2pub)` event and commits
+    /// it signed by K2. `regenerate_files` is called via the production code
+    /// path so the resulting signer-file shape matches what the eventual
+    /// recovery verb will produce.
     ///
     /// If `stale_signingkey == true`, `user.signingkey` is reset to K1
     /// AFTER the reanchor commit lands — the commit itself is always
@@ -316,9 +315,9 @@ impl TestHome {
     /// reanchor but forgot to update git signingkey" failure mode tested
     /// by the keys revoke preflights.
     // Straight-line setup of the Case A post-reanchor fixture: K2 keypair,
-    // two split commits (KeyAdded then BootstrapReanchor), pin update, and
-    // optional stale-signingkey reset. Splitting it would scatter the ordered
-    // setup across helpers without making the sequence easier to follow.
+    // single BootstrapReanchor commit, pin update, and optional stale-signingkey
+    // reset. Splitting it would scatter the ordered setup across helpers without
+    // making the sequence easier to follow.
     #[allow(clippy::too_many_lines)]
     pub fn initialized_post_reanchor_case_a(stale_signingkey: bool) -> (Self, PostReanchorFixture) {
         let home = Self::initialized_no_index();
@@ -374,45 +373,11 @@ impl TestHome {
             assert!(status.success());
         }
 
-        // Step 4: append KeyAdded(K2) via the production load/serialize
-        // round-trip and regenerate signer files. The materializer enforces
-        // one new event per commit (multi-event appends classify as
-        // `Diff::Forbidden{ReorderedDeleted}` and freeze the chain), so the
-        // reanchor lands in a separate commit further down.
+        // Step 4: append a single BootstrapReanchor(K1 -> K2) carrying K2's
+        // pubkey. The new_public_key field lets the projection introduce K2
+        // as Active without a preceding KeyAdded event.
         let events_path = nb_git.join(".trust/events.yml");
         let trust_dir = nb_git.join(".trust");
-        {
-            let mut log =
-                nexum_core::trust::events::load_events_yml(&events_path).expect("load events.yml");
-            log.events.push(nexum_core::trust::events::Event {
-                event_id: uuid::Uuid::now_v7(),
-                payload: nexum_core::trust::events::EventKind::KeyAdded {
-                    fingerprint: k2_fp.clone(),
-                    public_key: k2_pubkey.clone(),
-                    reason: "reanchor predecessor (test fixture)".to_owned(),
-                },
-            });
-            let yaml = serde_yaml::to_string(&log).expect("serialize events.yml");
-            std::fs::write(&events_path, yaml).expect("write events.yml (KeyAdded)");
-            nexum_core::trust::regenerate::regenerate_files(&events_path, &trust_dir)
-                .expect("regenerate_files (KeyAdded)");
-        }
-
-        // Step 5: commit KeyAdded signed by K1 (user.signingkey still points
-        // at K1 from init). Stage all four trust files.
-        nexum_core::init::git_ops::git_commit_signed(
-            &nb_git,
-            &[
-                Path::new(".trust/events.yml"),
-                Path::new(".trust/historical_signers"),
-                Path::new(".trust/allowed_signers"),
-                Path::new(".trust/revoked_signers"),
-            ],
-            "trust: add signing key (test fixture KeyAdded)",
-        )
-        .expect("git_commit_signed (KeyAdded)");
-
-        // Step 6: append BootstrapReanchor(K1 -> K2) and regenerate again.
         {
             let mut log =
                 nexum_core::trust::events::load_events_yml(&events_path).expect("load events.yml");
@@ -421,7 +386,7 @@ impl TestHome {
                 payload: nexum_core::trust::events::EventKind::BootstrapReanchor {
                     old_fingerprint: k1_fp.clone(),
                     new_fingerprint: k2_fp.clone(),
-                    new_public_key: String::new(),
+                    new_public_key: k2_pubkey.clone(),
                     reason: "test fixture chain-break".to_owned(),
                     acknowledge_chain_anchor_lost: false,
                 },
@@ -432,7 +397,7 @@ impl TestHome {
                 .expect("regenerate_files (Reanchor)");
         }
 
-        // Step 7: switch user.signingkey to K2 for the reanchor commit.
+        // Step 5: switch user.signingkey to K2 for the reanchor commit.
         let status = Command::new("git")
             .arg("-C")
             .arg(&nb_git)
@@ -442,9 +407,9 @@ impl TestHome {
             .expect("git config user.signingkey K2");
         assert!(status.success());
 
-        // Step 7b: commit BootstrapReanchor signed by K2. The reanchor
-        // authorization rule (Case A: new key already in chain via the
-        // prior KeyAdded + bootstrap pin preserved) accepts this signer.
+        // Step 5b: commit BootstrapReanchor signed by K2. The reanchor
+        // authorization rule (Case A: bootstrap pin preserved, K2 in
+        // historical_signers via the event's new_public_key) accepts this signer.
         let reanchor_commit = nexum_core::init::git_ops::git_commit_signed(
             &nb_git,
             &[
@@ -457,7 +422,7 @@ impl TestHome {
         )
         .expect("git_commit_signed (Reanchor)");
 
-        // Step 7c: verify the reanchor commit (K2 is in historical_signers).
+        // Step 5c: verify the reanchor commit (K2 is in historical_signers).
         nexum_core::init::git_ops::git_verify_commit_with_signers(
             &nb_git,
             "HEAD",
@@ -465,7 +430,7 @@ impl TestHome {
         )
         .expect("verify reanchor commit");
 
-        // Step 8: update config.toml [trust.bootstrap] to K2 via production I/O
+        // Step 6: update config.toml [trust.bootstrap] to K2 via production I/O
         // AND rewrite the `.bootstrap-fingerprint` cache so it agrees. The
         // reanchor authorization (in the materializer's `verify_reanchor_*`
         // path) refuses when the cache disagrees with config.toml, so both
@@ -478,7 +443,7 @@ impl TestHome {
         std::fs::write(home.nexum_home.join(".bootstrap-fingerprint"), &k2_fp)
             .expect("write .bootstrap-fingerprint cache");
 
-        // Step 9: if stale, reset user.signingkey back to K1 to simulate the
+        // Step 7: if stale, reset user.signingkey back to K1 to simulate the
         // operator who completed the reanchor but forgot to update git's
         // signingkey config.
         if stale_signingkey {
@@ -492,7 +457,7 @@ impl TestHome {
             assert!(status.success());
         }
 
-        // Step 10: index + rebuild the trust_events view.
+        // Step 8: index + rebuild the trust_events view.
         let out = home.run(&["index"]);
         assert!(
             out.status.success(),

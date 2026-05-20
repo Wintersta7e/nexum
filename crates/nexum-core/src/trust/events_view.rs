@@ -553,13 +553,18 @@ fn write_event_row(
         EventKind::BootstrapReanchor {
             old_fingerprint,
             new_fingerprint,
+            new_public_key,
             reason,
             ..
         } => (
             None,
             Some(old_fingerprint.as_str()),
             Some(new_fingerprint.as_str()),
-            None,
+            if new_public_key.is_empty() {
+                None
+            } else {
+                Some(new_public_key.as_str())
+            },
             Some(reason.as_str()),
         ),
     };
