@@ -143,6 +143,27 @@ pub mod error_codes {
     /// Another nexum process holds the global mutation lock; the verb cannot
     /// proceed until the other process releases it.
     pub const CONCURRENT: &str = "CONCURRENT";
+    /// `nexum keys recover` refused because `--acknowledge-chain-break`
+    /// was not passed.
+    pub const KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED: &str =
+        "KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED";
+    /// `nexum keys recover` (Case A) refused because the bootstrap pin file
+    /// is missing or its fingerprint doesn't match the chain's current
+    /// bootstrap.
+    pub const KEYS_RECOVER_PIN_MISSING_FOR_CASE_A: &str = "KEYS_RECOVER_PIN_MISSING_FOR_CASE_A";
+    /// `nexum keys recover` (Case A) refused because the pin file's
+    /// fingerprint doesn't match the chain's current bootstrap.
+    pub const KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A: &str = "KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A";
+    /// `nexum keys recover` refused because a sentinel is already present.
+    pub const KEYS_RECOVER_IN_PROGRESS: &str = "KEYS_RECOVER_IN_PROGRESS";
+    /// `nexum keys recover` refused because the new key fingerprint already
+    /// appears in `events.yml`.
+    pub const KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN: &str = "KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN";
+    /// `nexum keys recover` refused because the ssh-agent was unavailable
+    /// when trying to sign the reanchor commit.
+    pub const KEYS_RECOVER_AGENT_UNAVAILABLE: &str = "KEYS_RECOVER_AGENT_UNAVAILABLE";
+    /// `nexum keys recover` failed mid-flight after writing the sentinel.
+    pub const KEYS_RECOVER_FAILED: &str = "KEYS_RECOVER_FAILED";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -262,6 +283,124 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "kind": "api",
                     "subkind": "writer_lock",
                     "lock_path": lock_path.display().to_string(),
+                }),
+            },
+            ApiError::KeysRecoverChainBreakNotAcknowledged => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED,
+                message: "recovery requires explicit chain-break acknowledgement; \
+                          pass `--acknowledge-chain-break` to proceed"
+                    .to_owned(),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Re-run with `--acknowledge-chain-break` to confirm \
+                                that the old signing key can no longer be retrieved."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_chain_break_not_acknowledged",
+                }),
+            },
+            ApiError::KeysRecoverPinMissingForCaseA { path } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_PIN_MISSING_FOR_CASE_A,
+                message: format!(
+                    "Case A recovery requires an intact bootstrap pin; \
+                     pin file missing or unreadable at {}",
+                    path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor".to_owned()),
+                    rationale: "Run `nexum doctor` to investigate the bootstrap pin state."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_pin_missing_for_case_a",
+                    "path": path.display().to_string(),
+                }),
+            },
+            ApiError::KeysRecoverPinMismatchForCaseA { expected, found } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A,
+                message: format!(
+                    "Case A pin fingerprint {found} doesn't match the chain's \
+                     current bootstrap {expected}"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor".to_owned()),
+                    rationale: "Run `nexum doctor` to investigate the pin and bootstrap state."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_pin_mismatch_for_case_a",
+                    "expected": expected,
+                    "found": found,
+                }),
+            },
+            ApiError::KeysRecoverInProgress { sentinel_path } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_IN_PROGRESS,
+                message: format!(
+                    "a pending reanchor is already in progress (sentinel at {}); \
+                     resolve it via `nexum doctor --resolve-pending-reanchor` first",
+                    sentinel_path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor --resolve-pending-reanchor --continue".to_owned()),
+                    rationale: "Resolve or revert the existing pending reanchor before \
+                                starting a new recovery."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_in_progress",
+                    "sentinel_path": sentinel_path.display().to_string(),
+                }),
+            },
+            ApiError::KeysRecoverNewKeyAlreadyKnown { fingerprint } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN,
+                message: format!(
+                    "new key fingerprint {fingerprint} already appears in events.yml; \
+                     supply a key that has never been added to this notebook"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys list".to_owned()),
+                    rationale: "Run `nexum keys list` to see all known fingerprints.".to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_new_key_already_known",
+                    "fingerprint": fingerprint,
+                }),
+            },
+            ApiError::KeysRecoverAgentUnavailable { fingerprint } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_AGENT_UNAVAILABLE,
+                message: format!(
+                    "ssh-agent unavailable when trying to sign with {fingerprint}; \
+                     load the new key into the agent first"
+                ),
+                remediation: Some(Remediation {
+                    command: Some(format!("ssh-add <path-to-key-for-{fingerprint}>")),
+                    rationale: "Add the new private key to the ssh-agent and retry.".to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_agent_unavailable",
+                    "fingerprint": fingerprint,
+                }),
+            },
+            ApiError::KeysRecoverFailed { stderr } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_FAILED,
+                message: format!("recovery failed mid-flight: {stderr}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor --resolve-pending-reanchor --revert".to_owned()),
+                    rationale: "Run `nexum doctor --resolve-pending-reanchor --revert` \
+                                to clean up the partial sentinel state."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_failed",
+                    "stderr": stderr,
                 }),
             },
         }
