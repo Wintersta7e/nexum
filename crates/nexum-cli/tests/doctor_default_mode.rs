@@ -438,3 +438,84 @@ fn run_git(
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn doctor_legacy_drift_critical_when_allowed_signers_has_unrelated_extra() {
+    // Legacy pre-recovery drift (the old reanchor key still listed in
+    // allowed_signers) downgrades to Warn. ANY additional mismatch — for
+    // example an unrelated extra signer line — pushes the finding back to
+    // Critical because it cannot be attributed to a known reanchor event.
+    let (home, _fixture) = TestHome::initialized_post_reanchor_case_a(false);
+    let allowed = home.path().join("notebook.git/.trust/allowed_signers");
+    let k1_pubkey =
+        std::fs::read_to_string(home.ssh_home().join(".ssh/id_ed25519.pub")).expect("read K1 pub");
+    let mut content = std::fs::read_to_string(&allowed).unwrap_or_default();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    // Legacy drift line: the old reanchor key (K1).
+    content.push_str(k1_pubkey.trim());
+    content.push('\n');
+    // Unrelated extra: not produced by any reanchor old_fingerprint and not
+    // a known key in events.yml. With a substring `contains` classifier this
+    // line was invisible; a set-based classifier must surface it as
+    // tampering and keep the severity at Critical.
+    content.push_str(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIUnrelatedExtraKeyForDoctorTest unrelated@host",
+    );
+    content.push('\n');
+    std::fs::write(&allowed, &content).unwrap();
+
+    let out = home.run(&["doctor", "--json"]);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "expected exit 4 (STORE_INTEGRITY) for legacy-drift plus extra unrelated key\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(payload["ok"], false);
+    assert_eq!(
+        payload["signer_files"]["severity"], "critical",
+        "signer_files must remain Critical when an unrelated extra key is present"
+    );
+    assert_eq!(
+        payload["signer_files"]["code"], "trust-files-mismatch",
+        "signer_files code must be the tampering code, not the legacy-drift code"
+    );
+}
+
+#[test]
+fn doctor_legacy_drift_warn_when_allowed_signers_only_has_old_reanchor_key() {
+    // Pre-recovery drift happy path: allowed_signers carries exactly the
+    // expected projection plus the old bootstrap key from a prior reanchor.
+    // Doctor must downgrade to Warn (operators can run
+    // `nexum trust regenerate-files` to remove the stale entry).
+    let (home, _fixture) = TestHome::initialized_post_reanchor_case_a(false);
+    let allowed = home.path().join("notebook.git/.trust/allowed_signers");
+    let k1_pubkey =
+        std::fs::read_to_string(home.ssh_home().join(".ssh/id_ed25519.pub")).expect("read K1 pub");
+    let mut content = std::fs::read_to_string(&allowed).unwrap_or_default();
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(k1_pubkey.trim());
+    content.push('\n');
+    std::fs::write(&allowed, &content).unwrap();
+
+    let out = home.run(&["doctor", "--json"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for legacy drift\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["signer_files"]["severity"], "warn");
+    assert_eq!(
+        payload["signer_files"]["code"], "trust-files-pre-recovery-drift",
+        "signer_files code must be the legacy-drift code"
+    );
+}

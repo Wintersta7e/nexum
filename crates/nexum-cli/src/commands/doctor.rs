@@ -267,7 +267,7 @@ fn signer_file_check(paths: &nexum_core::paths::Paths) -> DoctorCheckResult {
     // Classify: if the only diff is allowed_signers containing pubkeys for
     // old fingerprints of BootstrapReanchor events, it's pre-recovery drift
     // (old key still listed) rather than genuine tampering — Warn, not Critical.
-    if is_legacy_reanchor_drift(&events_yml, &trust_dir, &mismatch) {
+    if is_legacy_reanchor_drift(&events_yml, &trust_dir, tmp_trust, &mismatch) {
         DoctorCheckResult::Warn {
             code: "trust-files-pre-recovery-drift".into(),
             message: format!(
@@ -288,16 +288,24 @@ fn signer_file_check(paths: &nexum_core::paths::Paths) -> DoctorCheckResult {
     }
 }
 
-/// Returns true when the diff between disk-`allowed_signers` and the
-/// expected projection is exactly the set of `BootstrapReanchor`
-/// `old_fingerprint` pubkeys.
+/// Returns true when the on-disk `allowed_signers` differs from the
+/// freshly-regenerated projection by exactly one line per
+/// `BootstrapReanchor.old_fingerprint` pubkey (the pre-recovery shape).
+/// All other mismatches — missing expected entries, extra unrelated keys,
+/// duplicates, or differences in other signer files — return false so the
+/// caller raises a Critical tampering finding instead of a Warn.
 fn is_legacy_reanchor_drift(
     events_yml: &std::path::Path,
     trust_dir: &std::path::Path,
+    expected_trust_dir: &std::path::Path,
     mismatched_files: &[String],
 ) -> bool {
+    use std::collections::{HashMap, HashSet};
+
     use nexum_core::trust::events::EventKind;
 
+    // Only `allowed_signers` can be the legacy-drift surface; mismatches
+    // in historical_signers / revoked_signers always mean tampering.
     if mismatched_files.iter().any(|n| n != "allowed_signers") {
         return false;
     }
@@ -305,10 +313,9 @@ fn is_legacy_reanchor_drift(
         return false;
     };
 
-    // Single pass: collect reanchor old-fingerprints and a fingerprint→pubkey
-    // map from BootstrapKey/KeyAdded events.
-    let mut reanchor_old_fps: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut fp_to_pubkey: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    // Collect reanchor old-fingerprints and a fingerprint→pubkey map.
+    let mut reanchor_old_fps: HashSet<&str> = HashSet::new();
+    let mut fp_to_pubkey: HashMap<&str, &str> = HashMap::new();
     for e in &log.events {
         match &e.payload {
             EventKind::BootstrapReanchor {
@@ -334,10 +341,54 @@ fn is_legacy_reanchor_drift(
     if reanchor_old_fps.is_empty() {
         return false;
     }
-    let on_disk = std::fs::read_to_string(trust_dir.join("allowed_signers")).unwrap_or_default();
-    reanchor_old_fps
+    let expected_old_pubkeys: HashSet<&str> = reanchor_old_fps
         .iter()
-        .all(|fp| fp_to_pubkey.get(fp).is_some_and(|pk| on_disk.contains(pk)))
+        .filter_map(|fp| fp_to_pubkey.get(fp).copied())
+        .collect();
+    // Every old fp must resolve to a pubkey, else we cannot safely classify.
+    if expected_old_pubkeys.len() != reanchor_old_fps.len() {
+        return false;
+    }
+
+    let parse_lines = |text: &str| -> HashSet<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let expected_lines = parse_lines(
+        &std::fs::read_to_string(expected_trust_dir.join("allowed_signers")).unwrap_or_default(),
+    );
+    let actual_lines = parse_lines(
+        &std::fs::read_to_string(trust_dir.join("allowed_signers")).unwrap_or_default(),
+    );
+
+    // Legacy drift = actual is a strict superset of expected, and each
+    // extra line carries exactly one old-reanchor pubkey, with every old
+    // pubkey covered by at least one extra. Anything else (missing
+    // expected entries, lines that mention zero or multiple old pubkeys)
+    // is tampering.
+    if !expected_lines.is_subset(&actual_lines) {
+        return false;
+    }
+    let extras: Vec<&String> = actual_lines.difference(&expected_lines).collect();
+    let mut covered: HashSet<&str> = HashSet::new();
+    for extra in &extras {
+        let mut count = 0usize;
+        let mut matched: &str = "";
+        for pk in &expected_old_pubkeys {
+            if extra.contains(*pk) {
+                count += 1;
+                matched = *pk;
+            }
+        }
+        if count != 1 {
+            return false;
+        }
+        covered.insert(matched);
+    }
+    covered == expected_old_pubkeys
 }
 
 fn merge_commit_check(paths: &nexum_core::paths::Paths) -> DoctorCheckResult {
