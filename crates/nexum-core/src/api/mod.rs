@@ -1638,6 +1638,57 @@ pub enum ReanchorResolveOutcome {
     },
 }
 
+/// Returns `true` if HEAD's most recent commit touching `.trust/events.yml`
+/// appended a `BootstrapReanchor` event whose `new_fingerprint` equals
+/// `expected_new_fp`. Used by the doctor `--resolve-pending-reanchor`
+/// path to detect "commit landed but sentinel transition missed" drift.
+///
+/// Returns `false` on any read or parse failure — no events.yml means no
+/// reanchor commit exists.
+fn head_carries_matching_reanchor(
+    notebook_git: &std::path::Path,
+    expected_new_fp: &str,
+) -> bool {
+    let events_yml = notebook_git.join(".trust/events.yml");
+    let Ok(log) = crate::trust::events::load_events_yml(&events_yml) else {
+        return false; // no events.yml = no reanchor
+    };
+    log.events.last().is_some_and(|e| {
+        matches!(&e.payload,
+            crate::trust::events::EventKind::BootstrapReanchor { new_fingerprint, .. }
+                if new_fingerprint == expected_new_fp
+        )
+    })
+}
+
+/// Apply the pin write (`config.toml` + `bootstrap_pin` cache) from a sentinel
+/// whose reanchor commit is confirmed on HEAD. Called by both the
+/// `EventsCommitted+Continue` arm and the `Init+Continue` drift-elevated path.
+fn apply_events_committed_continue(
+    sentinel: &crate::trust::reanchor_pending::ReanchorPending,
+    paths: &Paths,
+) -> Result<ReanchorResolveOutcome, ApiError> {
+    use crate::trust::reanchor_pending::delete_sentinel;
+    let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+    sentinel
+        .new_pin_fp()
+        .clone_into(&mut cfg.trust.bootstrap.fingerprint);
+    sentinel
+        .new_pubkey()
+        .clone_into(&mut cfg.trust.bootstrap.public_key);
+    crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
+    std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(|e| {
+        ApiError::Indexer(crate::indexer::db::IndexerError::Io {
+            path: paths.bootstrap_pin.clone(),
+            source: e,
+        })
+    })?;
+    delete_sentinel(&paths.home)?;
+    Ok(ReanchorResolveOutcome::Resolved {
+        from_phase: "events_committed".into(),
+    })
+}
+
 /// Inspect `~/.nexum/.reanchor_pending` and apply the sentinel cleanup per the
 /// documented phases.
 ///
@@ -1660,6 +1711,10 @@ pub enum ReanchorResolveOutcome {
 /// (only the `events_committed + Continue` branch).
 /// Returns `ApiError::Indexer(IndexerError::Io)` when writing the bootstrap
 /// pin cache file fails (same branch).
+// Straight-line sentinel dispatch: each (phase, mode) arm is a short
+// block; keeping them inline makes the state-machine transitions readable
+// without helper indirection obscuring the ordering.
+#[allow(clippy::too_many_lines)]
 pub fn resolve_pending_reanchor(
     paths: &Paths,
     mode: Option<ReanchorResolveMode>,
@@ -1678,40 +1733,80 @@ pub fn resolve_pending_reanchor(
 
         match (phase, mode) {
             (Phase::Init, Some(ReanchorResolveMode::Revert)) => {
+                // Check for drift: if the reanchor commit already landed on
+                // HEAD but the sentinel phase was never advanced, --revert
+                // would orphan a live chain event. Refuse rather than silently
+                // destroying it.
+                let head_match = head_carries_matching_reanchor(
+                    &paths.notebook_git,
+                    sentinel.new_pin_fp(),
+                );
+                if head_match {
+                    return Ok(ReanchorResolveOutcome::Refused {
+                        phase: "init".into(),
+                        reason: "the reanchor commit is already on HEAD (sentinel transition \
+                                 was missed); re-run with --continue to write the pin, OR \
+                                 `git -C notebook.git reset --hard HEAD~1` then --revert"
+                            .into(),
+                    });
+                }
+                // Safe to revert: no commit on HEAD, restore trust files +
+                // signingkey + delete sentinel.
+                let trust_file_pbs: Vec<std::path::PathBuf> = [
+                    ".trust/events.yml",
+                    ".trust/historical_signers",
+                    ".trust/allowed_signers",
+                    ".trust/revoked_signers",
+                ]
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+                let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+                    .iter()
+                    .map(std::path::PathBuf::as_path)
+                    .collect();
+                let _ = restore_paths_from_head(&paths.notebook_git, &trust_file_refs);
+                match sentinel.prior_signingkey() {
+                    Some(prior) => {
+                        let _ = std::process::Command::new("git")
+                            .args(["config", "--local", "user.signingkey", prior])
+                            .current_dir(&paths.notebook_git)
+                            .status();
+                    }
+                    None => {
+                        let _ = std::process::Command::new("git")
+                            .args(["config", "--local", "--unset", "user.signingkey"])
+                            .current_dir(&paths.notebook_git)
+                            .status();
+                    }
+                }
                 delete_sentinel(&paths.home)?;
                 Ok(ReanchorResolveOutcome::Resolved {
                     from_phase: "init".into(),
                 })
             }
             (Phase::Init, Some(ReanchorResolveMode::Continue)) => {
-                Ok(ReanchorResolveOutcome::Refused {
-                    phase: "init".into(),
-                    reason: "this release only supports cleanup of `pin_updated` and `--revert` of `init`; \
-                             phase=init recovery requires the keys-recover command (not yet available)"
-                        .into(),
-                })
+                // Check for drift: if the reanchor commit is on HEAD but the
+                // sentinel never advanced past Init, act as EventsCommitted.
+                let head_match = head_carries_matching_reanchor(
+                    &paths.notebook_git,
+                    sentinel.new_pin_fp(),
+                );
+                if !head_match {
+                    return Ok(ReanchorResolveOutcome::Refused {
+                        phase: "init".into(),
+                        reason: "no signed reanchor commit on HEAD; --continue is only valid \
+                                 after the commit lands. Run `nexum keys recover` to start a \
+                                 new recovery, OR --revert to clean up the sentinel."
+                            .into(),
+                    });
+                }
+                // Drift-elevated: commit landed but sentinel phase was not
+                // advanced. Apply the same pin-write step as EventsCommitted.
+                apply_events_committed_continue(&sentinel, paths)
             }
             (Phase::EventsCommitted, Some(ReanchorResolveMode::Continue)) => {
-                let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
-                sentinel
-                    .new_pin_fp()
-                    .clone_into(&mut cfg.trust.bootstrap.fingerprint);
-                sentinel
-                    .new_pubkey()
-                    .clone_into(&mut cfg.trust.bootstrap.public_key);
-                crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
-                std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(
-                    |e| {
-                        ApiError::Indexer(crate::indexer::db::IndexerError::Io {
-                            path: paths.bootstrap_pin.clone(),
-                            source: e,
-                        })
-                    },
-                )?;
-                delete_sentinel(&paths.home)?;
-                Ok(ReanchorResolveOutcome::Resolved {
-                    from_phase: "events_committed".into(),
-                })
+                apply_events_committed_continue(&sentinel, paths)
             }
             (Phase::EventsCommitted, Some(ReanchorResolveMode::Revert)) => {
                 Ok(ReanchorResolveOutcome::Refused {

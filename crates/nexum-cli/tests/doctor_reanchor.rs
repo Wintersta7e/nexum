@@ -56,18 +56,20 @@ fn doctor_no_flags_exits_zero_when_clean() {
 }
 
 #[test]
-fn doctor_refuses_to_resolve_init_phase_via_continue() {
+fn doctor_refuses_init_continue_when_no_matching_commit_on_head() {
+    // With no reanchor commit on HEAD, --continue is refused with guidance
+    // to run `nexum keys recover` to start a new recovery.
     let home = TestHome::initialized_no_index();
     write_sentinel(home.path(), "init");
     let out = home.run(&["doctor", "--resolve-pending-reanchor", "--continue"]);
     assert!(
         !out.status.success(),
-        "expected non-zero for init-phase --continue"
+        "expected non-zero for init-phase --continue when no commit on HEAD"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("keys-recover") || stderr.contains("not yet available"),
-        "stderr should explain keys-recover is unavailable: {stderr}"
+        stderr.contains("keys recover") || stderr.contains("no signed"),
+        "stderr should explain no reanchor commit exists: {stderr}"
     );
 }
 
@@ -242,6 +244,138 @@ fn doctor_resolve_no_sentinel_json_emits_no_sentinel_envelope() {
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
     assert_eq!(payload["ok"], serde_json::Value::Bool(true));
     assert_eq!(payload["kind"], "doctor.reanchor.no_sentinel");
+}
+
+// ── Drift-detection tests (T5c) ─────────────────────────────────────────────
+
+/// Write an Init-phase sentinel whose `new_pin_fp` is `new_pin_fp`. Unlike
+/// `write_sentinel`, this helper also sets `prior_signingkey` to `None` (the
+/// common case where the operator had no `user.signingkey` configured).
+fn write_init_sentinel_for(home: &std::path::Path, new_pin_fp: &str) {
+    let path = home.join(".reanchor_pending");
+    let body = format!(
+        r#"{{
+            "case": "A",
+            "old_pin_fp": "SHA256:old",
+            "new_pin_fp": "{new_pin_fp}",
+            "new_pubkey": "ssh-ed25519 AAAA dummy",
+            "started_at": "2026-05-20T00:00:00Z",
+            "pid": null,
+            "phase_completed": "init",
+            "prior_signingkey": null
+        }}"#,
+    );
+    std::fs::write(&path, body).unwrap();
+}
+
+#[test]
+fn doctor_init_revert_clean_deletes_sentinel_and_restores_files() {
+    // No matching reanchor commit on HEAD → safe to revert. Sentinel must
+    // be deleted; trust files restored from HEAD.
+    let home = TestHome::initialized_no_index();
+    write_init_sentinel_for(home.path(), "SHA256:nonexistent");
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for init+--revert with no commit on HEAD\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.resolved");
+    assert_eq!(payload["from_phase"], "init");
+    assert!(
+        !home.path().join(".reanchor_pending").exists(),
+        "sentinel must be deleted after init+--revert"
+    );
+}
+
+#[test]
+fn doctor_init_revert_refused_when_head_has_matching_reanchor() {
+    // K2 reanchor commit is on HEAD → --revert would orphan a live chain
+    // event. The resolver must refuse.
+    let (home, fix) = TestHome::initialized_post_reanchor_case_a(false);
+    // Write Init sentinel pointing at K2 (already committed).
+    write_init_sentinel_for(home.path(), &fix.k2_fp);
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero when HEAD already has the reanchor commit"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+    // Sentinel must NOT be deleted.
+    assert!(
+        home.path().join(".reanchor_pending").exists(),
+        "sentinel must survive a refused revert"
+    );
+}
+
+#[test]
+fn doctor_init_continue_elevates_when_commit_landed() {
+    // K2 reanchor commit is on HEAD, sentinel still says Init (transition
+    // was missed). --continue must detect drift, write the pin, and clean up.
+    let (home, fix) = TestHome::initialized_post_reanchor_case_a(false);
+    // Revert the pin back to K1 so the test starts with stale pin state,
+    // then write an Init sentinel pointing at K2.
+    let cfg_path = home.path().join("config.toml");
+    let cfg_raw = std::fs::read_to_string(&cfg_path).unwrap();
+    let updated = cfg_raw.replace(&fix.k2_fp, "SHA256:k1placeholder");
+    std::fs::write(&cfg_path, &updated).unwrap();
+    write_init_sentinel_for(home.path(), &fix.k2_fp);
+
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for drift-elevated Init+--continue\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.resolved");
+    assert!(
+        !home.path().join(".reanchor_pending").exists(),
+        "sentinel must be deleted after drift-elevated continue"
+    );
+    // Pin must now carry K2 fingerprint.
+    let cached =
+        std::fs::read_to_string(home.path().join(".bootstrap-fingerprint")).unwrap_or_default();
+    assert!(
+        cached.trim() == fix.k2_fp,
+        ".bootstrap-fingerprint must be K2 after drift-elevated continue; got: {cached}"
+    );
+}
+
+#[test]
+fn doctor_init_continue_refused_when_no_commit() {
+    // No reanchor commit on HEAD → --continue must refuse with guidance.
+    let home = TestHome::initialized_no_index();
+    write_init_sentinel_for(home.path(), "SHA256:nonexistent");
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero for init+--continue with no matching commit"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+    assert_eq!(payload["kind"], "doctor.reanchor.refused");
+    // Sentinel must NOT be deleted.
+    assert!(
+        home.path().join(".reanchor_pending").exists(),
+        "sentinel must survive a refused continue"
+    );
 }
 
 #[test]
