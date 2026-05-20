@@ -1524,13 +1524,18 @@ pub fn keys_recover(
         )
         .map_err(ApiError::Trust)?;
 
-        // Append BootstrapReanchor event + regenerate signer files.
+        // Append BootstrapReanchor event + regenerate signer files. The
+        // event-payload flag `acknowledge_chain_anchor_lost` records the
+        // *case* (Case B implies the pin was lost, so pre-reanchor records
+        // become unverifiable). The `acknowledge_chain_break` API parameter
+        // is a separate preflight gate covering both cases and is checked
+        // above.
         let trust_dir = paths.notebook_git.join(".trust");
         let reanchor_inputs = crate::trust::recover::ReanchorInputs {
             old_fingerprint: current_bootstrap.clone(),
             new_fingerprint: new_fp.clone(),
             new_public_key: new_pubkey.clone(),
-            acknowledge_chain_anchor_lost: acknowledge_chain_break,
+            acknowledge_chain_anchor_lost: case == RecoverCase::B,
         };
         let touched = match crate::trust::recover::append_bootstrap_reanchor(
             &events_yml,

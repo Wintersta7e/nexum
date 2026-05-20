@@ -13,13 +13,13 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{NexumTestHome, write_ephemeral_keypair};
+use common::{write_ephemeral_keypair, NexumTestHome};
 use nexum_core::{
     api::{self, RecoverCase},
     config::types::Config,
-    init::{InitOpts, run as init_run},
+    init::{run as init_run, InitOpts},
     paths::Paths,
-    trust::events::{EventKind, load_events_yml},
+    trust::events::{load_events_yml, EventKind},
     trust::reanchor_pending::read_sentinel,
 };
 
@@ -60,7 +60,7 @@ fn make_fixture() -> Fixture {
 /// Write a second ephemeral keypair alongside K1. Returns the private-key path.
 fn add_k2_keypair(key_dir: &Path) -> PathBuf {
     // Write a keypair with a different name so K1's files are not overwritten.
-    use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
+    use ssh_key::{rand_core::OsRng, Algorithm, PrivateKey};
     let private = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
     let priv_pem = private.to_openssh(ssh_key::LineEnding::LF).unwrap();
     let pub_line = private.public_key().to_openssh().unwrap();
@@ -461,5 +461,47 @@ fn recover_sets_acknowledge_chain_anchor_lost_in_event() {
     assert!(
         acknowledge_chain_anchor_lost,
         "acknowledge_chain_anchor_lost must be true when the flag is passed"
+    );
+}
+
+#[test]
+fn recover_case_a_records_acknowledge_chain_anchor_lost_false() {
+    // Case A preserves the bootstrap pin; pre-reanchor records remain
+    // verifiable historicals (TrustBasis::PreReanchor + `pre-recovery-record`).
+    // The event payload must therefore carry `acknowledge_chain_anchor_lost: false`
+    // regardless of any operator acknowledgement passed at the API boundary.
+    let fix = make_fixture();
+    let key_dir = tempfile::tempdir().unwrap();
+    let k2_path = add_k2_keypair(key_dir.path());
+
+    api::keys_recover(
+        &fix.paths,
+        &fix.cfg,
+        &k2_path,
+        RecoverCase::A,
+        "rotating bootstrap to new key",
+        true,
+    )
+    .expect("Case A recovery succeeds");
+
+    let events_yml = fix.paths.notebook_git.join(".trust/events.yml");
+    let log = load_events_yml(&events_yml).expect("load events.yml");
+    let Some(ev) = log
+        .events
+        .iter()
+        .find(|e| matches!(&e.payload, EventKind::BootstrapReanchor { .. }))
+    else {
+        panic!("BootstrapReanchor event not found in events.yml");
+    };
+    let EventKind::BootstrapReanchor {
+        acknowledge_chain_anchor_lost,
+        ..
+    } = &ev.payload
+    else {
+        unreachable!()
+    };
+    assert!(
+        !acknowledge_chain_anchor_lost,
+        "Case A must record acknowledge_chain_anchor_lost: false"
     );
 }
