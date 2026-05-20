@@ -16,7 +16,7 @@ use crate::{
     },
     init::hooks::install_pre_merge_commit_hook,
     paths::Paths,
-    ssh_key::detect::{detect_signing_key, DetectedKey},
+    ssh_key::detect::{DetectedKey, detect_signing_key},
     trust::{events::write_seed_yaml, regenerate::regenerate_files},
 };
 
