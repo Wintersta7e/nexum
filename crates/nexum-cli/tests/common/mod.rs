@@ -421,6 +421,7 @@ impl TestHome {
                 payload: nexum_core::trust::events::EventKind::BootstrapReanchor {
                     old_fingerprint: k1_fp.clone(),
                     new_fingerprint: k2_fp.clone(),
+                    new_public_key: String::new(),
                     reason: "test fixture chain-break".to_owned(),
                     acknowledge_chain_anchor_lost: false,
                 },

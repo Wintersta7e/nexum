@@ -52,6 +52,16 @@ pub enum EventKind {
     BootstrapReanchor {
         old_fingerprint: String,
         new_fingerprint: String,
+        /// SSH public-key blob for `new_fingerprint`. Required for new
+        /// reanchor events written by the recover verb (next milestone);
+        /// populated from the supplied new-key's `.pub` file. Defaults
+        /// to empty string when deserializing legacy YAML that predated
+        /// the field. Downstream consumers (regenerate, key-state
+        /// projection) treat an empty value as "no public key was
+        /// published with the reanchor event" and fall back to any
+        /// preceding `KeyAdded` event that introduced `new_fingerprint`.
+        #[serde(default)]
+        new_public_key: String,
         reason: String,
         /// Distinguishes the two reanchor recovery paths: `false` (default)
         /// means the bootstrap pin was preserved across recovery, so records
@@ -306,6 +316,63 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_reanchor_with_new_public_key_round_trips() {
+        let event = EventKind::BootstrapReanchor {
+            old_fingerprint: fake_fingerprint(),
+            new_fingerprint: "SHA256:CCC=".into(),
+            new_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAACCC test3@example.invalid".into(),
+            reason: "Bootstrap key lost".into(),
+            acknowledge_chain_anchor_lost: false,
+        };
+        let log = EventLog {
+            schema_version: 1,
+            events: vec![Event {
+                event_id: Uuid::now_v7(),
+                payload: event.clone(),
+            }],
+        };
+        let yaml = serde_yaml::to_string(&log).unwrap();
+        let back: EventLog = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(log, back);
+        assert!(
+            yaml.contains("new_public_key:"),
+            "yaml must include the new_public_key field: {yaml}"
+        );
+        assert!(
+            yaml.contains("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAACCC"),
+            "yaml must include the actual pubkey blob"
+        );
+    }
+
+    #[test]
+    fn bootstrap_reanchor_without_new_public_key_field_deserializes_default() {
+        let yaml = r"
+schema_version: 1
+events:
+- event_id: 019e0a14-7400-7c00-a000-000000000005
+  kind: BootstrapReanchor
+  old_fingerprint: 'SHA256:abc'
+  new_fingerprint: 'SHA256:def'
+  reason: 'legacy event without new_public_key'
+";
+        let log: EventLog = serde_yaml::from_str(yaml).expect("must deserialize");
+        assert_eq!(log.events.len(), 1);
+        let EventKind::BootstrapReanchor {
+            new_public_key,
+            acknowledge_chain_anchor_lost,
+            ..
+        } = &log.events[0].payload
+        else {
+            panic!("expected BootstrapReanchor");
+        };
+        assert_eq!(new_public_key, "", "missing field defaults to empty string");
+        assert!(
+            !acknowledge_chain_anchor_lost,
+            "missing field defaults to false"
+        );
+    }
+
+    #[test]
     fn all_five_event_kinds_round_trip_yaml() {
         let events = vec![
             EventKind::BootstrapKey {
@@ -329,6 +396,8 @@ mod tests {
             EventKind::BootstrapReanchor {
                 old_fingerprint: fake_fingerprint(),
                 new_fingerprint: "SHA256:CCC=".into(),
+                new_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAACCC test3@example.invalid"
+                    .into(),
                 reason: "Bootstrap key lost".into(),
                 acknowledge_chain_anchor_lost: false,
             },
