@@ -296,45 +296,48 @@ fn is_legacy_reanchor_drift(
     trust_dir: &std::path::Path,
     mismatched_files: &[String],
 ) -> bool {
+    use nexum_core::trust::events::EventKind;
+
     if mismatched_files.iter().any(|n| n != "allowed_signers") {
         return false;
     }
     let Ok(log) = nexum_core::trust::events::load_events_yml(events_yml) else {
         return false;
     };
-    let reanchor_old_fps: std::collections::HashSet<String> = log
-        .events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            nexum_core::trust::events::EventKind::BootstrapReanchor {
+
+    // Single pass: collect reanchor old-fingerprints and a fingerprint→pubkey
+    // map from BootstrapKey/KeyAdded events.
+    let mut reanchor_old_fps: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut fp_to_pubkey: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for e in &log.events {
+        match &e.payload {
+            EventKind::BootstrapReanchor {
                 old_fingerprint, ..
-            } => Some(old_fingerprint.clone()),
-            _ => None,
-        })
-        .collect();
-    if reanchor_old_fps.is_empty() {
-        return false;
-    }
-    let on_disk = std::fs::read_to_string(trust_dir.join("allowed_signers")).unwrap_or_default();
-    reanchor_old_fps.iter().all(|fp| {
-        let pubkey = log.events.iter().find_map(|e| match &e.payload {
-            nexum_core::trust::events::EventKind::BootstrapKey {
+            } => {
+                reanchor_old_fps.insert(old_fingerprint.as_str());
+            }
+            EventKind::BootstrapKey {
                 fingerprint,
                 public_key,
                 ..
             }
-            | nexum_core::trust::events::EventKind::KeyAdded {
+            | EventKind::KeyAdded {
                 fingerprint,
                 public_key,
                 ..
-            } if fingerprint == fp => Some(public_key.clone()),
-            _ => None,
-        });
-        match pubkey {
-            Some(pk) => on_disk.contains(&pk),
-            None => false,
+            } => {
+                fp_to_pubkey.insert(fingerprint.as_str(), public_key.as_str());
+            }
+            _ => {}
         }
-    })
+    }
+    if reanchor_old_fps.is_empty() {
+        return false;
+    }
+    let on_disk = std::fs::read_to_string(trust_dir.join("allowed_signers")).unwrap_or_default();
+    reanchor_old_fps
+        .iter()
+        .all(|fp| fp_to_pubkey.get(fp).is_some_and(|pk| on_disk.contains(pk)))
 }
 
 fn merge_commit_check(paths: &nexum_core::paths::Paths) -> DoctorCheckResult {
