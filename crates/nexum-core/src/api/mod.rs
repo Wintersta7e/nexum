@@ -1223,6 +1223,13 @@ pub fn keys_revoke(
 /// Centralizing both steps so a future read verb cannot land without
 /// either.
 fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
+    // Per-call refusal: a concurrent keys_recover may have written
+    // `.reanchor_pending` since this process's session.startup ran.
+    // Refuse here so the read cannot observe partial chain state. The
+    // session-startup check handles the "sentinel present at startup" case;
+    // this check handles the "sentinel appeared mid-session" case.
+    crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
+
     let mut conn = open_existing_writable(&paths.index_db)?;
     crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     Ok(conn)
@@ -2160,6 +2167,30 @@ mod tests {
         assert!(
             matches!(result, Err(ApiError::Concurrent { .. })),
             "expected Concurrent when lock is held, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn open_for_query_refuses_when_sentinel_present_after_startup() {
+        // The session-startup path (resolve_runtime) catches a sentinel at
+        // session entry; this test verifies the per-call check in
+        // open_for_query catches a sentinel that appears AFTER startup.
+        let (dir, paths) = paths_with_temp_home();
+        // Create a valid index so the db-open step would succeed without
+        // the sentinel — the refusal must come from the sentinel check.
+        let _ = open_or_create(&paths.index_db).unwrap();
+        // Write a well-formed sentinel.
+        std::fs::write(
+            dir.path().join(".reanchor_pending"),
+            r#"{"case":"A","old_pin_fp":"SHA256:old","new_pin_fp":"SHA256:new",
+               "new_pubkey":"ssh-ed25519 AAAA","started_at":"2026-05-01T00:00:00Z",
+               "phase_completed":"init"}"#,
+        )
+        .unwrap();
+        let result = open_for_query(&paths);
+        assert!(
+            matches!(result, Err(ApiError::Trust(crate::trust::events::TrustError::ReanchorPending { .. }))),
+            "expected ReanchorPending from per-call sentinel check, got {result:?}"
         );
     }
 
