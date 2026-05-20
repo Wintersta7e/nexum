@@ -56,18 +56,20 @@ fn doctor_no_flags_exits_zero_when_clean() {
 }
 
 #[test]
-fn doctor_refuses_to_resolve_init_phase_via_continue() {
+fn doctor_refuses_init_continue_when_no_matching_commit_on_head() {
+    // With no reanchor commit on HEAD, --continue is refused with guidance
+    // to run `nexum keys recover` to start a new recovery.
     let home = TestHome::initialized_no_index();
     write_sentinel(home.path(), "init");
     let out = home.run(&["doctor", "--resolve-pending-reanchor", "--continue"]);
     assert!(
         !out.status.success(),
-        "expected non-zero for init-phase --continue"
+        "expected non-zero for init-phase --continue when no commit on HEAD"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("keys-recover") || stderr.contains("not yet available"),
-        "stderr should explain keys-recover is unavailable: {stderr}"
+        stderr.contains("keys recover") || stderr.contains("no signed"),
+        "stderr should explain no reanchor commit exists: {stderr}"
     );
 }
 
@@ -231,7 +233,7 @@ fn doctor_no_flags_json_emits_ok_envelope() {
     assert!(out.status.success(), "expected exit 0");
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
     assert_eq!(payload["ok"], serde_json::Value::Bool(true));
-    assert_eq!(payload["kind"], "doctor.ok");
+    assert_eq!(payload["kind"], "doctor.report");
 }
 
 #[test]
@@ -242,6 +244,118 @@ fn doctor_resolve_no_sentinel_json_emits_no_sentinel_envelope() {
     let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
     assert_eq!(payload["ok"], serde_json::Value::Bool(true));
     assert_eq!(payload["kind"], "doctor.reanchor.no_sentinel");
+}
+
+// ── Drift-detection tests ───────────────────────────────────────────────────
+
+#[test]
+fn doctor_init_revert_clean_deletes_sentinel_and_restores_files() {
+    // No matching reanchor commit on HEAD → safe to revert. Sentinel must
+    // be deleted; trust files restored from HEAD.
+    let home = TestHome::initialized_no_index();
+    write_sentinel_with_pin(home.path(), "init", "SHA256:nonexistent");
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for init+--revert with no commit on HEAD\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.resolved");
+    assert_eq!(payload["from_phase"], "init");
+    assert!(
+        !home.path().join(".reanchor_pending").exists(),
+        "sentinel must be deleted after init+--revert"
+    );
+}
+
+#[test]
+fn doctor_init_revert_refused_when_head_has_matching_reanchor() {
+    // K2 reanchor commit is on HEAD → --revert would orphan a live chain
+    // event. The resolver must refuse.
+    let (home, fix) = TestHome::initialized_post_reanchor_case_a(false);
+    // Write Init sentinel pointing at K2 (already committed).
+    write_sentinel_with_pin(home.path(), "init", &fix.k2_fp);
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero when HEAD already has the reanchor commit"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+    // Sentinel must NOT be deleted.
+    assert!(
+        home.path().join(".reanchor_pending").exists(),
+        "sentinel must survive a refused revert"
+    );
+}
+
+#[test]
+fn doctor_init_continue_elevates_when_commit_landed() {
+    // K2 reanchor commit is on HEAD, sentinel still says Init (transition
+    // was missed). --continue must detect drift, write the pin, and clean up.
+    let (home, fix) = TestHome::initialized_post_reanchor_case_a(false);
+    // Revert the pin back to K1 so the test starts with stale pin state,
+    // then write an Init sentinel pointing at K2.
+    let cfg_path = home.path().join("config.toml");
+    let cfg_raw = std::fs::read_to_string(&cfg_path).unwrap();
+    let updated = cfg_raw.replace(&fix.k2_fp, "SHA256:k1placeholder");
+    std::fs::write(&cfg_path, &updated).unwrap();
+    write_sentinel_with_pin(home.path(), "init", &fix.k2_fp);
+
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for drift-elevated Init+--continue\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.resolved");
+    assert!(
+        !home.path().join(".reanchor_pending").exists(),
+        "sentinel must be deleted after drift-elevated continue"
+    );
+    // Pin must now carry K2 fingerprint.
+    let cached =
+        std::fs::read_to_string(home.path().join(".bootstrap-fingerprint")).unwrap_or_default();
+    assert!(
+        cached.trim() == fix.k2_fp,
+        ".bootstrap-fingerprint must be K2 after drift-elevated continue; got: {cached}"
+    );
+}
+
+#[test]
+fn doctor_init_continue_refused_when_no_commit() {
+    // No reanchor commit on HEAD → --continue must refuse with guidance.
+    let home = TestHome::initialized_no_index();
+    write_sentinel_with_pin(home.path(), "init", "SHA256:nonexistent");
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero for init+--continue with no matching commit"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+    assert_eq!(payload["kind"], "doctor.reanchor.refused");
+    // Sentinel must NOT be deleted.
+    assert!(
+        home.path().join(".reanchor_pending").exists(),
+        "sentinel must survive a refused continue"
+    );
 }
 
 #[test]
@@ -264,4 +378,105 @@ fn doctor_refused_emits_usage_exit_code() {
     assert_eq!(payload["ok"], serde_json::Value::Bool(false));
     assert_eq!(payload["code"], "USAGE");
     assert_eq!(payload["kind"], "doctor.reanchor.refused");
+}
+
+/// Append a synthetic `BootstrapReanchor(K1 -> synthetic_new_fp)` event to the
+/// working-tree `events.yml` WITHOUT creating a signed commit. Used to
+/// simulate the "Init phase, never committed" crash window.
+fn append_uncommitted_reanchor(home: &Path, k1_fp: &str, new_fp: &str, new_pubkey: &str) {
+    let events_yml = home.join("notebook.git").join(".trust").join("events.yml");
+    let mut log = nexum_core::trust::events::load_events_yml(&events_yml).expect("load events.yml");
+    log.events.push(nexum_core::trust::events::Event {
+        event_id: uuid::Uuid::now_v7(),
+        payload: nexum_core::trust::events::EventKind::BootstrapReanchor {
+            old_fingerprint: k1_fp.to_owned(),
+            new_fingerprint: new_fp.to_owned(),
+            new_public_key: new_pubkey.to_owned(),
+            reason: "uncommitted working-tree mutation".to_owned(),
+            acknowledge_chain_anchor_lost: false,
+        },
+    });
+    let yaml = serde_yaml::to_string(&log).expect("serialize events.yml");
+    std::fs::write(&events_yml, yaml).expect("write events.yml");
+}
+
+#[test]
+fn doctor_init_continue_refused_when_only_working_tree_has_reanchor() {
+    // Recovery crashed after writing events.yml in the working tree but
+    // before the signed commit landed: HEAD blob still carries only the
+    // bootstrap event. --continue must refuse rather than writing the new
+    // pin against an uncommitted event.
+    let home = TestHome::initialized_no_index();
+    let k1_fp = live_bootstrap_fingerprint(home.path());
+    let synthetic_new_fp = "SHA256:uncommittedK2".to_owned();
+    let synthetic_new_pubkey = "ssh-ed25519 AAAAuncommittedK2 user@host";
+    append_uncommitted_reanchor(home.path(), &k1_fp, &synthetic_new_fp, synthetic_new_pubkey);
+    write_sentinel_with_pin(home.path(), "init", &synthetic_new_fp);
+
+    let out = home.run(&[
+        "doctor",
+        "--resolve-pending-reanchor",
+        "--continue",
+        "--json",
+    ]);
+    assert!(
+        !out.status.success(),
+        "expected non-zero for init+--continue when only working tree has reanchor"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+    assert_eq!(payload["kind"], "doctor.reanchor.refused");
+    assert!(
+        home.path().join(".reanchor_pending").exists(),
+        "sentinel must survive a refused continue"
+    );
+    // Live pin must still be K1 (the uncommitted event must not be
+    // promoted to the bootstrap pin).
+    let cfg_now = live_bootstrap_fingerprint(home.path());
+    assert_eq!(
+        cfg_now, k1_fp,
+        "config.toml bootstrap fingerprint must remain K1 on refused continue"
+    );
+}
+
+#[test]
+fn doctor_init_revert_succeeds_when_only_working_tree_has_reanchor() {
+    // Same crash window: HEAD blob has no reanchor commit, the working
+    // tree has an uncommitted BootstrapReanchor. --revert must restore
+    // the trust files from HEAD and delete the sentinel.
+    let home = TestHome::initialized_no_index();
+    let k1_fp = live_bootstrap_fingerprint(home.path());
+    let synthetic_new_fp = "SHA256:uncommittedK2".to_owned();
+    let synthetic_new_pubkey = "ssh-ed25519 AAAAuncommittedK2 user@host";
+    append_uncommitted_reanchor(home.path(), &k1_fp, &synthetic_new_fp, synthetic_new_pubkey);
+    write_sentinel_with_pin(home.path(), "init", &synthetic_new_fp);
+
+    let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
+    assert!(
+        out.status.success(),
+        "expected exit 0 for init+--revert when only working tree has reanchor\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json on stdout");
+    assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+    assert_eq!(payload["kind"], "doctor.reanchor.resolved");
+    assert!(
+        !home.path().join(".reanchor_pending").exists(),
+        "sentinel must be deleted after a clean revert"
+    );
+    // Working-tree events.yml should now match HEAD (no synthetic reanchor).
+    let events_yml = home
+        .path()
+        .join("notebook.git")
+        .join(".trust")
+        .join("events.yml");
+    let log = nexum_core::trust::events::load_events_yml(&events_yml).expect("load events.yml");
+    assert!(
+        log.events.iter().all(|e| !matches!(
+            &e.payload,
+            nexum_core::trust::events::EventKind::BootstrapReanchor { .. }
+        )),
+        "events.yml must no longer carry the uncommitted BootstrapReanchor"
+    );
 }

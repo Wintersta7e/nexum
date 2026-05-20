@@ -134,10 +134,44 @@ pub mod error_codes {
     /// not in `Active` role (rotated, compromised, reanchored, or has
     /// no `KeyStateView` row).
     pub const KEYS_REVOKE_SIGNER_NOT_ACTIVE: &str = "KEYS_REVOKE_SIGNER_NOT_ACTIVE";
+    /// `nexum keys recover` refused because `old_fingerprint` doesn't
+    /// match the chain's current bootstrap key.
+    pub const RECOVER_OLD_FP_MISMATCH: &str = "RECOVER_OLD_FP_MISMATCH";
+    /// `nexum keys recover` refused because a `BootstrapReanchor` event
+    /// for the same `(old_fp, new_fp)` pair already exists.
+    pub const RECOVER_DUPLICATE_CHAIN: &str = "RECOVER_DUPLICATE_CHAIN";
+    /// Another nexum process holds the global mutation lock; the verb cannot
+    /// proceed until the other process releases it.
+    pub const CONCURRENT: &str = "CONCURRENT";
+    /// `nexum keys recover` refused because `--acknowledge-chain-break`
+    /// was not passed.
+    pub const KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED: &str =
+        "KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED";
+    /// `nexum keys recover` (Case A) refused because the bootstrap pin file
+    /// is missing or its fingerprint doesn't match the chain's current
+    /// bootstrap.
+    pub const KEYS_RECOVER_PIN_MISSING_FOR_CASE_A: &str = "KEYS_RECOVER_PIN_MISSING_FOR_CASE_A";
+    /// `nexum keys recover` (Case A) refused because the pin file's
+    /// fingerprint doesn't match the chain's current bootstrap.
+    pub const KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A: &str = "KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A";
+    /// `nexum keys recover` refused because a sentinel is already present.
+    pub const KEYS_RECOVER_IN_PROGRESS: &str = "KEYS_RECOVER_IN_PROGRESS";
+    /// `nexum keys recover` refused because the new key fingerprint already
+    /// appears in `events.yml`.
+    pub const KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN: &str = "KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN";
+    /// `nexum keys recover` refused because the ssh-agent was unavailable
+    /// when trying to sign the reanchor commit.
+    pub const KEYS_RECOVER_AGENT_UNAVAILABLE: &str = "KEYS_RECOVER_AGENT_UNAVAILABLE";
+    /// `nexum keys recover` failed mid-flight after writing the sentinel.
+    pub const KEYS_RECOVER_FAILED: &str = "KEYS_RECOVER_FAILED";
+    /// `~/.nexum/state/trust_warnings_acked.json` exists but is not valid JSON.
+    /// Delete the file to reset acked warnings, or inspect and repair it by hand.
+    pub const PRE_RECOVERY_ACK_FILE_MALFORMED: &str = "PRE_RECOVERY_ACK_FILE_MALFORMED";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
 
+#[allow(clippy::too_many_lines)]
 impl From<&crate::api::ApiError> for ErrorEnvelope {
     fn from(err: &crate::api::ApiError) -> Self {
         use crate::api::ApiError;
@@ -233,6 +267,161 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "subkind": "keys_revoke_signer_not_active",
                     "signer_fingerprint": signer_fingerprint,
                     "signer_role": signer_role,
+                }),
+            },
+            ApiError::Concurrent { lock_path } => ErrorEnvelope {
+                error_code: error_codes::CONCURRENT,
+                message: format!(
+                    "another nexum process holds the writer lock at {}",
+                    lock_path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Wait for the other nexum process to finish before retrying. \
+                                If you believe the holder has exited, inspect running nexum \
+                                processes and the lockfile listed in `context.lock_path` \
+                                before any manual cleanup."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "writer_lock",
+                    "lock_path": lock_path.display().to_string(),
+                }),
+            },
+            ApiError::KeysRecoverChainBreakNotAcknowledged => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_CHAIN_BREAK_NOT_ACKNOWLEDGED,
+                message: "recovery requires explicit chain-break acknowledgement; \
+                          pass `--acknowledge-chain-break` to proceed"
+                    .to_owned(),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Re-run with `--acknowledge-chain-break` to confirm \
+                                that the old signing key can no longer be retrieved."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_chain_break_not_acknowledged",
+                }),
+            },
+            ApiError::KeysRecoverPinMissingForCaseA { path } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_PIN_MISSING_FOR_CASE_A,
+                message: format!(
+                    "Case A recovery requires an intact bootstrap pin; \
+                     pin file missing or unreadable at {}",
+                    path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor".to_owned()),
+                    rationale: "Run `nexum doctor` to investigate the bootstrap pin state."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_pin_missing_for_case_a",
+                    "path": path.display().to_string(),
+                }),
+            },
+            ApiError::KeysRecoverPinMismatchForCaseA { expected, found } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A,
+                message: format!(
+                    "Case A pin fingerprint {found} doesn't match the chain's \
+                     current bootstrap {expected}"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor".to_owned()),
+                    rationale: "Run `nexum doctor` to investigate the pin and bootstrap state."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_pin_mismatch_for_case_a",
+                    "expected": expected,
+                    "found": found,
+                }),
+            },
+            ApiError::KeysRecoverInProgress { sentinel_path } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_IN_PROGRESS,
+                message: format!(
+                    "a pending reanchor is already in progress (sentinel at {}); \
+                     resolve it via `nexum doctor --resolve-pending-reanchor` first",
+                    sentinel_path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor --resolve-pending-reanchor --continue".to_owned()),
+                    rationale: "Resolve or revert the existing pending reanchor before \
+                                starting a new recovery."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_in_progress",
+                    "sentinel_path": sentinel_path.display().to_string(),
+                }),
+            },
+            ApiError::KeysRecoverNewKeyAlreadyKnown { fingerprint } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN,
+                message: format!(
+                    "new key fingerprint {fingerprint} already appears in events.yml; \
+                     supply a key that has never been added to this notebook"
+                ),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys list".to_owned()),
+                    rationale: "Run `nexum keys list` to see all known fingerprints.".to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_new_key_already_known",
+                    "fingerprint": fingerprint,
+                }),
+            },
+            ApiError::KeysRecoverAgentUnavailable { fingerprint } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_AGENT_UNAVAILABLE,
+                message: format!(
+                    "ssh-agent unavailable when trying to sign with {fingerprint}; \
+                     load the new key into the agent first"
+                ),
+                remediation: Some(Remediation {
+                    command: Some(format!("ssh-add <path-to-key-for-{fingerprint}>")),
+                    rationale: "Add the new private key to the ssh-agent and retry.".to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_agent_unavailable",
+                    "fingerprint": fingerprint,
+                }),
+            },
+            ApiError::KeysRecoverFailed { stderr } => ErrorEnvelope {
+                error_code: error_codes::KEYS_RECOVER_FAILED,
+                message: format!("recovery failed mid-flight: {stderr}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor --resolve-pending-reanchor --revert".to_owned()),
+                    rationale: "Run `nexum doctor --resolve-pending-reanchor --revert` \
+                                to clean up the partial sentinel state."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "api",
+                    "subkind": "keys_recover_failed",
+                    "stderr": stderr,
+                }),
+            },
+            ApiError::PreRecoveryAckFileMalformed { path, reason } => ErrorEnvelope {
+                error_code: error_codes::PRE_RECOVERY_ACK_FILE_MALFORMED,
+                message: format!(
+                    "trust warnings ack file at {} is malformed: {reason}",
+                    path.display()
+                ),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Inspect the file by hand; delete it to reset acked warnings."
+                        .to_owned(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "dismiss_pre_recovery_warning",
+                    "path": path.display().to_string(),
                 }),
             },
         }
@@ -630,6 +819,37 @@ fn trust_envelope(err: &crate::trust::events::TrustError) -> ErrorEnvelope {
                 "kind": "trust",
                 "subkind": "fingerprint_not_known",
                 "fingerprint": fingerprint,
+            }),
+        },
+        TrustError::RecoverOldFpMismatch { expected, supplied } => ErrorEnvelope {
+            error_code: error_codes::RECOVER_OLD_FP_MISMATCH,
+            message: format!(
+                "recovery old_fingerprint {supplied} doesn't match the chain's current bootstrap {expected}"
+            ),
+            remediation: Some(Remediation {
+                command: Some("nexum keys list".to_owned()),
+                rationale: "Verify the current bootstrap fingerprint with `nexum keys list` \
+                            and resubmit with the correct old_fingerprint."
+                    .to_owned(),
+            }),
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "recover_old_fp_mismatch",
+                "expected": expected,
+                "supplied": supplied,
+            }),
+        },
+        TrustError::RecoverDuplicateChain { old_fp, new_fp } => ErrorEnvelope {
+            error_code: error_codes::RECOVER_DUPLICATE_CHAIN,
+            message: format!(
+                "a BootstrapReanchor event for ({old_fp} -> {new_fp}) already exists in events.yml"
+            ),
+            remediation: None,
+            context: serde_json::json!({
+                "kind": "trust",
+                "subkind": "recover_duplicate_chain",
+                "old_fp": old_fp,
+                "new_fp": new_fp,
             }),
         },
     }

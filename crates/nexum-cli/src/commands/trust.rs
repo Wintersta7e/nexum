@@ -5,6 +5,8 @@ use std::process::ExitCode;
 use clap::{Args, Subcommand};
 use nexum_core::api::{self, TamperingRow};
 
+const RECOGNIZED_CODES: &[&str] = &["pre-recovery-record", "chain-anchor-lost"];
+
 #[derive(Subcommand, Debug)]
 pub enum TrustCommand {
     /// Force a materializer rebuild and surface any detected tampering of
@@ -16,6 +18,10 @@ pub enum TrustCommand {
     /// stage them in a signed commit. No-op when already consistent.
     /// Refuses on in-progress merge or pending reanchor.
     RegenerateFiles(RegenerateFilesArgs),
+
+    /// Suppress `pre-recovery-record` / `chain-anchor-lost` warnings
+    /// from subsequent doctor runs.
+    DismissPreRecoveryWarning(DismissArgs),
 }
 
 #[derive(Args, Debug)]
@@ -33,10 +39,24 @@ pub struct RegenerateFilesArgs {
     pub json: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct DismissArgs {
+    /// Warning code to acknowledge. Repeatable. Accepts
+    /// `pre-recovery-record` and `chain-anchor-lost`. When unspecified,
+    /// both codes are acked.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub code: Vec<String>,
+
+    /// Emit a structured JSON envelope to stdout.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 pub fn run(cmd: &TrustCommand) -> ExitCode {
     match cmd {
         TrustCommand::ValidateEvents(args) => run_validate_events(args),
         TrustCommand::RegenerateFiles(args) => run_regenerate_files(args),
+        TrustCommand::DismissPreRecoveryWarning(args) => run_dismiss(args),
     }
 }
 
@@ -89,21 +109,101 @@ fn run_regenerate_files(args: &RegenerateFilesArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => {
-            // Inline routing rather than super::json_emit::route_api_error:
-            // that helper's prose path is read-verb-shaped (it hints "rerun
-            // nexum index" on MigrationRequired etc.), which would mislead
-            // operators of this admin write verb. JSON mode is identical;
-            // prose mode just prints the envelope message and maps the code.
-            let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
-            let code = super::exit_codes::for_envelope(&env);
+        // Route via render_error rather than super::json_emit::route_api_error:
+        // that helper's prose path is read-verb-shaped (it hints "rerun nexum
+        // index" on MigrationRequired etc.), which would mislead operators of
+        // this admin write verb.
+        Err(e) => render_error(&e, args.json),
+    }
+}
+
+fn run_dismiss(args: &DismissArgs) -> ExitCode {
+    let (paths, _cfg) = match super::common::resolve_runtime(args.json) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+
+    // Validate supplied codes against the recognized set. Default to both
+    // codes when none supplied.
+    let codes: Vec<String> = if args.code.is_empty() {
+        RECOGNIZED_CODES.iter().map(|s| (*s).to_owned()).collect()
+    } else {
+        let unknown: Vec<&String> = args
+            .code
+            .iter()
+            .filter(|c| !RECOGNIZED_CODES.contains(&c.as_str()))
+            .collect();
+        if !unknown.is_empty() {
+            let env = nexum_core::api::error::ErrorEnvelope {
+                error_code: nexum_core::api::error::error_codes::USAGE,
+                message: format!(
+                    "unknown warning code(s): {}; recognized: {}",
+                    unknown
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    RECOGNIZED_CODES.join(", ")
+                ),
+                remediation: Some(nexum_core::api::error::Remediation {
+                    command: None,
+                    rationale: format!(
+                        "Accepted codes are: {}. Re-run with one of those.",
+                        RECOGNIZED_CODES.join(", ")
+                    ),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "dismiss",
+                    "unknown_codes": unknown,
+                }),
+            };
             if args.json {
-                super::json_emit::emit_error(&env, code)
-            } else {
-                eprintln!("error: {}", env.message);
-                ExitCode::from(code)
+                return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
             }
+            eprintln!("error: {}", env.message);
+            return ExitCode::from(super::exit_codes::USAGE);
         }
+        args.code.clone()
+    };
+
+    match api::dismiss_pre_recovery_warning(&paths, &codes) {
+        Ok(outcome) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "kind": "trust.dismiss_pre_recovery_warning.completed",
+                        "added": outcome.added,
+                        "already_present": outcome.already_present,
+                        "total": outcome.total,
+                    })
+                );
+            } else {
+                if outcome.added.is_empty() {
+                    println!("no new codes acked (all already present)");
+                } else {
+                    println!("acked: {}", outcome.added.join(", "));
+                }
+                if !outcome.already_present.is_empty() {
+                    println!("already present: {}", outcome.already_present.join(", "));
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => render_error(&e, args.json),
+    }
+}
+
+fn render_error(e: &nexum_core::api::ApiError, json: bool) -> ExitCode {
+    let env: nexum_core::api::error::ErrorEnvelope = e.into();
+    let code = super::exit_codes::for_envelope(&env);
+    if json {
+        super::json_emit::emit_error(&env, code)
+    } else {
+        eprintln!("error: {}", env.message);
+        ExitCode::from(code)
     }
 }
 

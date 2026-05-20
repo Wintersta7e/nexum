@@ -71,6 +71,56 @@ pub enum ApiError {
     Trust(crate::trust::events::TrustError),
     #[error(transparent)]
     Extraction(#[from] crate::extract::model::ExtractError),
+    /// Another nexum process holds the global mutation lock. Maps to
+    /// exit code 7 (`Error::Concurrent`).
+    #[error("another nexum process holds the writer lock at {lock_path}")]
+    Concurrent { lock_path: std::path::PathBuf },
+    /// `nexum keys recover` refused because the caller did not pass
+    /// `--acknowledge-chain-break`.
+    #[error("recovery requires explicit chain-break acknowledgement")]
+    KeysRecoverChainBreakNotAcknowledged,
+    /// `nexum keys recover` refused (Case A) because the bootstrap pin file
+    /// is missing or unreadable.
+    #[error(
+        "Case A reanchor requires an intact bootstrap pin; \
+         pin file missing or unreadable at {path}"
+    )]
+    KeysRecoverPinMissingForCaseA { path: std::path::PathBuf },
+    /// `nexum keys recover` refused (Case A) because the pin file's
+    /// fingerprint doesn't match the chain's current bootstrap.
+    #[error(
+        "Case A pin fingerprint {found} doesn't match the chain's \
+         current bootstrap {expected}; run `nexum doctor` to investigate"
+    )]
+    KeysRecoverPinMismatchForCaseA { expected: String, found: String },
+    /// `nexum keys recover` refused because a sentinel is already present.
+    #[error(
+        "a pending reanchor is in progress (sentinel at {sentinel_path}); \
+         resolve it via `nexum doctor --resolve-pending-reanchor` first"
+    )]
+    KeysRecoverInProgress { sentinel_path: std::path::PathBuf },
+    /// `nexum keys recover` refused because the new key is already in
+    /// `events.yml`.
+    #[error(
+        "new key fingerprint {fingerprint} already appears in events.yml; \
+         supply a key that has never been added to this notebook"
+    )]
+    KeysRecoverNewKeyAlreadyKnown { fingerprint: String },
+    /// The ssh-agent was unavailable when `keys recover` tried to sign the
+    /// reanchor commit with the new key.
+    #[error("ssh-agent unavailable; load the new key first")]
+    KeysRecoverAgentUnavailable { fingerprint: String },
+    /// `nexum keys recover` encountered a failure after writing the sentinel.
+    #[error("recovery failed mid-flight: {stderr}")]
+    KeysRecoverFailed { stderr: String },
+    /// `~/.nexum/state/trust_warnings_acked.json` exists but contains
+    /// invalid JSON. The file is not overwritten; the operator must inspect
+    /// or delete it before acking new warnings.
+    #[error("trust warnings ack file at {path} is malformed: {reason}")]
+    PreRecoveryAckFileMalformed {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -114,19 +164,29 @@ pub(crate) fn with_writer_lock<T>(
 ) -> Result<T, ApiError> {
     use fs2::FileExt as _;
 
-    let lock_io_err = |e: std::io::Error| {
-        ApiError::Indexer(IndexerError::Io {
-            path: paths.lock.clone(),
-            source: e,
-        })
-    };
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(&paths.lock)
-        .map_err(lock_io_err)?;
-    lock_file.try_lock_exclusive().map_err(lock_io_err)?;
+        .map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        })?;
+    lock_file.try_lock_exclusive().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            ApiError::Concurrent {
+                lock_path: paths.lock.clone(),
+            }
+        } else {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.lock.clone(),
+                source: e,
+            })
+        }
+    })?;
 
     let result = body();
     if let Err(unlock_err) = lock_file.unlock() {
@@ -1199,6 +1259,570 @@ pub fn keys_revoke(
     })
 }
 
+/// Case discriminator for `nexum keys recover`.
+///
+/// - `A`: the old key is structurally intact (key file exists, can be
+///   presented to the agent) but the operator wants to rotate to a new
+///   bootstrap. The old key still signs the reanchor commit.
+/// - `B`: the old key is irretrievably lost (stolen, deleted, or corrupted).
+///   The new key signs the reanchor commit; agents must acknowledge the
+///   resulting chain-break via `--acknowledge-chain-break`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecoverCase {
+    A,
+    B,
+}
+
+/// Outcome of a successful `nexum keys recover` invocation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KeysRecoverOutcome {
+    /// The old bootstrap fingerprint that was reanchored away from.
+    pub old_fingerprint: String,
+    /// The new bootstrap fingerprint that is now active.
+    pub new_fingerprint: String,
+    /// Case discriminator (`A` = old key still available, `B` = old key lost).
+    pub case: RecoverCase,
+    /// SHA of the signed reanchor commit.
+    pub commit: String,
+    /// Bare file names that were staged and committed (`events.yml` +
+    /// regenerated signer files).
+    pub regenerated_files: Vec<String>,
+}
+
+/// Repo-relative trust file paths touched by the reanchor flow.
+///
+/// Shared by `keys_recover`'s preflight + rollback path and by the
+/// `Init+Revert` arm of `resolve_pending_reanchor` so both surfaces restore
+/// the same file set from HEAD.
+const REANCHOR_TRUST_FILES: &[&str] = &[
+    ".trust/events.yml",
+    ".trust/historical_signers",
+    ".trust/allowed_signers",
+    ".trust/revoked_signers",
+];
+
+/// Restore the four reanchor trust files (`events.yml` + the three signer
+/// allow/historical/revoked lists) from HEAD. Errors from `git checkout` are
+/// silently ignored — callers use this on rollback paths where the operator
+/// is already being shown a primary error.
+fn restore_reanchor_trust_files(notebook_git: &std::path::Path) {
+    let pbs: Vec<std::path::PathBuf> = REANCHOR_TRUST_FILES
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let refs: Vec<&std::path::Path> = pbs.iter().map(std::path::PathBuf::as_path).collect();
+    let _ = restore_paths_from_head(notebook_git, &refs);
+}
+
+/// Restore (or unset) `user.signingkey` in the notebook repo. Errors are
+/// silently ignored — used only on rollback paths.
+fn restore_signingkey(notebook_git: &std::path::Path, prior_signingkey: Option<&str>) {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(notebook_git);
+    match prior_signingkey {
+        Some(prior) => cmd.args(["config", "--local", "user.signingkey", prior]),
+        None => cmd.args(["config", "--local", "--unset", "user.signingkey"]),
+    };
+    let _ = cmd.status();
+}
+
+/// Rollback helper for `keys_recover`: restore trust files from HEAD,
+/// optionally restore `user.signingkey`, and delete the sentinel.
+///
+/// Errors from individual rollback steps are silently ignored because the
+/// caller is already returning an error; the best we can do is attempt
+/// every cleanup step in order and leave the sentinel for
+/// `doctor --resolve-pending-reanchor --revert` to finish.
+fn recover_rollback(paths: &Paths, prior_signingkey: Option<&str>) {
+    restore_reanchor_trust_files(&paths.notebook_git);
+    restore_signingkey(&paths.notebook_git, prior_signingkey);
+    let _ = crate::trust::reanchor_pending::delete_sentinel(&paths.home);
+}
+
+/// Append a `BootstrapReanchor` event for a lost or replaced bootstrap key,
+/// sign the reanchor commit with the new key, update the bootstrap pin and
+/// `user.signingkey`, and transition the `.reanchor_pending` sentinel
+/// through its phases. The signer rule matches the materializer's reanchor
+/// authorization (commit must be signed by `new_fingerprint`); both cases
+/// swap `user.signingkey` before signing. Case A vs Case B differs only in
+/// the preflight (pin-match vs operator acknowledgement) and in the event
+/// payload's `acknowledge_chain_anchor_lost` flag.
+///
+/// # Errors
+///
+/// - `ApiError::KeysRecoverChainBreakNotAcknowledged` if `acknowledge_chain_break`
+///   is `false` (required for both cases as a guard against accidental invocation).
+/// - `ApiError::KeysRecoverInProgress` if `.reanchor_pending` already exists.
+/// - `ApiError::Trust(TrustError::DuplicateKey)` if the new key fingerprint
+///   is already in `events.yml` in any role.
+/// - `ApiError::KeysRecoverPinMissingForCaseA` / `ApiError::KeysRecoverPinMismatchForCaseA`
+///   for Case A pin disagreement.
+/// - `ApiError::TrustRegenerateRefused` on in-progress merge detection.
+/// - `ApiError::TrustRegenerateFailed` on commit or verify failure with
+///   rollback applied.
+/// - `ApiError::KeysRecoverAgentUnavailable` if the ssh-agent is unreachable.
+/// - `ApiError::KeysRecoverFailed` on other mid-flight failures.
+// Straight-line admin verb. The sentinel state machine + preflights + git ops
+// make this inherently long; splitting into sub-functions would hide the
+// ordering that is load-bearing for the trust-chain invariant.
+#[allow(clippy::too_many_lines)]
+pub fn keys_recover(
+    paths: &Paths,
+    cfg: &Config,
+    new_key_path: &std::path::Path,
+    case: RecoverCase,
+    reason: &str,
+    acknowledge_chain_break: bool,
+) -> Result<KeysRecoverOutcome, ApiError> {
+    // cfg is threaded for future preflight policy; current preflights read
+    // trust state directly from disk.
+    let _ = cfg;
+    with_writer_lock(paths, || {
+        use crate::init::git_ops::VerifyExit;
+
+        // Preflight 1: refuse if an in-progress merge is detected.
+        let merge_head = paths.notebook_git.join(".git/MERGE_HEAD");
+        if merge_head.exists() {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: "in-progress merge detected; abort or complete it first".into(),
+            });
+        }
+
+        // Preflight 2: refuse if a sentinel already exists (another recovery
+        // or an abandoned mid-flight run is in progress).
+        let sentinel_path = paths.home.join(".reanchor_pending");
+        if sentinel_path.exists() {
+            return Err(ApiError::KeysRecoverInProgress { sentinel_path });
+        }
+
+        // Preflight 3: acknowledge_chain_break must be true for both cases.
+        if !acknowledge_chain_break {
+            return Err(ApiError::KeysRecoverChainBreakNotAcknowledged);
+        }
+
+        // Preflight 4: read the new key's public-key blob and fingerprint.
+        let pub_path = crate::ssh_key::pub_path_for(new_key_path);
+        let new_pubkey = std::fs::read_to_string(&pub_path)
+            .map_err(|e| {
+                ApiError::Indexer(IndexerError::Io {
+                    path: pub_path.clone(),
+                    source: e,
+                })
+            })?
+            .trim()
+            .to_owned();
+        let new_fp = crate::ssh_key::compute_fingerprint(&new_pubkey).map_err(|e| {
+            ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "could not compute SSH fingerprint of {}: {e}",
+                    pub_path.display()
+                ),
+            }
+        })?;
+
+        // Preflight 5: new fingerprint must NOT already be in events.yml.
+        let events_yml = paths.notebook_git.join(".trust/events.yml");
+        let event_log =
+            crate::trust::events::load_events_yml(&events_yml).map_err(ApiError::Trust)?;
+        let already_known = event_log.events.iter().any(|e| {
+            use crate::trust::events::EventKind;
+            match &e.payload {
+                EventKind::BootstrapKey { fingerprint, .. }
+                | EventKind::KeyAdded { fingerprint, .. } => fingerprint == &new_fp,
+                EventKind::BootstrapReanchor {
+                    new_fingerprint, ..
+                } => new_fingerprint == &new_fp,
+                _ => false,
+            }
+        });
+        if already_known {
+            return Err(ApiError::KeysRecoverNewKeyAlreadyKnown {
+                fingerprint: new_fp.clone(),
+            });
+        }
+
+        // Compute current bootstrap fingerprint for Case A pin check and
+        // the reanchor event's old_fingerprint field.
+        let current_bootstrap = event_log
+            .events
+            .iter()
+            .rev()
+            .find_map(|e| {
+                use crate::trust::events::EventKind;
+                match &e.payload {
+                    EventKind::BootstrapKey { fingerprint, .. } => Some(fingerprint.clone()),
+                    EventKind::BootstrapReanchor {
+                        new_fingerprint, ..
+                    } => Some(new_fingerprint.clone()),
+                    _ => None,
+                }
+            })
+            .unwrap_or_default();
+
+        // Preflight 6 (Case A only): bootstrap pin must exist and match the
+        // chain's current bootstrap fingerprint.
+        if case == RecoverCase::A {
+            let pin_path = paths.home.join(".bootstrap-fingerprint");
+            match std::fs::read_to_string(&pin_path) {
+                Err(_) => {
+                    return Err(ApiError::KeysRecoverPinMissingForCaseA { path: pin_path });
+                }
+                Ok(pin_contents) => {
+                    let pin_fp = pin_contents.trim().to_owned();
+                    if pin_fp != current_bootstrap {
+                        return Err(ApiError::KeysRecoverPinMismatchForCaseA {
+                            expected: current_bootstrap.clone(),
+                            found: pin_fp,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Preflight 7: refuse if the operator has uncommitted changes outside
+        // the trust file set; rollback paths must not destroy unrelated work.
+        let trust_file_pbs: Vec<std::path::PathBuf> = REANCHOR_TRUST_FILES
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
+        let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+        refuse_if_unrelated_dirty(&paths.notebook_git, &trust_file_refs)?;
+
+        // Snapshot the current user.signingkey so the sentinel and rollback
+        // path can restore it on failure.
+        let prior_signingkey: Option<String> = std::process::Command::new("git")
+            .args(["config", "--local", "user.signingkey"])
+            .current_dir(&paths.notebook_git)
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                } else {
+                    None
+                }
+            });
+
+        // Write Init sentinel before any file mutation.
+        let reanchor_case = match case {
+            RecoverCase::A => crate::trust::reanchor_pending::Case::A,
+            RecoverCase::B => crate::trust::reanchor_pending::Case::B,
+        };
+        // Case A: record the old bootstrap fp so doctor --revert can restore
+        // it. Case B: no recoverable old fp (key is lost).
+        let old_pin_fp_opt = match case {
+            RecoverCase::A => Some(current_bootstrap.as_str()),
+            RecoverCase::B => None,
+        };
+        crate::trust::reanchor_pending::write_sentinel(
+            &paths.home,
+            reanchor_case,
+            old_pin_fp_opt,
+            &new_fp,
+            &new_pubkey,
+            prior_signingkey.as_deref(),
+        )
+        .map_err(ApiError::Trust)?;
+
+        // Append BootstrapReanchor event + regenerate signer files. The
+        // event-payload flag `acknowledge_chain_anchor_lost` records the
+        // *case* (Case B implies the pin was lost, so pre-reanchor records
+        // become unverifiable). The `acknowledge_chain_break` API parameter
+        // is a separate preflight gate covering both cases and is checked
+        // above.
+        let trust_dir = paths.notebook_git.join(".trust");
+        let reanchor_inputs = crate::trust::recover::ReanchorInputs {
+            old_fingerprint: current_bootstrap.clone(),
+            new_fingerprint: new_fp.clone(),
+            new_public_key: new_pubkey.clone(),
+            acknowledge_chain_anchor_lost: case == RecoverCase::B,
+        };
+        let touched = match crate::trust::recover::append_bootstrap_reanchor(
+            &events_yml,
+            &trust_dir,
+            &reanchor_inputs,
+            reason,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                recover_rollback(paths, prior_signingkey.as_deref());
+                return Err(ApiError::Trust(e));
+            }
+        };
+
+        // Both cases: swap `user.signingkey` to the new key BEFORE signing.
+        // The materializer's reanchor authorization rule requires the commit
+        // to be signed by `new_fingerprint`; signing with the old key (even
+        // when it is still available, as in Case A) freezes the chain on the
+        // next read-time projection.
+        let outcome = std::process::Command::new("git")
+            .args([
+                "config",
+                "--local",
+                "user.signingkey",
+                &new_key_path.display().to_string(),
+            ])
+            .current_dir(&paths.notebook_git)
+            .status();
+        if outcome.map_or(true, |s| !s.success()) {
+            recover_rollback(paths, prior_signingkey.as_deref());
+            return Err(ApiError::KeysRecoverFailed {
+                stderr: "failed to update user.signingkey to new key".into(),
+            });
+        }
+
+        // Stage + sign the reanchor commit.
+        let staged_pathbufs: Vec<std::path::PathBuf> = touched
+            .iter()
+            .map(|name| std::path::PathBuf::from(format!(".trust/{name}")))
+            .collect();
+        let staged_refs: Vec<&std::path::Path> = staged_pathbufs
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .collect();
+
+        let body = new_fp
+            .split(':')
+            .next_back()
+            .unwrap_or(&new_fp)
+            .trim_end_matches('=');
+        let short = body.get(body.len().saturating_sub(12)..).unwrap_or(body);
+        let commit_msg = format!("trust: reanchor bootstrap to {short}");
+
+        let commit = match crate::init::git_ops::git_commit_signed(
+            &paths.notebook_git,
+            &staged_refs,
+            &commit_msg,
+        ) {
+            Ok(sha) => sha,
+            Err(commit_err) => {
+                let stderr = commit_err.to_string();
+                recover_rollback(paths, prior_signingkey.as_deref());
+                // Detect ssh-agent absence from the git error message.
+                if stderr.to_lowercase().contains("agent") {
+                    return Err(ApiError::KeysRecoverAgentUnavailable {
+                        fingerprint: new_fp,
+                    });
+                }
+                return Err(ApiError::KeysRecoverFailed { stderr });
+            }
+        };
+
+        // Advance sentinel to EventsCommitted.
+        if let Err(e) = crate::trust::reanchor_pending::update_sentinel_phase(
+            &paths.home,
+            crate::trust::reanchor_pending::Phase::EventsCommitted,
+        ) {
+            // Sentinel advance failed; the commit already landed. Leave the
+            // sentinel at Init so doctor --resolve-pending-reanchor --continue
+            // can detect the drift and apply the pin. Surface as KeysRecoverFailed
+            // so the caller can prompt the operator.
+            return Err(ApiError::KeysRecoverFailed {
+                stderr: format!("sentinel phase advance failed: {e}"),
+            });
+        }
+
+        // Verify the reanchor commit against historical_signers.
+        let historical = paths.notebook_git.join(".trust/historical_signers");
+        let verify_outcome = match crate::init::git_ops::git_verify_commit_outcome(
+            &paths.notebook_git,
+            "HEAD",
+            &historical,
+        ) {
+            Ok(o) => o,
+            Err(verify_err) => {
+                let _ = rollback_last_commit(&paths.notebook_git);
+                recover_rollback(paths, prior_signingkey.as_deref());
+                return Err(ApiError::KeysRecoverFailed {
+                    stderr: verify_err.to_string(),
+                });
+            }
+        };
+
+        if verify_outcome.exit != VerifyExit::Good {
+            let _ = rollback_last_commit(&paths.notebook_git);
+            recover_rollback(paths, prior_signingkey.as_deref());
+            return Err(ApiError::KeysRecoverFailed {
+                stderr: format!(
+                    "reanchor commit signature verification failed: {:?}",
+                    verify_outcome.exit
+                ),
+            });
+        }
+
+        // The materializer's reanchor authorization (events_view.rs) accepts
+        // only commits signed by `new_fingerprint`; reject anything else
+        // before the chain rebuild would.
+        if let Some(signer_fp) = &verify_outcome.signer_fingerprint
+            && signer_fp != &new_fp
+        {
+            let stderr = format!("signer fingerprint {signer_fp} does not match expected {new_fp}");
+            let _ = rollback_last_commit(&paths.notebook_git);
+            recover_rollback(paths, prior_signingkey.as_deref());
+            return Err(ApiError::KeysRecoverFailed { stderr });
+        }
+
+        // Write the new bootstrap pin to config.toml and the pin cache.
+        let mut cfg_local = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+        new_fp.clone_into(&mut cfg_local.trust.bootstrap.fingerprint);
+        new_pubkey.clone_into(&mut cfg_local.trust.bootstrap.public_key);
+        crate::config::save(&paths.config, &cfg_local).map_err(ApiError::Config)?;
+        std::fs::write(&paths.bootstrap_pin, new_fp.as_bytes()).map_err(|e| {
+            ApiError::Indexer(IndexerError::Io {
+                path: paths.bootstrap_pin.clone(),
+                source: e,
+            })
+        })?;
+
+        // Advance sentinel to PinUpdated, then delete it.
+        let _ = crate::trust::reanchor_pending::update_sentinel_phase(
+            &paths.home,
+            crate::trust::reanchor_pending::Phase::PinUpdated,
+        );
+        crate::trust::reanchor_pending::delete_sentinel(&paths.home).map_err(ApiError::Trust)?;
+
+        Ok(KeysRecoverOutcome {
+            old_fingerprint: current_bootstrap,
+            new_fingerprint: new_fp,
+            case,
+            commit,
+            regenerated_files: touched,
+        })
+    })
+}
+
+// ───── Pre-recovery warning ack helpers ─────────────────────────────────────
+
+/// Persisted shape of `~/.nexum/state/trust_warnings_acked.json`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct TrustWarningsAcked {
+    #[serde(default)]
+    acked_codes: Vec<String>,
+    #[serde(default)]
+    acked_at: std::collections::BTreeMap<String, String>,
+}
+
+/// Outcome of `nexum trust dismiss-pre-recovery-warning`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DismissOutcome {
+    /// Codes that were newly added by this call.
+    pub added: Vec<String>,
+    /// Codes that were already present and left unchanged.
+    pub already_present: Vec<String>,
+    /// All acked codes after this call (sorted).
+    pub total: Vec<String>,
+}
+
+/// Append warning codes to `~/.nexum/state/trust_warnings_acked.json`,
+/// creating the state directory and file on first invocation.
+///
+/// # Errors
+///
+/// `ApiError::PreRecoveryAckFileMalformed` if the file exists but is not
+/// valid JSON. `ApiError::Indexer(IndexerError::Io)` on filesystem
+/// failures. `ApiError::Concurrent` if the writer lock is held by another
+/// process.
+pub fn dismiss_pre_recovery_warning(
+    paths: &Paths,
+    codes: &[String],
+) -> Result<DismissOutcome, ApiError> {
+    // Read-modify-write under the writer lock so concurrent dismiss
+    // calls cannot lost-update each other.
+    with_writer_lock(paths, || {
+        let mut state = read_acked_state(paths)?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        let mut added = Vec::new();
+        let mut already_present = Vec::new();
+        for code in codes {
+            if state.acked_codes.contains(code) {
+                already_present.push(code.clone());
+            } else {
+                state.acked_codes.push(code.clone());
+                state.acked_at.insert(code.clone(), now.clone());
+                added.push(code.clone());
+            }
+        }
+
+        if !added.is_empty() {
+            write_acked_state(paths, &state)?;
+        }
+
+        state.acked_codes.sort();
+        Ok(DismissOutcome {
+            added,
+            already_present,
+            total: state.acked_codes,
+        })
+    })
+}
+
+/// Read the current list of acked warning codes.
+///
+/// # Errors
+///
+/// `ApiError::PreRecoveryAckFileMalformed` if the file exists but is not
+/// valid JSON. `ApiError::Indexer(IndexerError::Io)` on other read failures.
+pub fn list_pre_recovery_acks(paths: &Paths) -> Result<Vec<String>, ApiError> {
+    let state = read_acked_state(paths)?;
+    Ok(state.acked_codes)
+}
+
+fn read_acked_state(paths: &Paths) -> Result<TrustWarningsAcked, ApiError> {
+    match std::fs::read_to_string(&paths.trust_warnings_acked) {
+        Ok(raw) => serde_json::from_str(&raw).map_err(|e| ApiError::PreRecoveryAckFileMalformed {
+            path: paths.trust_warnings_acked.clone(),
+            reason: e.to_string(),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TrustWarningsAcked::default()),
+        Err(e) => Err(ApiError::Indexer(IndexerError::Io {
+            path: paths.trust_warnings_acked.clone(),
+            source: e,
+        })),
+    }
+}
+
+fn write_acked_state(paths: &Paths, state: &TrustWarningsAcked) -> Result<(), ApiError> {
+    let parent = paths.trust_warnings_acked.parent().ok_or_else(|| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.trust_warnings_acked.clone(),
+            source: std::io::Error::other("no parent dir"),
+        })
+    })?;
+    std::fs::create_dir_all(parent).map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: parent.to_path_buf(),
+            source: e,
+        })
+    })?;
+
+    let json =
+        serde_json::to_string_pretty(state).map_err(|e| ApiError::PreRecoveryAckFileMalformed {
+            path: paths.trust_warnings_acked.clone(),
+            reason: format!("serialize: {e}"),
+        })?;
+
+    // Atomic write: temp file in same directory, then rename into place.
+    let tmp = paths.trust_warnings_acked.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: tmp.clone(),
+            source: e,
+        })
+    })?;
+    std::fs::rename(&tmp, &paths.trust_warnings_acked).map_err(|e| {
+        ApiError::Indexer(IndexerError::Io {
+            path: paths.trust_warnings_acked.clone(),
+            source: e,
+        })
+    })?;
+    Ok(())
+}
+
 /// Open the index DB and prime the trust-events view for a read verb.
 ///
 /// Read verbs share two preconditions: the DB must already exist
@@ -1209,6 +1833,13 @@ pub fn keys_revoke(
 /// Centralizing both steps so a future read verb cannot land without
 /// either.
 fn open_for_query(paths: &Paths) -> Result<rusqlite::Connection, ApiError> {
+    // Per-call refusal: a concurrent keys_recover may have written
+    // `.reanchor_pending` since this process's session.startup ran.
+    // Refuse here so the read cannot observe partial chain state. The
+    // session-startup check handles the "sentinel present at startup" case;
+    // this check handles the "sentinel appeared mid-session" case.
+    crate::trust::reanchor_pending::check(&paths.home).map_err(ApiError::Trust)?;
+
     let mut conn = open_existing_writable(&paths.index_db)?;
     crate::trust::events_view::ensure_current(&mut conn, &paths.notebook_git)?;
     Ok(conn)
@@ -1617,6 +2248,69 @@ pub enum ReanchorResolveOutcome {
     },
 }
 
+/// Returns `true` if the committed `.trust/events.yml` blob at HEAD ends
+/// with a `BootstrapReanchor` event whose `new_fingerprint` equals
+/// `expected_new_fp`. Used by the doctor `--resolve-pending-reanchor`
+/// path to detect "commit landed but sentinel transition missed" drift.
+///
+/// Reads the HEAD blob via `git show HEAD:.trust/events.yml`, NOT the
+/// working-tree file: if recovery crashed after writing the working tree
+/// but before the signed commit landed, an uncommitted reanchor event
+/// must not be mistaken for a committed one (else `--continue` could
+/// write the pin without a signed commit and `--revert` could refuse).
+///
+/// Returns `false` on any read or parse failure — no committed events.yml
+/// means no reanchor commit exists.
+fn head_carries_matching_reanchor(notebook_git: &std::path::Path, expected_new_fp: &str) -> bool {
+    let Ok(output) = std::process::Command::new("git")
+        .args(["show", "HEAD:.trust/events.yml"])
+        .current_dir(notebook_git)
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(log) = serde_yaml::from_slice::<crate::trust::events::EventLog>(&output.stdout) else {
+        return false;
+    };
+    log.events.last().is_some_and(|e| {
+        matches!(&e.payload,
+            crate::trust::events::EventKind::BootstrapReanchor { new_fingerprint, .. }
+                if new_fingerprint == expected_new_fp
+        )
+    })
+}
+
+/// Apply the pin write (`config.toml` + `bootstrap_pin` cache) from a sentinel
+/// whose reanchor commit is confirmed on HEAD. Called by both the
+/// `EventsCommitted+Continue` arm and the `Init+Continue` drift-elevated path.
+fn apply_events_committed_continue(
+    sentinel: &crate::trust::reanchor_pending::ReanchorPending,
+    paths: &Paths,
+) -> Result<ReanchorResolveOutcome, ApiError> {
+    use crate::trust::reanchor_pending::delete_sentinel;
+    let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
+    sentinel
+        .new_pin_fp()
+        .clone_into(&mut cfg.trust.bootstrap.fingerprint);
+    sentinel
+        .new_pubkey()
+        .clone_into(&mut cfg.trust.bootstrap.public_key);
+    crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
+    std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(|e| {
+        ApiError::Indexer(crate::indexer::db::IndexerError::Io {
+            path: paths.bootstrap_pin.clone(),
+            source: e,
+        })
+    })?;
+    delete_sentinel(&paths.home)?;
+    Ok(ReanchorResolveOutcome::Resolved {
+        from_phase: "events_committed".into(),
+    })
+}
+
 /// Inspect `~/.nexum/.reanchor_pending` and apply the sentinel cleanup per the
 /// documented phases.
 ///
@@ -1639,6 +2333,10 @@ pub enum ReanchorResolveOutcome {
 /// (only the `events_committed + Continue` branch).
 /// Returns `ApiError::Indexer(IndexerError::Io)` when writing the bootstrap
 /// pin cache file fails (same branch).
+// Straight-line sentinel dispatch: each (phase, mode) arm is a short
+// block; keeping them inline makes the state-machine transitions readable
+// without helper indirection obscuring the ordering.
+#[allow(clippy::too_many_lines)]
 pub fn resolve_pending_reanchor(
     paths: &Paths,
     mode: Option<ReanchorResolveMode>,
@@ -1657,40 +2355,56 @@ pub fn resolve_pending_reanchor(
 
         match (phase, mode) {
             (Phase::Init, Some(ReanchorResolveMode::Revert)) => {
+                // Check for drift: if the reanchor commit already landed on
+                // HEAD but the sentinel phase was never advanced, --revert
+                // would orphan a live chain event. Refuse rather than silently
+                // destroying it.
+                let head_match = head_carries_matching_reanchor(
+                    &paths.notebook_git,
+                    sentinel.new_pin_fp(),
+                );
+                if head_match {
+                    return Ok(ReanchorResolveOutcome::Refused {
+                        phase: "init".into(),
+                        reason: "the reanchor commit is already on HEAD (sentinel transition \
+                                 was missed); re-run with --continue to write the pin, OR \
+                                 `git -C notebook.git reset --hard HEAD~1` then --revert"
+                            .into(),
+                    });
+                }
+                // Safe to revert: no commit on HEAD. Restore trust files +
+                // signingkey via the shared rollback helpers, then signal any
+                // sentinel-delete failure (recover_rollback swallows it on
+                // error-path uses; the resolver needs to propagate it here).
+                restore_reanchor_trust_files(&paths.notebook_git);
+                restore_signingkey(&paths.notebook_git, sentinel.prior_signingkey());
                 delete_sentinel(&paths.home)?;
                 Ok(ReanchorResolveOutcome::Resolved {
                     from_phase: "init".into(),
                 })
             }
             (Phase::Init, Some(ReanchorResolveMode::Continue)) => {
-                Ok(ReanchorResolveOutcome::Refused {
-                    phase: "init".into(),
-                    reason: "this release only supports cleanup of `pin_updated` and `--revert` of `init`; \
-                             phase=init recovery requires the keys-recover command (not yet available)"
-                        .into(),
-                })
+                // Check for drift: if the reanchor commit is on HEAD but the
+                // sentinel never advanced past Init, act as EventsCommitted.
+                let head_match = head_carries_matching_reanchor(
+                    &paths.notebook_git,
+                    sentinel.new_pin_fp(),
+                );
+                if !head_match {
+                    return Ok(ReanchorResolveOutcome::Refused {
+                        phase: "init".into(),
+                        reason: "no signed reanchor commit on HEAD; --continue is only valid \
+                                 after the commit lands. Run `nexum keys recover` to start a \
+                                 new recovery, OR --revert to clean up the sentinel."
+                            .into(),
+                    });
+                }
+                // Drift-elevated: commit landed but sentinel phase was not
+                // advanced. Apply the same pin-write step as EventsCommitted.
+                apply_events_committed_continue(&sentinel, paths)
             }
             (Phase::EventsCommitted, Some(ReanchorResolveMode::Continue)) => {
-                let mut cfg = crate::config::load(&paths.config).map_err(ApiError::Config)?;
-                sentinel
-                    .new_pin_fp()
-                    .clone_into(&mut cfg.trust.bootstrap.fingerprint);
-                sentinel
-                    .new_pubkey()
-                    .clone_into(&mut cfg.trust.bootstrap.public_key);
-                crate::config::save(&paths.config, &cfg).map_err(ApiError::Config)?;
-                std::fs::write(&paths.bootstrap_pin, sentinel.new_pin_fp().as_bytes()).map_err(
-                    |e| {
-                        ApiError::Indexer(crate::indexer::db::IndexerError::Io {
-                            path: paths.bootstrap_pin.clone(),
-                            source: e,
-                        })
-                    },
-                )?;
-                delete_sentinel(&paths.home)?;
-                Ok(ReanchorResolveOutcome::Resolved {
-                    from_phase: "events_committed".into(),
-                })
+                apply_events_committed_continue(&sentinel, paths)
             }
             (Phase::EventsCommitted, Some(ReanchorResolveMode::Revert)) => {
                 Ok(ReanchorResolveOutcome::Refused {
@@ -2130,6 +2844,52 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let paths = Paths::with_home(dir.path().to_owned());
         (dir, paths)
+    }
+
+    #[test]
+    fn with_writer_lock_returns_concurrent_when_lock_held() {
+        let (dir, paths) = paths_with_temp_home();
+
+        // Acquire the lock from this thread so the second attempt WouldBlock.
+        let f = std::fs::File::create(&paths.lock).unwrap();
+        fs2::FileExt::try_lock_exclusive(&f).unwrap();
+
+        let result = with_writer_lock(&paths, || Ok::<_, ApiError>(()));
+        drop(f);
+        drop(dir);
+        assert!(
+            matches!(result, Err(ApiError::Concurrent { .. })),
+            "expected Concurrent when lock is held, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn open_for_query_refuses_when_sentinel_present_after_startup() {
+        // The session-startup path (resolve_runtime) catches a sentinel at
+        // session entry; this test verifies the per-call check in
+        // open_for_query catches a sentinel that appears AFTER startup.
+        let (dir, paths) = paths_with_temp_home();
+        // Create a valid index so the db-open step would succeed without
+        // the sentinel — the refusal must come from the sentinel check.
+        let _ = open_or_create(&paths.index_db).unwrap();
+        // Write a well-formed sentinel.
+        std::fs::write(
+            dir.path().join(".reanchor_pending"),
+            r#"{"case":"A","old_pin_fp":"SHA256:old","new_pin_fp":"SHA256:new",
+               "new_pubkey":"ssh-ed25519 AAAA","started_at":"2026-05-01T00:00:00Z",
+               "phase_completed":"init"}"#,
+        )
+        .unwrap();
+        let result = open_for_query(&paths);
+        assert!(
+            matches!(
+                result,
+                Err(ApiError::Trust(
+                    crate::trust::events::TrustError::ReanchorPending { .. }
+                ))
+            ),
+            "expected ReanchorPending from per-call sentinel check, got {result:?}"
+        );
     }
 
     #[test]

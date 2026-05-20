@@ -133,16 +133,34 @@ pub fn project(conn: &Connection) -> Result<Vec<KeyStateView>, TrustError> {
                         reason: "anchor moved by BootstrapReanchor".to_owned(),
                     });
                 }
-                // new_fingerprint is expected to already be in introducers
-                // via a prior KeyAdded; if not, warn and skip.
+                // If the row carries the new key's pubkey and no prior introducer
+                // exists for new_fingerprint, introduce it as Active now. This
+                // is the production single-event path; the legacy two-event path
+                // (KeyAdded already introduced the key) is unaffected because the
+                // introduction is gated on the key being absent from introducers.
                 if let Some(new_fp) = new_fingerprint
                     && !introducers.iter().any(|k| k.fingerprint == new_fp)
                 {
-                    tracing::warn!(
-                        target: "nexum::trust",
-                        fingerprint = %new_fp,
-                        "BootstrapReanchor.new_fingerprint has no preceding KeyAdded; skipping",
-                    );
+                    if let Some(new_pk) = public_key.as_deref().filter(|s| !s.is_empty()) {
+                        introducers.push(KeyStateView {
+                            fingerprint: new_fp,
+                            public_key: new_pk.to_owned(),
+                            role: KeyRole::Active,
+                            introduced_event_id: event_id.clone(),
+                            introduced_commit: effective_commit.clone(),
+                            retired_event_id: None,
+                            retired_commit: None,
+                            introduced_reason: reason.unwrap_or_default(),
+                            retired_reason: None,
+                        });
+                    } else {
+                        tracing::warn!(
+                            target: "nexum::trust",
+                            fingerprint = %new_fp,
+                            "BootstrapReanchor.new_fingerprint has no preceding KeyAdded \
+                             and no public_key in the row; skipping introduction",
+                        );
+                    }
                 }
             }
         }
@@ -687,7 +705,7 @@ mod tests {
             None,
             Some("init"),
         );
-        // No KeyAdded(K2) — hand-edited events.yml degenerate case.
+        // No KeyAdded(K2) and no public_key on the row — legacy degenerate case.
         insert_event(
             &conn,
             "ev2",
@@ -703,8 +721,98 @@ mod tests {
         // K1 is Reanchored.
         let k1 = view.iter().find(|v| v.fingerprint == "SHA256:K1").unwrap();
         assert_eq!(k1.role, KeyRole::Reanchored);
-        // K2 is absent from the projection (no introducer).
+        // K2 is absent — no pubkey in the row, no prior KeyAdded.
         assert!(view.iter().all(|v| v.fingerprint != "SHA256:K2"));
+    }
+
+    #[test]
+    fn single_event_reanchor_introduces_new_key_active() {
+        // Production path: BootstrapReanchor row carries the new key's pubkey.
+        // K2 must appear as Active introduced by the reanchor event itself,
+        // with no preceding KeyAdded row.
+        let conn = test_helpers::open_with_trust_events_schema();
+        insert_event(
+            &conn,
+            "ev1",
+            "BootstrapKey",
+            0,
+            Some("SHA256:K1"),
+            Some("ssh-ed25519 K1pub"),
+            None,
+            None,
+            Some("init"),
+        );
+        // BootstrapReanchor with new_public_key populated.
+        insert_event(
+            &conn,
+            "ev2",
+            "BootstrapReanchor",
+            1,
+            None,
+            Some("ssh-ed25519 K2pub"),
+            Some("SHA256:K1"),
+            Some("SHA256:K2"),
+            Some("chain-break note"),
+        );
+
+        let view = project(&conn).expect("project");
+        assert_eq!(view.len(), 2, "K1 and K2 both present");
+        let k1 = view.iter().find(|v| v.fingerprint == "SHA256:K1").unwrap();
+        assert_eq!(k1.role, KeyRole::Reanchored);
+        assert_eq!(k1.retired_event_id.as_deref(), Some("ev2"));
+        let k2 = view.iter().find(|v| v.fingerprint == "SHA256:K2").unwrap();
+        assert_eq!(k2.role, KeyRole::Active);
+        assert_eq!(k2.public_key, "ssh-ed25519 K2pub");
+        assert_eq!(k2.introduced_event_id, "ev2");
+        assert_eq!(k2.retired_event_id, None);
+    }
+
+    #[test]
+    fn single_event_reanchor_idempotent_when_keyadded_precedes() {
+        // Legacy two-event path: KeyAdded(K2) already introduced K2.
+        // The BootstrapReanchor must NOT create a duplicate introducer row.
+        let conn = test_helpers::open_with_trust_events_schema();
+        insert_event(
+            &conn,
+            "ev1",
+            "BootstrapKey",
+            0,
+            Some("SHA256:K1"),
+            Some("ssh-ed25519 K1pub"),
+            None,
+            None,
+            Some("init"),
+        );
+        insert_event(
+            &conn,
+            "ev2",
+            "KeyAdded",
+            1,
+            Some("SHA256:K2"),
+            Some("ssh-ed25519 K2pub"),
+            None,
+            None,
+            Some("recover predecessor"),
+        );
+        // BootstrapReanchor also carries K2pub — the idempotent guard must fire.
+        insert_event(
+            &conn,
+            "ev3",
+            "BootstrapReanchor",
+            2,
+            None,
+            Some("ssh-ed25519 K2pub"),
+            Some("SHA256:K1"),
+            Some("SHA256:K2"),
+            Some("chain-break note"),
+        );
+
+        let view = project(&conn).expect("project");
+        assert_eq!(view.len(), 2, "no duplicate introducer for K2");
+        let k2 = view.iter().find(|v| v.fingerprint == "SHA256:K2").unwrap();
+        // K2 introduced via the KeyAdded event, not the reanchor.
+        assert_eq!(k2.introduced_event_id, "ev2");
+        assert_eq!(k2.role, KeyRole::Active);
     }
 }
 

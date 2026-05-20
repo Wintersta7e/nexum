@@ -238,6 +238,7 @@ mod tests {
                     payload: EventKind::BootstrapReanchor {
                         old_fingerprint: fp_old.clone(),
                         new_fingerprint: fp_new.clone(),
+                        new_public_key: String::new(),
                         reason: "Bootstrap key lost".into(),
                         acknowledge_chain_anchor_lost: false,
                     },

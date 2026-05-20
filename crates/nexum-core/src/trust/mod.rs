@@ -13,6 +13,7 @@ pub mod git_history;
 pub mod key_state;
 pub mod pin;
 pub mod reanchor_pending;
+pub mod recover;
 pub mod regenerate;
 pub mod revoke;
 pub mod rotate;
