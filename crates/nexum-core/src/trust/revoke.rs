@@ -80,9 +80,11 @@ fn append_revoke_event(
 ) -> Result<Vec<String>, TrustError> {
     let mut log: EventLog = load_events_yml(events_yml)?;
 
-    // Knownness: a BootstrapKey or KeyAdded introducer for this fingerprint
-    // must exist. BootstrapReanchor is NOT an introducer; reanchor
-    // successors are known via their preceding KeyAdded event.
+    // Knownness: an introducer for this fingerprint must exist. The
+    // introducer is either a `BootstrapKey` / `KeyAdded` event, OR a
+    // `BootstrapReanchor` whose `new_public_key` is set (the single-event
+    // production reanchor shape, which introduces the new bootstrap key
+    // inline without a preceding `KeyAdded`).
     let introduced = log.events.iter().any(|e| match &e.payload {
         EventKind::BootstrapKey {
             fingerprint: fp, ..
@@ -90,6 +92,11 @@ fn append_revoke_event(
         | EventKind::KeyAdded {
             fingerprint: fp, ..
         } => fp == fingerprint,
+        EventKind::BootstrapReanchor {
+            new_fingerprint,
+            new_public_key,
+            ..
+        } => !new_public_key.is_empty() && new_fingerprint == fingerprint,
         _ => false,
     });
     if !introduced {
@@ -330,6 +337,34 @@ events:
         let touched =
             append_key_rotated_out(&events_yml, &trust_dir, "SHA256:K2", "rotate successor")
                 .expect("revoke reanchor successor permitted");
+        assert!(touched.contains(&"events.yml".to_owned()));
+    }
+
+    #[test]
+    fn revoke_single_event_reanchor_successor_is_known() {
+        // Production reanchor shape: BootstrapReanchor introduces the new
+        // key inline via `new_public_key` without a preceding `KeyAdded`.
+        // Revoking the successor must treat the reanchor itself as the
+        // introducer, not return `FingerprintNotKnown`.
+        let (_dir, trust_dir, events_yml) = fixture();
+        let yaml = r#"schema_version: 1
+events:
+  - event_id: 019e0a14-7000-7c00-a000-000000000001
+    kind: BootstrapKey
+    fingerprint: SHA256:K1
+    public_key: "ssh-ed25519 K1pub user@host"
+    reason: "Initial bootstrap"
+  - event_id: 019e0a14-7400-7c00-a000-000000000002
+    kind: BootstrapReanchor
+    old_fingerprint: SHA256:K1
+    new_fingerprint: SHA256:K2
+    new_public_key: "ssh-ed25519 K2pub user@host"
+    reason: "Operator-initiated recovery"
+"#;
+        std::fs::write(&events_yml, yaml).expect("seed events.yml");
+        let touched =
+            append_key_rotated_out(&events_yml, &trust_dir, "SHA256:K2", "post-reanchor rotate")
+                .expect("revoke single-event reanchor successor permitted");
         assert!(touched.contains(&"events.yml".to_owned()));
     }
 
