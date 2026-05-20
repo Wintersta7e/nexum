@@ -129,6 +129,21 @@ impl ReanchorPending {
     }
 }
 
+/// Serialize a sentinel to pretty JSON and write it to `home/.reanchor_pending`.
+///
+/// Shared by [`write_sentinel`] and [`update_sentinel_phase`] so both paths
+/// produce identical on-disk shape and surface identical error wrapping.
+fn persist_sentinel(home: &Path, sentinel: &ReanchorPending) -> Result<(), TrustError> {
+    let json = serde_json::to_string_pretty(sentinel).map_err(|e| TrustError::ReanchorPending {
+        message: format!("could not serialize .reanchor_pending: {e}"),
+    })?;
+    let path = home.join(".reanchor_pending");
+    std::fs::write(&path, json).map_err(|e| TrustError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })
+}
+
 /// Write a fresh `.reanchor_pending` sentinel with phase Init.
 ///
 /// # Errors
@@ -153,15 +168,7 @@ pub fn write_sentinel(
         phase_completed: Phase::Init,
         prior_signingkey: prior_signingkey.map(str::to_owned),
     };
-    let json =
-        serde_json::to_string_pretty(&sentinel).map_err(|e| TrustError::ReanchorPending {
-            message: format!("could not serialize .reanchor_pending: {e}"),
-        })?;
-    let path = home.join(".reanchor_pending");
-    std::fs::write(&path, json).map_err(|e| TrustError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })
+    persist_sentinel(home, &sentinel)
 }
 
 /// Update the `phase_completed` field of an existing sentinel.
@@ -180,15 +187,7 @@ pub fn update_sentinel_phase(home: &Path, new_phase: Phase) -> Result<(), TrustE
         });
     };
     sentinel.phase_completed = new_phase;
-    let json =
-        serde_json::to_string_pretty(&sentinel).map_err(|e| TrustError::ReanchorPending {
-            message: format!("could not re-serialize .reanchor_pending: {e}"),
-        })?;
-    let path = home.join(".reanchor_pending");
-    std::fs::write(&path, json).map_err(|e| TrustError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })
+    persist_sentinel(home, &sentinel)
 }
 
 /// Returns `Ok(())` when no `.reanchor_pending` sentinel is present.

@@ -1290,6 +1290,43 @@ pub struct KeysRecoverOutcome {
     pub regenerated_files: Vec<String>,
 }
 
+/// Repo-relative trust file paths touched by the reanchor flow.
+///
+/// Shared by `keys_recover`'s preflight + rollback path and by the
+/// `Init+Revert` arm of `resolve_pending_reanchor` so both surfaces restore
+/// the same file set from HEAD.
+const REANCHOR_TRUST_FILES: &[&str] = &[
+    ".trust/events.yml",
+    ".trust/historical_signers",
+    ".trust/allowed_signers",
+    ".trust/revoked_signers",
+];
+
+/// Restore the four reanchor trust files (`events.yml` + the three signer
+/// allow/historical/revoked lists) from HEAD. Errors from `git checkout` are
+/// silently ignored — callers use this on rollback paths where the operator
+/// is already being shown a primary error.
+fn restore_reanchor_trust_files(notebook_git: &std::path::Path) {
+    let pbs: Vec<std::path::PathBuf> = REANCHOR_TRUST_FILES
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let refs: Vec<&std::path::Path> = pbs.iter().map(std::path::PathBuf::as_path).collect();
+    let _ = restore_paths_from_head(notebook_git, &refs);
+}
+
+/// Restore (or unset) `user.signingkey` in the notebook repo. Errors are
+/// silently ignored — used only on rollback paths.
+fn restore_signingkey(notebook_git: &std::path::Path, prior_signingkey: Option<&str>) {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(notebook_git);
+    match prior_signingkey {
+        Some(prior) => cmd.args(["config", "--local", "user.signingkey", prior]),
+        None => cmd.args(["config", "--local", "--unset", "user.signingkey"]),
+    };
+    let _ = cmd.status();
+}
+
 /// Rollback helper for `keys_recover`: restore trust files from HEAD,
 /// optionally restore `user.signingkey`, and delete the sentinel.
 ///
@@ -1297,26 +1334,9 @@ pub struct KeysRecoverOutcome {
 /// caller is already returning an error; the best we can do is attempt
 /// every cleanup step in order and leave the sentinel for
 /// `doctor --resolve-pending-reanchor --revert` to finish.
-fn recover_rollback(
-    paths: &Paths,
-    trust_file_refs: &[&std::path::Path],
-    prior_signingkey: Option<&str>,
-) {
-    let _ = restore_paths_from_head(&paths.notebook_git, trust_file_refs);
-    match prior_signingkey {
-        Some(prior) => {
-            let _ = std::process::Command::new("git")
-                .args(["config", "--local", "user.signingkey", prior])
-                .current_dir(&paths.notebook_git)
-                .status();
-        }
-        None => {
-            let _ = std::process::Command::new("git")
-                .args(["config", "--local", "--unset", "user.signingkey"])
-                .current_dir(&paths.notebook_git)
-                .status();
-        }
-    }
+fn recover_rollback(paths: &Paths, prior_signingkey: Option<&str>) {
+    restore_reanchor_trust_files(&paths.notebook_git);
+    restore_signingkey(&paths.notebook_git, prior_signingkey);
     let _ = crate::trust::reanchor_pending::delete_sentinel(&paths.home);
 }
 
@@ -1458,15 +1478,10 @@ pub fn keys_recover(
 
         // Preflight 7: refuse if the operator has uncommitted changes outside
         // the trust file set; rollback paths must not destroy unrelated work.
-        let trust_file_pbs: Vec<std::path::PathBuf> = [
-            ".trust/events.yml",
-            ".trust/historical_signers",
-            ".trust/allowed_signers",
-            ".trust/revoked_signers",
-        ]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
+        let trust_file_pbs: Vec<std::path::PathBuf> = REANCHOR_TRUST_FILES
+            .iter()
+            .map(std::path::PathBuf::from)
+            .collect();
         let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
             .iter()
             .map(std::path::PathBuf::as_path)
@@ -1525,7 +1540,7 @@ pub fn keys_recover(
         ) {
             Ok(t) => t,
             Err(e) => {
-                recover_rollback(paths, &trust_file_refs, prior_signingkey.as_deref());
+                recover_rollback(paths, prior_signingkey.as_deref());
                 return Err(ApiError::Trust(e));
             }
         };
@@ -1543,7 +1558,7 @@ pub fn keys_recover(
                 .current_dir(&paths.notebook_git)
                 .status();
             if outcome.map_or(true, |s| !s.success()) {
-                recover_rollback(paths, &trust_file_refs, prior_signingkey.as_deref());
+                recover_rollback(paths, prior_signingkey.as_deref());
                 return Err(ApiError::KeysRecoverFailed {
                     stderr: "failed to update user.signingkey to new key".into(),
                 });
@@ -1576,7 +1591,7 @@ pub fn keys_recover(
             Ok(sha) => sha,
             Err(commit_err) => {
                 let stderr = commit_err.to_string();
-                recover_rollback(paths, &trust_file_refs, prior_signingkey.as_deref());
+                recover_rollback(paths, prior_signingkey.as_deref());
                 // Detect ssh-agent absence from the git error message.
                 if stderr.to_lowercase().contains("agent") {
                     return Err(ApiError::KeysRecoverAgentUnavailable {
@@ -1611,7 +1626,7 @@ pub fn keys_recover(
             Ok(o) => o,
             Err(verify_err) => {
                 let _ = rollback_last_commit(&paths.notebook_git);
-                recover_rollback(paths, &trust_file_refs, prior_signingkey.as_deref());
+                recover_rollback(paths, prior_signingkey.as_deref());
                 return Err(ApiError::KeysRecoverFailed {
                     stderr: verify_err.to_string(),
                 });
@@ -1620,7 +1635,7 @@ pub fn keys_recover(
 
         if verify_outcome.exit != VerifyExit::Good {
             let _ = rollback_last_commit(&paths.notebook_git);
-            recover_rollback(paths, &trust_file_refs, prior_signingkey.as_deref());
+            recover_rollback(paths, prior_signingkey.as_deref());
             return Err(ApiError::KeysRecoverFailed {
                 stderr: format!(
                     "reanchor commit signature verification failed: {:?}",
@@ -1642,7 +1657,7 @@ pub fn keys_recover(
             let stderr =
                 format!("signer fingerprint {signer_fp} does not match expected {expected_signer}");
             let _ = rollback_last_commit(&paths.notebook_git);
-            recover_rollback(paths, &trust_file_refs, prior_signingkey.as_deref());
+            recover_rollback(paths, prior_signingkey.as_deref());
             return Err(ApiError::KeysRecoverFailed { stderr });
         }
 
@@ -2350,36 +2365,12 @@ pub fn resolve_pending_reanchor(
                             .into(),
                     });
                 }
-                // Safe to revert: no commit on HEAD, restore trust files +
-                // signingkey + delete sentinel.
-                let trust_file_pbs: Vec<std::path::PathBuf> = [
-                    ".trust/events.yml",
-                    ".trust/historical_signers",
-                    ".trust/allowed_signers",
-                    ".trust/revoked_signers",
-                ]
-                .iter()
-                .map(std::path::PathBuf::from)
-                .collect();
-                let trust_file_refs: Vec<&std::path::Path> = trust_file_pbs
-                    .iter()
-                    .map(std::path::PathBuf::as_path)
-                    .collect();
-                let _ = restore_paths_from_head(&paths.notebook_git, &trust_file_refs);
-                match sentinel.prior_signingkey() {
-                    Some(prior) => {
-                        let _ = std::process::Command::new("git")
-                            .args(["config", "--local", "user.signingkey", prior])
-                            .current_dir(&paths.notebook_git)
-                            .status();
-                    }
-                    None => {
-                        let _ = std::process::Command::new("git")
-                            .args(["config", "--local", "--unset", "user.signingkey"])
-                            .current_dir(&paths.notebook_git)
-                            .status();
-                    }
-                }
+                // Safe to revert: no commit on HEAD. Restore trust files +
+                // signingkey via the shared rollback helpers, then signal any
+                // sentinel-delete failure (recover_rollback swallows it on
+                // error-path uses; the resolver needs to propagate it here).
+                restore_reanchor_trust_files(&paths.notebook_git);
+                restore_signingkey(&paths.notebook_git, sentinel.prior_signingkey());
                 delete_sentinel(&paths.home)?;
                 Ok(ReanchorResolveOutcome::Resolved {
                     from_phase: "init".into(),

@@ -246,34 +246,14 @@ fn doctor_resolve_no_sentinel_json_emits_no_sentinel_envelope() {
     assert_eq!(payload["kind"], "doctor.reanchor.no_sentinel");
 }
 
-// ── Drift-detection tests (T5c) ─────────────────────────────────────────────
-
-/// Write an Init-phase sentinel whose `new_pin_fp` is `new_pin_fp`. Unlike
-/// `write_sentinel`, this helper also sets `prior_signingkey` to `None` (the
-/// common case where the operator had no `user.signingkey` configured).
-fn write_init_sentinel_for(home: &std::path::Path, new_pin_fp: &str) {
-    let path = home.join(".reanchor_pending");
-    let body = format!(
-        r#"{{
-            "case": "A",
-            "old_pin_fp": "SHA256:old",
-            "new_pin_fp": "{new_pin_fp}",
-            "new_pubkey": "ssh-ed25519 AAAA dummy",
-            "started_at": "2026-05-20T00:00:00Z",
-            "pid": null,
-            "phase_completed": "init",
-            "prior_signingkey": null
-        }}"#,
-    );
-    std::fs::write(&path, body).unwrap();
-}
+// ── Drift-detection tests ───────────────────────────────────────────────────
 
 #[test]
 fn doctor_init_revert_clean_deletes_sentinel_and_restores_files() {
     // No matching reanchor commit on HEAD → safe to revert. Sentinel must
     // be deleted; trust files restored from HEAD.
     let home = TestHome::initialized_no_index();
-    write_init_sentinel_for(home.path(), "SHA256:nonexistent");
+    write_sentinel_with_pin(home.path(), "init", "SHA256:nonexistent");
     let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
     assert!(
         out.status.success(),
@@ -297,7 +277,7 @@ fn doctor_init_revert_refused_when_head_has_matching_reanchor() {
     // event. The resolver must refuse.
     let (home, fix) = TestHome::initialized_post_reanchor_case_a(false);
     // Write Init sentinel pointing at K2 (already committed).
-    write_init_sentinel_for(home.path(), &fix.k2_fp);
+    write_sentinel_with_pin(home.path(), "init", &fix.k2_fp);
     let out = home.run(&["doctor", "--resolve-pending-reanchor", "--revert", "--json"]);
     assert!(
         !out.status.success(),
@@ -323,7 +303,7 @@ fn doctor_init_continue_elevates_when_commit_landed() {
     let cfg_raw = std::fs::read_to_string(&cfg_path).unwrap();
     let updated = cfg_raw.replace(&fix.k2_fp, "SHA256:k1placeholder");
     std::fs::write(&cfg_path, &updated).unwrap();
-    write_init_sentinel_for(home.path(), &fix.k2_fp);
+    write_sentinel_with_pin(home.path(), "init", &fix.k2_fp);
 
     let out = home.run(&[
         "doctor",
@@ -357,7 +337,7 @@ fn doctor_init_continue_elevates_when_commit_landed() {
 fn doctor_init_continue_refused_when_no_commit() {
     // No reanchor commit on HEAD → --continue must refuse with guidance.
     let home = TestHome::initialized_no_index();
-    write_init_sentinel_for(home.path(), "SHA256:nonexistent");
+    write_sentinel_with_pin(home.path(), "init", "SHA256:nonexistent");
     let out = home.run(&[
         "doctor",
         "--resolve-pending-reanchor",
