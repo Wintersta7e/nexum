@@ -92,3 +92,30 @@ jobs:
 
       - name: cargo check (MSRV)
         run: cargo +1.95.0 check --workspace --locked --all-targets
+
+  e2e:
+    name: e2e harness (bundled fixtures)
+    # Main-only: keeps PR turnaround fast. Smoke-tests the cc + codex
+    # adapters against the synthetic fixtures checked in under `e2e/`.
+    # No host secrets, no real ~/.claude or ~/.codex content.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    needs: gate
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Build nexum (release)
+        run: cargo build --locked --release -p nexum-cli
+
+      - name: e2e cc adapter
+        run: ./e2e/run.sh cc
+
+      - name: e2e codex adapter
+        run: ./e2e/run.sh codex
