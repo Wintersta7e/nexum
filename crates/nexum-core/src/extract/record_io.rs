@@ -28,7 +28,7 @@ const DEFAULT_EXTRACTOR: &str = "anthropic:claude-opus-4-7";
 
 /// Default project id for extracted records when the model emits null. Matches
 /// the `_inbox` triage bucket the design pins for unattributed records.
-const INBOX_PROJECT_ID: &str = "_inbox";
+pub(crate) const INBOX_PROJECT_ID: &str = "_inbox";
 
 fn id_regex() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
