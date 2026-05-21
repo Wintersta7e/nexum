@@ -167,6 +167,10 @@ pub mod error_codes {
     /// `~/.nexum/state/trust_warnings_acked.json` exists but is not valid JSON.
     /// Delete the file to reset acked warnings, or inspect and repair it by hand.
     pub const PRE_RECOVERY_ACK_FILE_MALFORMED: &str = "PRE_RECOVERY_ACK_FILE_MALFORMED";
+    /// `nexum project set-path` refused because the repo at the supplied path
+    /// has an origin URL that canonicalizes to a different `git:` `project_id`
+    /// than the one supplied, or because no `origin` remote exists.
+    pub const REPO_IDENTITY_MISMATCH: &str = "REPO_IDENTITY_MISMATCH";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
