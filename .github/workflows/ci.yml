@@ -68,3 +68,27 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  msrv:
+    name: MSRV verify (1.95)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: Swatinem/rust-cache@v2
+        # Separate cache key so this job's MSRV target cache doesn't
+        # collide with the main gate's cache (different toolchain,
+        # same Cargo.lock).
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: "v0-msrv"
+
+      - name: Install MSRV toolchain (1.95.0)
+        # `workspace.package.rust-version = "1.95"` is the public MSRV
+        # contract. Today rust-toolchain.toml also pins 1.95.0 so the
+        # main gate already exercises this; the job exists so the
+        # contract survives a future toolchain bump.
+        run: rustup install 1.95.0 --profile minimal --no-self-update
+
+      - name: cargo check (MSRV)
+        run: cargo +1.95.0 check --workspace --locked --all-targets
