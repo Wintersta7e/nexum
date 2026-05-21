@@ -24,6 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: Swatinem/rust-cache@v2
+        # Only persist a new cache when main moves; PR branches still
+        # read from the latest main cache. Avoids cache thrash from
+        # short-lived branches while keeping the warm-path for the gate.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Install pinned Rust toolchain
         # rust-toolchain.toml at repo root pins channel 1.95.0 + clippy + rustfmt.
         run: rustup show
@@ -47,5 +54,10 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets
 
-      - name: cargo test
+      - name: cargo test (targets)
         run: cargo test --locked --workspace --all-targets
+
+      - name: cargo test (doctests)
+        # `--all-targets` excludes doctests; cover them in a second pass
+        # so rustdoc examples in pub items are verified by the gate.
+        run: cargo test --locked --workspace --doc
