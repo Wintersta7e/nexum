@@ -54,5 +54,10 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets
 
-      - name: cargo test
+      - name: cargo test (targets)
         run: cargo test --locked --workspace --all-targets
+
+      - name: cargo test (doctests)
+        # `--all-targets` excludes doctests; cover them in a second pass
+        # so rustdoc examples in pub items are verified by the gate.
+        run: cargo test --locked --workspace --doc
