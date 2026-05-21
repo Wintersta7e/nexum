@@ -22,9 +22,9 @@ jobs:
     name: Three-command gate (Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         # Only persist a new cache when main moves; PR branches still
         # read from the latest main cache. Avoids cache thrash from
         # short-lived branches while keeping the warm-path for the gate.
@@ -66,16 +66,16 @@ jobs:
     name: cargo-deny (advisories + licenses + bans + sources)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2
 
   msrv:
     name: MSRV verify (1.95)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         # Separate cache key so this job's MSRV target cache doesn't
         # collide with the main gate's cache (different toolchain,
         # same Cargo.lock).
@@ -102,9 +102,9 @@ jobs:
     runs-on: ubuntu-24.04
     needs: gate
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
