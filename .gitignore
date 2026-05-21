@@ -40,3 +40,7 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# G2 benchmark — local-only inputs/labels; results are aggregated and safe to commit.
+bench/*
+!bench/g2-results.csv
