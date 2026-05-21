@@ -61,3 +61,10 @@ jobs:
         # `--all-targets` excludes doctests; cover them in a second pass
         # so rustdoc examples in pub items are verified by the gate.
         run: cargo test --locked --workspace --doc
+
+  deny:
+    name: cargo-deny (advisories + licenses + bans + sources)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2

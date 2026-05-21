@@ -1,0 +1,36 @@
+# cargo-deny — advisories + licenses + bans + sources.
+# Run locally: `cargo deny check`. CI: `.github/workflows/ci.yml` deny job.
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # `paste` 1.0.15 is archived by its author (no vulnerability, no
+    # safe upgrade) and is pulled in transitively by tokenizers via
+    # macro_rules_attribute. Revisit when tokenizers drops it upstream.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via tokenizers; informational unmaintained, no CVE" },
+]
+
+[licenses]
+# Permissive license allow-list covering every crate in the current dep
+# tree. cargo-deny accepts the canonical SPDX form ("MIT OR Apache-2.0")
+# and the legacy slash-form ("MIT/Apache-2.0") against the same entries.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
