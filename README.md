@@ -67,18 +67,29 @@ your memory files — and your agent will trust whatever's there.
   CLI uses. Drop it into any MCP-aware host.
 - **Admin / recovery commands** — `nexum keys list`,
   `nexum keys rotate`, `nexum keys revoke <fp> --rotation | --strict`,
-  `nexum trust regenerate-files`, `nexum doctor --resolve-pending-reanchor`,
+  `nexum keys recover --reanchor <path> | --reanchor-without-pin <path>`,
+  `nexum trust regenerate-files`,
+  `nexum trust dismiss-pre-recovery-warning --code <code>`,
+  `nexum doctor` (default multi-check report) and
+  `nexum doctor --resolve-pending-reanchor`,
   `nexum index --sweep [--aggressive]`, `nexum index --reembed`, and
   `nexum migrate` cover the operational surface (key listing with the
   current git signer surfaced alongside the bootstrap pin, additive
   rotation, two-mode revocation with an estimated affected-records
-  prompt under `--strict`, trust-file regeneration, sentinel
-  resolution, stale-row sweep, embedding backfill, schema migration).
-  Every mutation runs under a writer-process lock and rolls back on
-  failure so the worktree stays clean. Revocation enforces eight
-  preflights (would-unsign-store, would-sign-own-revocation,
-  signer-is-Active, and five more) so misconfigured signing setups
-  surface as wire-stable error codes instead of broken commits.
+  prompt under `--strict`, two-case bootstrap recovery — pin-intact
+  (`--reanchor`) and pin-lost (`--reanchor-without-pin`) — with a
+  `.reanchor_pending` sentinel state machine that survives mid-flight
+  crashes, post-recovery warning ack via `dismiss-pre-recovery-warning`,
+  trust-file regeneration, a default `doctor` report that runs four
+  checks (key-state summary, signer-file diff, merge-commit detection,
+  reanchor-sentinel status) with structured severity per check,
+  sentinel resolution, stale-row sweep, embedding backfill, schema
+  migration). Every mutation runs under a writer-process lock and
+  rolls back on failure so the worktree stays clean. Revocation
+  enforces eight preflights (would-unsign-store,
+  would-sign-own-revocation, signer-is-Active, and five more) so
+  misconfigured signing setups surface as wire-stable error codes
+  instead of broken commits.
 - **Typed extraction** — `nexum extract --session <id>` / `--since <duration>` /
   `--backfill --dry-run` / `--backfill --dry-run-id <hash>`. Reads CC transcripts
   and Codex rollouts, scrubs common secret shapes, sends a 10-30 KB digest to the
@@ -111,6 +122,9 @@ cargo build --release
 
 # Inspect trust state (each known key + role + current git signer)
 ./target/release/nexum keys list
+
+# Store health (key-state + signer files + sentinel + merge-commit)
+./target/release/nexum doctor --json
 ```
 
 The MCP stdio server lives in the same workspace:

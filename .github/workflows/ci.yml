@@ -22,7 +22,14 @@ jobs:
     name: Three-command gate (Linux)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        # Only persist a new cache when main moves; PR branches still
+        # read from the latest main cache. Avoids cache thrash from
+        # short-lived branches while keeping the warm-path for the gate.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install pinned Rust toolchain
         # rust-toolchain.toml at repo root pins channel 1.95.0 + clippy + rustfmt.
@@ -47,5 +54,68 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-targets
 
-      - name: cargo test
+      - name: cargo test (targets)
         run: cargo test --locked --workspace --all-targets
+
+      - name: cargo test (doctests)
+        # `--all-targets` excludes doctests; cover them in a second pass
+        # so rustdoc examples in pub items are verified by the gate.
+        run: cargo test --locked --workspace --doc
+
+  deny:
+    name: cargo-deny (advisories + licenses + bans + sources)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2
+
+  msrv:
+    name: MSRV verify (1.95)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        # Separate cache key so this job's MSRV target cache doesn't
+        # collide with the main gate's cache (different toolchain,
+        # same Cargo.lock).
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: "v0-msrv"
+
+      - name: Install MSRV toolchain (1.95.0)
+        # `workspace.package.rust-version = "1.95"` is the public MSRV
+        # contract. Today rust-toolchain.toml also pins 1.95.0 so the
+        # main gate already exercises this; the job exists so the
+        # contract survives a future toolchain bump.
+        run: rustup install 1.95.0 --profile minimal --no-self-update
+
+      - name: cargo check (MSRV)
+        run: cargo +1.95.0 check --workspace --locked --all-targets
+
+  e2e:
+    name: e2e harness (bundled fixtures)
+    # Main-only: keeps PR turnaround fast. Smoke-tests the cc + codex
+    # adapters against the synthetic fixtures checked in under `e2e/`.
+    # No host secrets, no real ~/.claude or ~/.codex content.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    needs: gate
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Build nexum (release)
+        run: cargo build --locked --release -p nexum-cli
+
+      - name: e2e cc adapter
+        run: ./e2e/run.sh cc
+
+      - name: e2e codex adapter
+        run: ./e2e/run.sh codex
