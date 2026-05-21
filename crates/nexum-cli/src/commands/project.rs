@@ -10,6 +10,7 @@ use nexum_core::{
     config::io::save as save_config,
     config::types::Config,
     paths::Paths,
+    project::normalize_inbox::normalize_inbox,
     project::{ProjectInput, ProjectResolution, resolve::resolve as resolve_project},
 };
 
@@ -52,6 +53,16 @@ pub enum ProjectSub {
         /// Absolute path to the local checkout.
         path: PathBuf,
     },
+    /// Backfill `project_id` on extracted records that landed in `_inbox/`.
+    NormalizeInbox {
+        /// Path to a Codex `state_5.sqlite` consulted for `git_origin_url`
+        /// resolution. Defaults to the `[adapters.codex] state_db` value.
+        #[arg(long)]
+        state_db: Option<PathBuf>,
+        /// Emit a JSON envelope on stdout.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 pub fn run(args: &ProjectArgs) -> ExitCode {
@@ -66,6 +77,13 @@ pub fn run(args: &ProjectArgs) -> ExitCode {
         }
         ProjectSub::Resolve { path, json } => resolve_path(path, *json),
         ProjectSub::SetPath { project_id, path } => set_path(project_id, path),
+        ProjectSub::NormalizeInbox { state_db, json } => {
+            let (paths, cfg) = match super::common::resolve_runtime(*json) {
+                Ok(v) => v,
+                Err(c) => return c,
+            };
+            normalize_inbox_dispatch(&paths, &cfg, state_db.as_deref(), *json)
+        }
     }
 }
 
@@ -224,6 +242,53 @@ fn check_git_identity(path: &Path, project_id: &str) -> Result<(), ErrorEnvelope
             }),
         })
     }
+}
+
+fn normalize_inbox_dispatch(
+    paths: &Paths,
+    cfg: &Config,
+    state_db_override: Option<&Path>,
+    json: bool,
+) -> ExitCode {
+    let state_db_path = state_db_override.map(Path::to_path_buf).or_else(|| {
+        let raw = &cfg.adapters.codex.state_db;
+        if raw.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(raw))
+        }
+    });
+
+    let outcome = match normalize_inbox(paths, state_db_path.as_deref()) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(super::exit_codes::STORE_INTEGRITY);
+        }
+    };
+
+    if json {
+        let body = serde_json::json!({
+            "moved": outcome.moved_ids.len(),
+            "moved_ids": outcome.moved_ids,
+            "ambiguous": outcome.ambiguous,
+            "ambiguous_ids": outcome.ambiguous_ids,
+            "unresolved": outcome.unresolved,
+            "unresolved_ids": outcome.unresolved_ids,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
+    } else {
+        println!(
+            "Normalized {} records. {} ambiguous, {} unresolved (left in _inbox).",
+            outcome.moved_ids.len(),
+            outcome.ambiguous,
+            outcome.unresolved,
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 fn resolve_path(path: &Path, json: bool) -> ExitCode {
