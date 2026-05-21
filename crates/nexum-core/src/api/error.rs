@@ -171,6 +171,9 @@ pub mod error_codes {
     /// has an origin URL that canonicalizes to a different `git:` `project_id`
     /// than the one supplied, or because no `origin` remote exists.
     pub const REPO_IDENTITY_MISMATCH: &str = "REPO_IDENTITY_MISMATCH";
+    /// Generic catch-all for logical errors that don't fit a more specific
+    /// variant (e.g. missing required YAML field detected at runtime).
+    pub const INTERNAL: &str = "INTERNAL";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -427,6 +430,12 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                     "subkind": "dismiss_pre_recovery_warning",
                     "path": path.display().to_string(),
                 }),
+            },
+            ApiError::Other { message } => ErrorEnvelope {
+                error_code: error_codes::INTERNAL,
+                message: message.clone(),
+                remediation: None,
+                context: serde_json::json!({ "kind": "other" }),
             },
         }
     }

@@ -121,6 +121,11 @@ pub enum ApiError {
         path: std::path::PathBuf,
         reason: String,
     },
+    /// Generic error carrying a free-form message. Used by callers (e.g.
+    /// `normalize_inbox`) that need to signal a logical failure that doesn't
+    /// fit a more specific variant.
+    #[error("{message}")]
+    Other { message: String },
 }
 
 impl From<crate::query::QueryError> for ApiError {

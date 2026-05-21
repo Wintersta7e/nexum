@@ -93,6 +93,87 @@ pub fn project_input_from_yaml(
     })
 }
 
+/// Compute where an `_inbox` record should land after normalization.
+/// Returns `None` if the resolver can't produce a single `project_id`
+/// (Ambiguous / Unresolved); the caller leaves the record in place.
+///
+/// # Errors
+///
+/// Returns `NormalizeError::YamlParse` if the record body isn't valid YAML
+/// or its `record_type` field can't be read.
+pub fn plan_target_path(
+    notebook_git: &Path,
+    record_id: &str,
+    yaml: &str,
+    state_5_db: Option<&Path>,
+) -> Result<Option<PathBuf>, NormalizeError> {
+    use crate::project::ProjectResolution;
+    use crate::project::resolve::resolve;
+
+    let input = project_input_from_yaml(yaml, state_5_db)?;
+    let parsed: serde_yaml::Value = serde_yaml::from_str(yaml)?;
+    let record_type_str = parsed
+        .as_mapping()
+        .and_then(|m| m.get(serde_yaml::Value::String("record_type".to_owned())))
+        .and_then(|v| v.as_str())
+        .unwrap_or("untyped");
+    let type_subdir = match record_type_str {
+        "decision" => "decisions",
+        "recommendation" => "recommendations",
+        "failure" => "failures",
+        _ => "untyped",
+    };
+
+    let resolution = resolve(&input);
+    let project_id = match resolution {
+        ProjectResolution::Resolved { project_id, .. } => project_id,
+        ProjectResolution::Ambiguous { .. } | ProjectResolution::Unresolved => {
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(notebook_git.join(format!(
+        "{project_id}/{type_subdir}/{record_id}.yml"
+    ))))
+}
+
+/// Replace exactly the `project_id:` line in a YAML body with a new value,
+/// preserving the rest of the body byte-for-byte. Returns the new body.
+///
+/// Why byte-preserving: the record's `content_hash` is computed over the
+/// canonical body at extract time. A full serde round-trip would re-order
+/// keys and drop comments, drifting the hash beyond the one field we
+/// actually changed. With a line-level replace, the new `content_hash`
+/// differs from the old by exactly one logical field — auditable and
+/// minimal.
+///
+/// # Errors
+///
+/// Returns `NormalizeError::Api` if no `project_id:` line is found.
+pub fn replace_project_id_line(yaml: &str, new_project_id: &str) -> Result<String, NormalizeError> {
+    let mut found = false;
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in yaml.lines() {
+        if !found && line.trim_start().starts_with("project_id:") {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            out_lines.push(format!("{indent}project_id: {new_project_id}"));
+            found = true;
+        } else {
+            out_lines.push(line.to_owned());
+        }
+    }
+    if !found {
+        return Err(NormalizeError::Api(crate::api::ApiError::Other {
+            message: "record YAML has no project_id line to replace".into(),
+        }));
+    }
+    let mut out = out_lines.join("\n");
+    if yaml.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum NormalizeError {
     #[error("yaml parse: {0}")]
@@ -182,5 +263,56 @@ mod tests {
         };
         let res = resolve(&input);
         assert!(matches!(res, ProjectResolution::Resolved { .. }));
+    }
+}
+
+#[cfg(test)]
+mod plan_target_tests {
+    use super::*;
+
+    #[test]
+    fn plan_target_path_returns_some_when_resolver_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Use the tmp dir itself as the rollout path — it exists on disk so
+        // canonicalize_path succeeds and the resolver produces a Resolved
+        // identity via the Path branch.
+        let rollout_path = tmp.path().to_string_lossy().into_owned();
+        let yaml = format!(
+            "schema_version: 1\nid: 2026-04-29-test\nrecord_type: recommendation\nproject_id: _inbox\nsession_refs:\n  - kind: codex_rollout\n    path: {rollout_path}\n"
+        );
+        // No git_origin_url, but codex_cwd is set → resolver returns
+        // Resolved with Path identity (canon::path_hint produces a
+        // deterministic path-based project_id).
+        let target = plan_target_path(tmp.path(), "2026-04-29-test", &yaml, None).unwrap();
+        assert!(target.is_some(), "expected a resolved target");
+        let p = target.unwrap();
+        let s = p.to_string_lossy();
+        assert!(
+            s.ends_with("/recommendations/2026-04-29-test.yml"),
+            "unexpected target: {s}"
+        );
+    }
+
+    #[test]
+    fn replace_project_id_line_preserves_rest() {
+        let yaml = "schema_version: 1\nproject_id: _inbox\ntags: [a, b]\n";
+        let out = replace_project_id_line(yaml, "git:abc123").unwrap();
+        assert_eq!(
+            out,
+            "schema_version: 1\nproject_id: git:abc123\ntags: [a, b]\n"
+        );
+    }
+
+    #[test]
+    fn replace_project_id_line_preserves_indent() {
+        let yaml = "  project_id: _inbox\n";
+        let out = replace_project_id_line(yaml, "git:xyz").unwrap();
+        assert_eq!(out, "  project_id: git:xyz\n");
+    }
+
+    #[test]
+    fn replace_project_id_line_errors_when_missing() {
+        let yaml = "schema_version: 1\ntags: []\n";
+        assert!(replace_project_id_line(yaml, "anything").is_err());
     }
 }
