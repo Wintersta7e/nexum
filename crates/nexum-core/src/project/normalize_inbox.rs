@@ -11,6 +11,10 @@
 //! the record's `content_hash` drifts by exactly one line's worth, which is
 //! a clean diff in the trust audit log.
 
+use crate::api;
+use crate::extract::record_io::INBOX_PROJECT_ID;
+use crate::init::git_ops::{git_commit_signed, git_verify_commit_with_signers};
+use crate::paths::Paths;
 use crate::records::types::SessionRef;
 use std::path::{Path, PathBuf};
 
@@ -217,6 +221,177 @@ pub struct NormalizeOutcome {
     pub unresolved: u32,
     /// IDs of records that were unresolved.
     pub unresolved_ids: Vec<String>,
+}
+
+/// Walk `_inbox/<type>/<id>.yml` records, resolve project identity for
+/// each, and re-commit each resolvable record under
+/// `<project_id>/<type>/<id>.yml` — one signed commit per record,
+/// all under the writer lock.
+///
+/// Records that resolve `Ambiguous` or `Unresolved` are left in `_inbox/`
+/// and counted in the returned `NormalizeOutcome`.
+///
+/// # Errors
+///
+/// Returns `NormalizeError::Api` on writer-lock contention, dirty worktree,
+/// signing failures, or any other `ApiError`; `NormalizeError::Io` on
+/// filesystem errors; `NormalizeError::YamlParse` on malformed records.
+pub fn normalize_inbox(
+    paths: &Paths,
+    state_5_db: Option<&Path>,
+) -> Result<NormalizeOutcome, NormalizeError> {
+    let inbox_root = paths.notebook_git.join(INBOX_PROJECT_ID);
+    if !inbox_root.exists() {
+        return Ok(NormalizeOutcome::default());
+    }
+
+    api::refuse_if_unrelated_dirty(&paths.notebook_git, &[])?;
+
+    let outcome = api::with_writer_lock(paths, || {
+        let mut outcome = NormalizeOutcome::default();
+        let inbox_root = paths.notebook_git.join(INBOX_PROJECT_ID);
+        for type_subdir in &["decisions", "recommendations", "failures", "untyped"] {
+            let dir = inbox_root.join(type_subdir);
+            if !dir.exists() {
+                continue;
+            }
+            // Materialize before iterating — POSIX readdir doesn't promise
+            // stability across same-dir removals (observed skipping on
+            // WSL2 9P).
+            let yml_paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .map_err(|e| api::ApiError::Other {
+                    message: format!("read_dir {}: {e}", dir.display()),
+                })?
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("yml"))
+                .collect();
+
+            for path in yml_paths {
+                process_one(paths, &path, state_5_db, &mut outcome)?;
+            }
+        }
+        Ok(outcome)
+    })?;
+    Ok(outcome)
+}
+
+fn process_one(
+    paths: &Paths,
+    inbox_path: &Path,
+    state_5_db: Option<&Path>,
+    outcome: &mut NormalizeOutcome,
+) -> Result<(), api::ApiError> {
+    use crate::project::ProjectResolution;
+    use crate::project::resolve::resolve;
+
+    let yaml = std::fs::read_to_string(inbox_path).map_err(|e| api::ApiError::Other {
+        message: format!("read inbox file {}: {e}", inbox_path.display()),
+    })?;
+    let record_id = inbox_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_owned();
+
+    let plan =
+        plan_target_path(&paths.notebook_git, &record_id, &yaml, state_5_db).map_err(|e| {
+            api::ApiError::Other {
+                message: format!("plan target for {record_id}: {e}"),
+            }
+        })?;
+
+    let Some(target) = plan else {
+        // Attribute the skip cause.
+        let input =
+            project_input_from_yaml(&yaml, state_5_db).map_err(|e| api::ApiError::Other {
+                message: format!("re-resolve for {record_id}: {e}"),
+            })?;
+        if let ProjectResolution::Ambiguous { .. } = resolve(&input) {
+            outcome.ambiguous += 1;
+            outcome.ambiguous_ids.push(record_id);
+        } else {
+            outcome.unresolved += 1;
+            outcome.unresolved_ids.push(record_id);
+        }
+        return Ok(());
+    };
+
+    let new_project_id = target
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_owned();
+
+    let rewritten =
+        replace_project_id_line(&yaml, &new_project_id).map_err(|e| api::ApiError::Other {
+            message: format!("rewrite project_id for {record_id}: {e}"),
+        })?;
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| api::ApiError::Other {
+            message: format!("create_dir_all {}: {e}", parent.display()),
+        })?;
+    }
+    std::fs::write(&target, &rewritten).map_err(|e| api::ApiError::Other {
+        message: format!("write target {}: {e}", target.display()),
+    })?;
+
+    let rel_added = target
+        .strip_prefix(&paths.notebook_git)
+        .unwrap_or(&target)
+        .to_path_buf();
+    let rel_removed = inbox_path
+        .strip_prefix(&paths.notebook_git)
+        .unwrap_or(inbox_path)
+        .to_path_buf();
+
+    // `git rm` the old inbox path (removes working-tree file + stages deletion).
+    let rm_status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&paths.notebook_git)
+        .args(["rm", "--quiet"])
+        .arg(&rel_removed)
+        .status()
+        .map_err(|e| api::ApiError::Other {
+            message: format!("git rm {}: {e}", rel_removed.display()),
+        })?;
+    if !rm_status.success() {
+        return Err(api::ApiError::Other {
+            message: format!(
+                "git rm refused for {} (rm status {rm_status})",
+                rel_removed.display()
+            ),
+        });
+    }
+
+    let message = format!("project: normalize {record_id} from _inbox to {new_project_id}");
+    let historical_signers = paths.notebook_git.join(".trust/historical_signers");
+    match git_commit_signed(&paths.notebook_git, &[&rel_added], &message) {
+        Ok(_sha) => {
+            // Post-commit signature verification.
+            if let Err(e) =
+                git_verify_commit_with_signers(&paths.notebook_git, "HEAD", &historical_signers)
+            {
+                let _ = api::rollback_last_commit(&paths.notebook_git);
+                return Err(api::ApiError::Other {
+                    message: format!("verify signed commit for {record_id}: {e}"),
+                });
+            }
+            outcome.moved_ids.push(record_id);
+            Ok(())
+        }
+        Err(e) => {
+            // Rollback: remove the new file; restore the deleted inbox file.
+            let _ = std::fs::remove_file(&target);
+            let _ = api::restore_paths_from_head(&paths.notebook_git, &[&rel_removed]);
+            Err(api::ApiError::Other {
+                message: format!("git_commit_signed for {record_id}: {e}"),
+            })
+        }
+    }
 }
 
 #[cfg(test)]
