@@ -13,6 +13,7 @@
 
 pub mod canon;
 pub mod cc_slug;
+pub mod normalize_inbox;
 pub mod resolve;
 
 use std::path::PathBuf;

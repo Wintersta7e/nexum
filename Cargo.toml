@@ -61,7 +61,7 @@ rmcp = { version = "1", features = ["macros", "server", "transport-io"] }
 # crate path, so the crate must also be a direct dependency.
 schemars = "1"
 # Git.
-git2 = "0.20"
+git2 = "0.21"
 # HTTP / API client.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # Async stream combinators (StreamExt) for reqwest's bytes_stream.

@@ -121,6 +121,11 @@ pub enum ApiError {
         path: std::path::PathBuf,
         reason: String,
     },
+    /// Generic error carrying a free-form message. Used by callers (e.g.
+    /// `normalize_inbox`) that need to signal a logical failure that doesn't
+    /// fit a more specific variant.
+    #[error("{message}")]
+    Other { message: String },
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -2135,18 +2140,35 @@ pub fn list_projects(paths: &Paths, cfg: &Config) -> Result<ProjectListing, ApiE
 
 /// Resolve the filesystem path for a `project_id` from `cfg.projects`.
 ///
-/// Only `name:`-identity ids carry a registered path: the id `name:<name>`
-/// maps to `cfg.projects["<name>"]["path"]`, the `[projects.<name>]` table
-/// `nexum project register` writes. Every other identity kind (`git:`,
-/// `cc-slug:`, `codex-cwd:`, path) returns `None` — the `records` table
-/// has no path column and those identities are derived, not registered.
+/// Two lookup forms, in order:
+///   1. `name:<X>` → `cfg.projects[X]["path"]` — what `nexum project
+///      register` writes (legacy/canonical for non-git projects).
+///   2. `<project_id>` directly → `cfg.projects[<project_id>]["path"]` —
+///      what `nexum project set-path` writes for any identity, including
+///      `git:`, `cc-slug:`, `codex-cwd:`.
+///
+/// Returns `None` when neither key carries a path.
 fn project_path_for(project_id: &str, cfg: &Config) -> Option<String> {
-    let name = project_id.strip_prefix("name:")?;
+    // First try the legacy `name:` lookup (strip prefix, key under <name>).
+    // This is what `nexum project register` writes today.
+    if let Some(name) = project_id.strip_prefix("name:") {
+        let path_opt = cfg
+            .projects
+            .get(name)
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("path"))
+            .and_then(|v| v.as_str());
+        if let Some(path) = path_opt {
+            return Some(path.to_owned());
+        }
+    }
+    // New: also try the full project_id as the key — what `nexum project
+    // set-path` writes for any identity prefix.
     cfg.projects
-        .get(name)?
-        .as_table()?
-        .get("path")?
-        .as_str()
+        .get(project_id)
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("path"))
+        .and_then(|v| v.as_str())
         .map(str::to_owned)
 }
 
@@ -3008,6 +3030,26 @@ mod tests {
         for s in &listing.results {
             assert_eq!(s.path, None, "path must be None for {}", s.project_id);
         }
+    }
+
+    #[test]
+    fn project_path_for_resolves_git_identity_when_registered() {
+        let mut cfg = Config::seed();
+        let mut entry = toml::Table::new();
+        entry.insert("path".into(), toml::Value::String("/tmp/foo".into()));
+        cfg.projects
+            .insert("git:abc123def4567890".into(), toml::Value::Table(entry));
+
+        assert_eq!(
+            project_path_for("git:abc123def4567890", &cfg),
+            Some("/tmp/foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn project_path_for_returns_none_for_unregistered_git_identity() {
+        let cfg = Config::seed();
+        assert_eq!(project_path_for("git:unregistered", &cfg), None);
     }
 
     /// Seed one minimal row so the FTS path returns at least a candidate
