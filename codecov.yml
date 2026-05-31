@@ -1,0 +1,24 @@
+# Codecov configuration.
+# Coverage is uploaded from CI by the `coverage` job in
+# .github/workflows/ci.yml (cargo-llvm-cov -> lcov.info).
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto        # compare against the parent commit
+        threshold: 1%       # tolerate small, noisy fluctuations
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: true     # only comment when coverage actually moves
+
+# Generated coverage artifacts and the harness itself aren't product code.
+ignore:
+  - "e2e/**"
+  - "bench/**"
+  - "**/tests/**"

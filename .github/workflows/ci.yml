@@ -62,12 +62,56 @@ jobs:
         # so rustdoc examples in pub items are verified by the gate.
         run: cargo test --locked --workspace --doc
 
+  coverage:
+    name: Coverage (codecov)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          prefix-key: "v0-coverage"
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Add llvm-tools-preview (needed by cargo-llvm-cov)
+        # rust-toolchain.toml ships a minimal profile (clippy + rustfmt only);
+        # llvm-cov needs the llvm-tools component to read the raw profiles.
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@3d832235cb306500b868c2632a137d48634568cd # v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Configure git identity for tests
+        # Same as the gate: init's bootstrap-commit path shells out to
+        # `git commit`, and CI runners have no global git identity.
+        run: |
+          git config --global user.name "nexum-ci"
+          git config --global user.email "nexum-ci@example.invalid"
+
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --locked --workspace --all-targets --lcov --output-path lcov.info
+
+      - name: Upload to Codecov
+        # fail_ci_if_error stays false so a codecov hiccup never breaks the
+        # gate; the upload needs the repo onboarded + a CODECOV_TOKEN secret.
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
   deny:
     name: cargo-deny (advisories + licenses + bans + sources)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2
 
   msrv:
     name: MSRV verify (1.95)
