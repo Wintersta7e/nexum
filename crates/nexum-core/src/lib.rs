@@ -21,6 +21,7 @@ pub mod init;
 pub mod migrate;
 pub mod paths;
 pub mod project;
+mod promote;
 pub mod query;
 pub mod records;
 pub mod session;

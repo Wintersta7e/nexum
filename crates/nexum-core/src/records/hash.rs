@@ -111,6 +111,22 @@ pub fn compute_index_hash(r: &UnifiedRecord) -> String {
     out
 }
 
+/// Raw sha256 of `bytes`, returned as 64 lowercase hex chars.
+///
+/// Used by commit-correlation helpers to hash commit messages and tree
+/// fingerprint buffers without re-implementing the hex loop.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let result = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for b in result {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// `(id, content_hash, project_id)` tuple — the lightweight row
 /// `AdapterPass.records` carries. The indexer joins these against the
 /// cached `records` table to compute the new / changed / gone sets per
