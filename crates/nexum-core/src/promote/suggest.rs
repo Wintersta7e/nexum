@@ -14,7 +14,7 @@ use crate::trust::git_history::git;
 
 /// A (recommendation, commit) pair that passes the configured correlation
 /// predicate within the correlation window.
-pub(crate) struct Suggestion {
+pub struct Suggestion {
     pub rec_id: String,
     pub project_id: String,
     pub commit_sha: String,
@@ -27,7 +27,7 @@ pub(crate) struct Suggestion {
 /// suggested per the config predicate:
 ///   `require_message_reference` ? (`msg_ref` AND overlap >= thr)
 ///                               : (`msg_ref` OR  overlap >= thr)
-pub(crate) fn scan(
+pub fn scan(
     _paths: &Paths,
     cfg: &Config,
     recs: &[UnifiedRecord],

@@ -3286,6 +3286,124 @@ fn build_decision_record(
     }
 }
 
+// ── promote_suggestions ───────────────────────────────────────────────────────
+
+/// Outcome of `api::promote_suggestions`.
+pub struct SuggestOutcome {
+    /// Number of recommendations marked stale this pass.
+    pub marked_stale: usize,
+    /// (recommendation, commit) pairs that pass the correlation predicate.
+    pub suggestions: Vec<crate::promote::suggest::Suggestion>,
+    /// Set when the post-stale-sweep reindex failed (severity=partial).
+    pub index_warning: Option<crate::api::error::ErrorEnvelope>,
+}
+
+/// Reaper sweep (mutating: stamps stale) then suggestion scan (read-only).
+///
+/// Flow:
+/// 1. Enumerate proposed local recommendations via the index.
+/// 2. Run the suggestion scan — each passing (rec, commit) pair is a candidate.
+/// 3. Stale = age-based candidates MINUS the recs that got a suggestion this pass.
+/// 4. For each stale rec, commit a `LifecycleEvent::Stale` to the notebook.
+/// 5. If any were marked, run `index_run` fail-soft and capture any partial failure.
+///
+/// # Errors
+///
+/// Returns `ApiError::Query` if the index cannot be opened or listed.
+/// Stale lifecycle commits propagate write errors immediately (the commit
+/// is the durable side-effect; a partial-index failure becomes `index_warning`).
+pub fn promote_suggestions(paths: &Paths, cfg: &Config) -> Result<SuggestOutcome, ApiError> {
+    let recs = list_local_recommendations(paths, cfg)?;
+    let suggestions = crate::promote::suggest::scan(paths, cfg, &recs)?;
+    let suggested: std::collections::HashSet<&str> =
+        suggestions.iter().map(|s| s.rec_id.as_str()).collect();
+
+    // Stale = age-based proposed recs that got no suggestion this pass.
+    let now = chrono::Utc::now();
+    let stale: Vec<_> = crate::promote::reaper::find_stale(cfg, &recs, now)
+        .into_iter()
+        .filter(|rk| !suggested.contains(rk.id.as_str()))
+        .collect();
+
+    let mut marked = 0;
+    for rk in stale {
+        crate::notebook::writer::commit_lifecycle_event(
+            paths,
+            &crate::notebook::lifecycle::LifecycleEvent::Stale { rec_ref: rk },
+        )?;
+        marked += 1;
+    }
+
+    // Surface a partial index failure only when there were stale commits to reindex.
+    let index_warning = if marked > 0 {
+        crate::api::index_run(paths, cfg).err().map(|e| {
+            crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
+                detail: e.to_string(),
+            })
+        })
+    } else {
+        None
+    };
+
+    Ok(SuggestOutcome {
+        marked_stale: marked,
+        suggestions,
+        index_warning,
+    })
+}
+
+/// Enumerate all proposed local recommendations from the index.
+///
+/// Pages through the list verb (filter: type=recommendation, source=local)
+/// and fetches the full `UnifiedRecord` for each ID, then discards non-proposed
+/// outcomes. The page size is generous (1000) to avoid truncating realistic
+/// workloads without introducing unbounded memory growth.
+fn list_local_recommendations(
+    paths: &Paths,
+    cfg: &Config,
+) -> Result<Vec<crate::records::types::UnifiedRecord>, ApiError> {
+    use crate::records::types::{Outcome, RecordType, Source};
+
+    let filters = Filters {
+        record_type: Some(RecordType::Recommendation),
+        source: Some(Source::Local),
+        ..Default::default()
+    };
+    let opts = GetOpts {
+        include_unsigned: true,
+        ..Default::default()
+    };
+
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let page = list(paths, cfg, &filters, 1000, cursor.as_deref())?;
+        let has_more = page.next_cursor.is_some();
+        cursor = page.next_cursor;
+
+        let conn = open_for_query(paths)?;
+        for result in page.results {
+            let key = RecordKey {
+                id: result.id.clone(),
+                source: Some(Source::Local),
+                project_id: Some(result.project_id.clone()),
+            };
+            if let GetOutcome::Found { record, .. } = query_get(&conn, &key, &opts)?
+                && record.outcome == Outcome::Proposed
+            {
+                out.push(*record);
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3552,4 +3670,134 @@ mod tests {
         assert!(!res.meta.embed_pool_saturated);
         assert!(res.results.len() <= 5);
     }
+
+    // ── promote_suggestions / list_local_recommendations ─────────────────────
+
+    /// Seed a minimal recommendation row directly into the index DB.
+    fn seed_recommendation(
+        conn: &rusqlite::Connection,
+        id: &str,
+        project_id: &str,
+        outcome: &str,
+        source: &str,
+        created: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
+             (?1, ?2, ?3, 'recommendation', 'test rec', 'body', '[]', '', 'manual', '[]', \
+              '[]', '[]', 'medium', ?4, ?5, ?5, 'h', 'ih', 'no-signature', ?5)",
+            rusqlite::params![id, source, project_id, outcome, created],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_local_recommendations_returns_proposed_local_recs() {
+        let (_dir, paths) = paths_with_temp_home();
+        let conn = open_or_create(&paths.index_db).unwrap();
+
+        seed_recommendation(
+            &conn,
+            "2026-01-01-alpha",
+            "git:proj",
+            "proposed",
+            "local",
+            "2026-01-01T00:00:00Z",
+        );
+        // Non-proposed: should be excluded.
+        seed_recommendation(
+            &conn,
+            "2026-01-02-beta",
+            "git:proj",
+            "promoted",
+            "local",
+            "2026-01-02T00:00:00Z",
+        );
+        // Non-local: should be excluded.
+        seed_recommendation(
+            &conn,
+            "2026-01-03-gamma",
+            "git:proj",
+            "proposed",
+            "cc-native",
+            "2026-01-03T00:00:00Z",
+        );
+        drop(conn);
+
+        let cfg = Config::seed();
+        let recs = list_local_recommendations(&paths, &cfg).unwrap();
+        assert_eq!(
+            recs.len(),
+            1,
+            "expected one proposed local rec, got {recs:?}"
+        );
+        assert_eq!(recs[0].id, "2026-01-01-alpha");
+    }
+
+    #[test]
+    fn list_local_recommendations_empty_store_returns_empty() {
+        let (_dir, paths) = paths_with_temp_home();
+        let _conn = open_or_create(&paths.index_db).unwrap();
+        let cfg = Config::seed();
+        let recs = list_local_recommendations(&paths, &cfg).unwrap();
+        assert!(recs.is_empty());
+    }
+
+    /// `promote_suggestions` with an empty index: `marked_stale=0`,
+    /// `suggestions=[]`, `index_warning=None`.
+    #[test]
+    fn promote_suggestions_empty_store_returns_zero_outcome() {
+        let (_dir, paths) = paths_with_temp_home();
+        let _conn = open_or_create(&paths.index_db).unwrap();
+        let cfg = Config::seed();
+        let outcome = promote_suggestions(&paths, &cfg).unwrap();
+        assert_eq!(outcome.marked_stale, 0);
+        assert!(outcome.suggestions.is_empty());
+        assert!(outcome.index_warning.is_none());
+    }
+
+    /// When all proposed local recs are within the correlation window, none
+    /// are marked stale and `marked_stale=0` with no `index_warning`.
+    #[test]
+    fn promote_suggestions_recent_rec_not_marked_stale() {
+        let (_dir, paths) = paths_with_temp_home();
+        let conn = open_or_create(&paths.index_db).unwrap();
+        // A rec created 5 days ago — well within the default 30-day window.
+        let recent = (chrono::Utc::now() - chrono::Duration::days(5)).to_rfc3339();
+        seed_recommendation(
+            &conn,
+            "2026-05-27-recent-rec",
+            "git:proj",
+            "proposed",
+            "local",
+            &recent,
+        );
+        drop(conn);
+
+        let mut cfg = Config::seed();
+        // No path registered for git:proj — scan will skip it (no repo → no suggestions).
+        cfg.promote.correlation_window_days = 30;
+        // Disable project-path lookup so scan skips gracefully (no repo → no commit scan).
+        let outcome = promote_suggestions(&paths, &cfg).unwrap();
+        assert_eq!(
+            outcome.marked_stale, 0,
+            "recent rec must not be marked stale"
+        );
+        assert!(outcome.suggestions.is_empty());
+        assert!(outcome.index_warning.is_none());
+    }
+
+    // NOTE: the "old proposed rec gets marked stale" happy path requires
+    // `commit_lifecycle_event` to succeed, which needs a fully bootstrapped
+    // notebook.git with an active signing key. This is covered by the live e2e
+    // harness; the unit test above (recent_rec_not_marked_stale) verifies the
+    // age-filter logic with a rec that is too young to be reaped.
+    //
+    // The scan-produces-suggestions path is covered by the
+    // `promote::suggest` unit tests (scan_returns_suggestion_when_*), which
+    // exercise the full scan predicate against a real git repo fixture.
+    // The `promote_suggestions` function composes `list_local_recommendations`
+    // + `scan` + `find_stale` — each of those three is independently tested.
 }
