@@ -2202,7 +2202,7 @@ pub fn list_projects(paths: &Paths, cfg: &Config) -> Result<ProjectListing, ApiE
 ///      `git:`, `cc-slug:`, `codex-cwd:`.
 ///
 /// Returns `None` when neither key carries a path.
-fn project_path_for(project_id: &str, cfg: &Config) -> Option<String> {
+pub(crate) fn project_path_for(project_id: &str, cfg: &Config) -> Option<String> {
     // First try the legacy `name:` lookup (strip prefix, key under <name>).
     // This is what `nexum project register` writes today.
     if let Some(name) = project_id.strip_prefix("name:") {
