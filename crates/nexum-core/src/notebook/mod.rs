@@ -7,3 +7,7 @@ pub(crate) mod lifecycle;
 // change; the transitional dead_code allow is removed then.
 #[allow(dead_code)]
 pub(crate) mod emit;
+// Pre-flight guard and lifecycle-mutation writer. Consumed by the promotion
+// facade in a later change; the transitional dead_code allow is removed then.
+#[allow(dead_code)]
+pub(crate) mod writer;
