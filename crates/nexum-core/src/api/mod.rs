@@ -3404,6 +3404,19 @@ fn list_local_recommendations(
     Ok(out)
 }
 
+/// Walk `notebook.git` history newest-first, classifying each commit by its
+/// message prefix (see [`crate::notebook::audit::AuditEntry`]).
+///
+/// # Errors
+///
+/// Returns `ApiError::Other` if `git` cannot be invoked or exits non-zero.
+pub fn audit_log(
+    paths: &Paths,
+    limit: Option<usize>,
+) -> Result<Vec<crate::notebook::audit::AuditEntry>, ApiError> {
+    crate::notebook::audit::audit_log(paths, limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
