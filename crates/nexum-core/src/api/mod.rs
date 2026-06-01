@@ -5,6 +5,7 @@
 pub mod active_signer;
 pub mod error;
 
+pub use crate::promote::suggest::Suggestion;
 pub use active_signer::resolve_active_signer_fingerprint;
 
 use crate::{
@@ -3234,18 +3235,6 @@ fn build_decision_record(
 
     let now = chrono::Utc::now();
 
-    let input = crate::notebook::emit::DecisionInput {
-        decision_id: decision_id.to_owned(),
-        project_id: rec.project_id.clone(),
-        source_rec_id: rec.id.clone(),
-        source_rec_title: rec.title.clone(),
-        agent: rec.agent.as_db_str().to_owned(),
-        created: now,
-        commit_evidence: evidence.clone(),
-        inherited_warnings: inherited_warnings.to_vec(),
-    };
-    let body = crate::notebook::emit::build_decision_yaml(&input);
-
     crate::records::types::UnifiedRecord {
         id: decision_id.to_owned(),
         record_type: RecordType::Decision,
@@ -3255,7 +3244,9 @@ fn build_decision_record(
         project_id: rec.project_id.clone(),
         title: rec.title.clone(),
         summary: None,
-        body,
+        // The writer regenerates the on-disk YAML from the record's fields via
+        // its own `build_decision_yaml` call; `body` is never read back.
+        body: String::new(),
         body_origin_path: None,
         tags: vec![],
         agent: rec.agent,

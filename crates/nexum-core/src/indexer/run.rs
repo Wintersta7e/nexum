@@ -804,6 +804,7 @@ struct UpsertRow<'a> {
     commit_evidence_json: Option<String>,
     promoted_from_json: Option<String>,
     inherited_warnings_json: Option<String>,
+    relevant_trust_events_commit: Option<&'a str>,
 }
 
 impl<'a> UpsertRow<'a> {
@@ -844,6 +845,7 @@ impl<'a> UpsertRow<'a> {
             commit_evidence_json,
             promoted_from_json,
             inherited_warnings_json,
+            relevant_trust_events_commit: r.provenance.relevant_trust_events_commit.as_deref(),
         }
     }
 }
@@ -1044,7 +1046,8 @@ fn update_record(
          commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
          index_hash = ?17, crypto_result = ?18, extras = ?19, indexed_at = ?20, \
          record_commit_sha = ?22, signer_fingerprint = ?23, \
-         commit_evidence = ?24, promoted_from = ?25, inherited_warnings = ?26 \
+         commit_evidence = ?24, promoted_from = ?25, inherited_warnings = ?26, \
+         relevant_trust_events_commit = ?27 \
          WHERE rowid = ?21",
         params![
             r.record_type.as_db_str(),
@@ -1073,6 +1076,7 @@ fn update_record(
             row.commit_evidence_json,
             row.promoted_from_json,
             row.inherited_warnings_json,
+            row.relevant_trust_events_commit,
         ],
     )?;
     Ok(())
@@ -1090,9 +1094,10 @@ fn insert_record(
          body_origin_path, tags, tags_fts, confidence, outcome, agent, session_refs, \
          files, commits, created, updated, content_hash, index_hash, crypto_result, \
          extras, indexed_at, record_commit_sha, signer_fingerprint, \
-         commit_evidence, promoted_from, inherited_warnings) VALUES \
+         commit_evidence, promoted_from, inherited_warnings, \
+         relevant_trust_events_commit) VALUES \
          (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-          ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+          ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
         params![
             r.id,
             source.as_db_str(),
@@ -1122,6 +1127,7 @@ fn insert_record(
             row.commit_evidence_json,
             row.promoted_from_json,
             row.inherited_warnings_json,
+            row.relevant_trust_events_commit,
         ],
     )?;
     Ok(())

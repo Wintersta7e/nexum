@@ -130,7 +130,6 @@ fn dirty_outside_event_paths(repo: &Path, event_paths: &[&Path]) -> Result<Vec<S
 /// inherit onto the new decision, or the refusal. `force_untrusted` bypasses
 /// only unsigned + unknown-signer (never bad-signature / tampered / compromised
 /// / Case-B). Keys on the projected (`signature_status`, `trust_basis`, `warnings`).
-#[allow(dead_code)]
 pub(crate) fn check_promote_eligibility(
     rec: &UnifiedRecord,
     force_untrusted: bool,

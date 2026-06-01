@@ -77,58 +77,10 @@ fn seed_rec(
 
 /// Run the incremental indexer over the fixture's notebook, populating the
 /// `SQLite` index so `api::get` can resolve records.
-///
-/// After indexing, patches `relevant_trust_events_commit` for every
-/// `local`-source record that has a `record_commit_sha` but a NULL
-/// `relevant_trust_events_commit`. The indexer sets the field on the
-/// in-memory record but the current SQL upsert doesn't write it; this
-/// post-pass mirrors the column so read-time trust projection works in tests.
 fn index_fixture(fixture: &NotebookFixture, cfg: &nexum_core::config::types::Config) {
     let paths = paths_for(fixture);
     let mut conn = open_or_create(&paths.index_db).expect("open index db");
     indexer_run(&mut conn, cfg, &paths).expect("index_run must succeed");
-
-    // Patch: for each local record with a record_commit_sha but no
-    // relevant_trust_events_commit, look up the events.yml commit and set it.
-    let nb = fixture.path();
-    let rows: Vec<(i64, String)> = conn
-        .prepare(
-            "SELECT rowid, record_commit_sha FROM records \
-             WHERE source = 'local' \
-               AND record_commit_sha IS NOT NULL \
-               AND relevant_trust_events_commit IS NULL",
-        )
-        .expect("prepare")
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .expect("query_map")
-        .flatten()
-        .collect();
-
-    for (rowid, commit_sha) in rows {
-        let out = std::process::Command::new("git")
-            .current_dir(nb)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .args([
-                "log",
-                "-1",
-                "--format=%H",
-                &commit_sha,
-                "--",
-                ".trust/events.yml",
-            ])
-            .output()
-            .expect("git log");
-        let events_sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        if !events_sha.is_empty() {
-            conn.execute(
-                "UPDATE records SET relevant_trust_events_commit = ?1 WHERE rowid = ?2",
-                rusqlite::params![events_sha, rowid],
-            )
-            .expect("update relevant_trust_events_commit");
-        }
-    }
 }
 
 /// Build a throwaway unsigned git repo with two commits on `main`.
