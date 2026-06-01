@@ -276,6 +276,22 @@ pub fn load_events_yml(path: &Path) -> Result<EventLog, TrustError> {
     })
 }
 
+/// True iff `fingerprint` does not appear in any `KeyRotatedOut` or
+/// `KeyCompromised` event — i.e. it is still an Active signer by raw-event
+/// membership. (Mirrors the historical inline check in `keys_rotate`.)
+#[must_use]
+pub(crate) fn is_active_signer(fingerprint: &str, log: &EventLog) -> bool {
+    log.events.iter().all(|e| match &e.payload {
+        EventKind::KeyRotatedOut {
+            fingerprint: fp, ..
+        }
+        | EventKind::KeyCompromised {
+            fingerprint: fp, ..
+        } => fp != fingerprint,
+        _ => true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +446,21 @@ events:
                 serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("event {i} parse: {e}"));
             assert_eq!(log, back, "event {i} round-trip failed");
         }
+    }
+
+    #[test]
+    fn is_active_signer_rejects_rotated_and_compromised() {
+        let log = EventLog {
+            schema_version: 1,
+            events: vec![Event {
+                event_id: uuid::Uuid::nil(),
+                payload: EventKind::KeyRotatedOut {
+                    fingerprint: "SHA256:rot".into(),
+                    reason: "r".into(),
+                },
+            }],
+        };
+        assert!(!is_active_signer("SHA256:rot", &log));
+        assert!(is_active_signer("SHA256:other", &log));
     }
 }

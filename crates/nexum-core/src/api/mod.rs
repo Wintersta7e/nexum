@@ -798,23 +798,16 @@ pub fn keys_rotate(
         let events_yml = paths.notebook_git.join(".trust/events.yml");
         let event_log =
             crate::trust::events::load_events_yml(&events_yml).map_err(ApiError::Trust)?;
-        if let Some(signer_fp) = resolve_active_signer_fingerprint(paths)? {
-            let signer_trusted = event_log.events.iter().all(|e| match &e.payload {
-                crate::trust::events::EventKind::KeyRotatedOut { fingerprint, .. }
-                | crate::trust::events::EventKind::KeyCompromised { fingerprint, .. } => {
-                    fingerprint != &signer_fp
-                }
-                _ => true,
+        if let Some(signer_fp) = resolve_active_signer_fingerprint(paths)?
+            && !crate::trust::events::is_active_signer(&signer_fp, &event_log)
+        {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "current git signer {signer_fp} is no longer trusted; \
+                     swap notebook.git/.git/config user.signingkey to an Active key \
+                     (run `nexum keys list` to see which keys qualify)"
+                ),
             });
-            if !signer_trusted {
-                return Err(ApiError::TrustRegenerateRefused {
-                    reason: format!(
-                        "current git signer {signer_fp} is no longer trusted; \
-                         swap notebook.git/.git/config user.signingkey to an Active key \
-                         (run `nexum keys list` to see which keys qualify)"
-                    ),
-                });
-            }
         }
 
         // Read the new key's public-key blob and compute its fingerprint.
