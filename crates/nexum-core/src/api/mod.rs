@@ -3417,6 +3417,24 @@ pub fn audit_log(
     crate::notebook::audit::audit_log(paths, limit)
 }
 
+/// Fresh cryptographic verification of a single record.
+///
+/// Re-runs `git verify-commit` against the record's notebook commit SHA and
+/// combines the live verdict with the read-time projection already stored in
+/// the record's `provenance` fields. Read-only — no writer lock.
+///
+/// # Errors
+///
+/// Returns `ApiError::SourceRecIncompatible` when the record does not exist.
+/// Returns `ApiError::Other` if the `git` binary cannot be spawned.
+pub fn verify_record(
+    paths: &Paths,
+    cfg: &Config,
+    rec_arg: &str,
+) -> Result<crate::notebook::verify::VerifyOutcome, ApiError> {
+    crate::notebook::verify::verify_record(paths, cfg, rec_arg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
