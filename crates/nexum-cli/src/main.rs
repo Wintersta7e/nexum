@@ -53,6 +53,10 @@ enum Commands {
     /// Diagnose store health and (with `--resolve-pending-reanchor`) clean
     /// up a partial-reanchor sentinel.
     Doctor(commands::doctor::DoctorArgs),
+    /// Promote a local recommendation to a decision.
+    Promote(commands::promote::PromoteArgs),
+    /// Reject a local recommendation.
+    Reject(commands::reject::RejectArgs),
     /// Manage signing keys. This release supports `rotate` (additive —
     /// adds a new trusted key without retiring the old one).
     Keys {
@@ -79,6 +83,8 @@ fn main() -> ExitCode {
         Commands::Trust { cmd } => commands::trust::run(&cmd),
         Commands::Migrate(args) => commands::migrate::run(&args),
         Commands::Doctor(args) => commands::doctor::run(&args),
+        Commands::Promote(args) => commands::promote::run(&args),
+        Commands::Reject(args) => commands::reject::run(&args),
         Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
 }

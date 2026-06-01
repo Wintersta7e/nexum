@@ -76,7 +76,10 @@ pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
         | ec::KEYS_RECOVER_PIN_MISSING_FOR_CASE_A
         | ec::KEYS_RECOVER_IN_PROGRESS
         | ec::KEYS_RECOVER_NEW_KEY_ALREADY_KNOWN
-        | ec::KEYS_RECOVER_AGENT_UNAVAILABLE => USAGE,
+        | ec::KEYS_RECOVER_AGENT_UNAVAILABLE
+        // Lifecycle refusals that are caller-side argument errors.
+        | ec::SOURCE_REC_UNTRUSTED
+        | ec::SOURCE_REC_INCOMPATIBLE => USAGE,
         ec::NOT_INITIALIZED => NOT_INITIALIZED,
         ec::STORE_INTEGRITY
         | ec::INVALID_FILTER
@@ -87,7 +90,18 @@ pub(crate) fn for_envelope(env: &nexum_core::api::error::ErrorEnvelope) -> u8 {
         | ec::TRUST_DUPLICATE_EVENT
         | ec::KEYS_RECOVER_PIN_MISMATCH_FOR_CASE_A
         | ec::KEYS_RECOVER_FAILED
-        | ec::PRE_RECOVERY_ACK_FILE_MALFORMED => STORE_INTEGRITY,
+        | ec::PRE_RECOVERY_ACK_FILE_MALFORMED
+        // Lifecycle pre-flight + commit + partial failures.
+        | ec::NOTEBOOK_DIRTY
+        | ec::MERGE_IN_PROGRESS
+        | ec::SIGNER_INACTIVE
+        | ec::COMMIT_NOT_FOUND
+        | ec::COMMIT_UNREACHABLE_FROM_DEFAULT
+        | ec::REPO_NO_DEFAULT_BRANCH
+        | ec::COMMIT_SIGN_FAILED
+        | ec::COMMIT_REJECTED_BY_HOOK
+        | ec::INDEX_REFRESH_FAILED
+        | ec::ROLLBACK_FAILED => STORE_INTEGRITY,
         ec::CONCURRENT => CONCURRENT,
         ec::MIGRATION_REQUIRED => MIGRATION_REQUIRED,
         ec::REANCHOR_PENDING => REANCHOR_PENDING,
