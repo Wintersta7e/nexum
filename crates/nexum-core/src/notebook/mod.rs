@@ -1,13 +1,6 @@
-// Lifecycle-event mutation surface for notebook.git. Consumed by the
-// promotion facade in a later change; the transitional dead_code allow is
-// removed then.
-#[allow(dead_code)]
-pub(crate) mod lifecycle;
-// Decision-record YAML emitter. Consumed by the lifecycle writer in a later
-// change; the transitional dead_code allow is removed then.
-#[allow(dead_code)]
-pub(crate) mod emit;
-// Pre-flight guard and lifecycle-mutation writer. Consumed by the promotion
-// facade in a later change; the transitional dead_code allow is removed then.
-#[allow(dead_code)]
-pub(crate) mod writer;
+// Lifecycle-event types and commit-message renderers.
+pub mod lifecycle;
+// Decision-record YAML emitter and recommendation-stamping helpers.
+pub mod emit;
+// Pre-flight guard, eligibility check, and the lifecycle-mutation writer.
+pub mod writer;

@@ -2,7 +2,7 @@ use crate::records::types::{CommitEvidence, RecordKey, UnifiedRecord};
 
 /// One lifecycle mutation = one signed commit. `Promote` is the only
 /// multi-file event (stamps the rec + creates the decision).
-pub(crate) enum LifecycleEvent {
+pub enum LifecycleEvent {
     Promote {
         rec_ref: RecordKey,
         new_decision: Box<UnifiedRecord>,
@@ -17,7 +17,7 @@ pub(crate) enum LifecycleEvent {
 }
 
 impl LifecycleEvent {
-    pub(crate) fn message_for_promote(rec: &RecordKey, decision_id: &str, sha: &str) -> String {
+    pub fn message_for_promote(rec: &RecordKey, decision_id: &str, sha: &str) -> String {
         format!(
             "promote: {} -> {decision_id} via {}",
             rec.id,
@@ -25,11 +25,11 @@ impl LifecycleEvent {
         )
     }
 
-    pub(crate) fn message_for_reject(rec: &RecordKey) -> String {
+    pub fn message_for_reject(rec: &RecordKey) -> String {
         format!("reject: {}", rec.id)
     }
 
-    pub(crate) fn message_for_stale(rec: &RecordKey) -> String {
+    pub fn message_for_stale(rec: &RecordKey) -> String {
         format!("stale: {}", rec.id)
     }
 }

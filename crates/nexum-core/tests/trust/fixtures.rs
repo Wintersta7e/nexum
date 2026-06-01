@@ -101,6 +101,10 @@ pub fn new_keypair(workdir: &Path, name: &str) -> KeyPair {
         std::fs::set_permissions(&priv_path, std::fs::Permissions::from_mode(0o600))
             .expect("chmod 0600 on private key");
     }
+    // Write the public key sibling so `resolve_active_signer_fingerprint` can
+    // resolve the fingerprint from the path-branch (it reads `<path>.pub`).
+    let pub_path = workdir.join(format!("{name}_id.pub"));
+    std::fs::write(&pub_path, pub_str.as_str()).expect("write public key file");
     let fingerprint = key
         .public_key()
         .fingerprint(ssh_key::HashAlg::Sha256)

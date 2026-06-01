@@ -1,15 +1,18 @@
-//! Pre-flight guard and source-record eligibility for lifecycle mutations
-//! against `notebook.git`.
+//! Pre-flight guard, eligibility check, and the sole lifecycle-mutation entry
+//! into `notebook.git` for the promotion pipeline.
 //!
-//! `preflight` is **invoked inside the `with_writer_lock` closure** (wired in
-//! the next task) so the dirty/merge/reanchor store-state checks cannot race
-//! another process between the check and lock acquisition. The function is
-//! location-agnostic; the call site owns lock acquisition.
+//! `preflight` is **invoked inside the `with_writer_lock` closure** (see
+//! `commit_lifecycle_event`) so the dirty/merge/reanchor store-state checks
+//! cannot race another process between the check and lock acquisition.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
     api::ApiError,
+    notebook::{
+        emit::{self, DecisionInput},
+        lifecycle::LifecycleEvent,
+    },
     paths::Paths,
     records::types::{SignatureStatus, TrustBasis, UnifiedRecord},
 };
@@ -189,6 +192,273 @@ pub(crate) fn check_promote_eligibility(
             id: rec.id.clone(),
             reason: "unverifiable source".into(),
         }),
+    }
+}
+
+// ── lifecycle-event writer ─────────────────────────────────────────────────
+
+/// The sole lifecycle-mutation entry into `notebook.git`. One signed commit
+/// per event. Returns the commit SHA.
+///
+/// Does **not** re-index after the commit — the api facade owns the
+/// post-commit `index_run` so it can surface the partial-failure warning
+/// alongside the durable SHA.
+///
+/// Critical invariants:
+/// - `preflight` runs **inside** the writer lock (TOCTOU-safe).
+/// - `Promote` stages two files in one commit (decision yaml + stamped rec).
+/// - On verify-failure: `rollback_last_commit`; on commit-failure:
+///   `restore_paths_from_head`. Both failures route through `after_rollback`.
+///
+/// # Errors
+///
+/// Returns `ApiError::SignerInactive` if no active signing key is configured.
+/// Returns `ApiError::NotebookDirty`, `ApiError::MergeInProgress`, or
+/// `ApiError::ReanchorPending` if the notebook store is in a bad state.
+/// Returns `ApiError::CommitSignFailed` if the signed commit or post-commit
+/// verification fails (worktree is restored to clean state before returning).
+/// Returns `ApiError::RollbackFailed` if the rollback itself also failed
+/// (worktree may be in an indeterminate state; manual intervention required).
+pub fn commit_lifecycle_event(paths: &Paths, event: &LifecycleEvent) -> Result<String, ApiError> {
+    let plan = plan_paths(paths, event)?;
+    let rel_refs: Vec<&Path> = plan.iter().map(PathBuf::as_path).collect();
+    let message = render_message(event);
+
+    crate::api::with_writer_lock(paths, || {
+        // Pre-flight INSIDE the lock (TOCTOU-safe). Eligibility (check_promote_eligibility)
+        // is checked by the caller before the event is built.
+        preflight(paths, &rel_refs)?;
+        write_event_files(paths, event)?;
+
+        let historical = paths.notebook_git.join(".trust/historical_signers");
+        match crate::init::git_ops::git_commit_signed(&paths.notebook_git, &rel_refs, &message) {
+            Ok(sha) => {
+                match crate::init::git_ops::git_verify_commit_with_signers(
+                    &paths.notebook_git,
+                    "HEAD",
+                    &historical,
+                ) {
+                    Ok(()) => Ok(sha),
+                    // Commit landed but verify failed: hard-reset.
+                    Err(e) => Err(after_rollback(
+                        &crate::api::rollback_last_commit(&paths.notebook_git),
+                        ApiError::CommitSignFailed {
+                            detail: e.to_string(),
+                        },
+                    )),
+                }
+            }
+            // Commit itself failed: restore the written paths from HEAD.
+            Err(e) => Err(after_rollback(
+                &crate::api::restore_paths_from_head(&paths.notebook_git, &rel_refs),
+                ApiError::CommitSignFailed {
+                    detail: e.to_string(),
+                },
+            )),
+        }
+    })
+}
+
+/// Compute the repo-relative paths that `event` will touch (relative to
+/// `paths.notebook_git`).
+///
+/// - `Promote`: rec's `recommendations/<id>.yml` + decision's `decisions/<id>.yml`
+///   (both under `<project_id>/`).
+/// - `Reject` / `Stale`: rec's `recommendations/<id>.yml` only.
+fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<Vec<PathBuf>, ApiError> {
+    let nb = &paths.notebook_git;
+    match event {
+        LifecycleEvent::Promote {
+            rec_ref,
+            new_decision,
+            ..
+        } => {
+            let project_id = rec_ref
+                .project_id
+                .as_deref()
+                .ok_or_else(|| ApiError::Other {
+                    message: "rec_ref.project_id is required for Promote".into(),
+                })?;
+            let rec_path = nb
+                .join(project_id)
+                .join("recommendations")
+                .join(format!("{}.yml", rec_ref.id))
+                .strip_prefix(nb)
+                .unwrap()
+                .to_owned();
+            let dec_path = nb
+                .join(project_id)
+                .join("decisions")
+                .join(format!("{}.yml", new_decision.id))
+                .strip_prefix(nb)
+                .unwrap()
+                .to_owned();
+            Ok(vec![rec_path, dec_path])
+        }
+        LifecycleEvent::Reject { rec_ref } | LifecycleEvent::Stale { rec_ref } => {
+            let project_id = rec_ref
+                .project_id
+                .as_deref()
+                .ok_or_else(|| ApiError::Other {
+                    message: "rec_ref.project_id is required for Reject/Stale".into(),
+                })?;
+            let rec_path = nb
+                .join(project_id)
+                .join("recommendations")
+                .join(format!("{}.yml", rec_ref.id))
+                .strip_prefix(nb)
+                .unwrap()
+                .to_owned();
+            Ok(vec![rec_path])
+        }
+    }
+}
+
+/// Build the commit message for `event`. For `Promote`, the "via" SHA is the
+/// project-repo commit SHA from `commit_evidence` (known pre-commit — NOT the
+/// notebook commit). This must agree with the audit-log parser (T24).
+fn render_message(event: &LifecycleEvent) -> String {
+    match event {
+        LifecycleEvent::Promote {
+            rec_ref,
+            new_decision,
+            commit_evidence,
+        } => LifecycleEvent::message_for_promote(
+            rec_ref,
+            &new_decision.id,
+            &commit_evidence.commit_sha,
+        ),
+        LifecycleEvent::Reject { rec_ref } => LifecycleEvent::message_for_reject(rec_ref),
+        LifecycleEvent::Stale { rec_ref } => LifecycleEvent::message_for_stale(rec_ref),
+    }
+}
+
+/// Write the on-disk files that `event` requires, under `paths.notebook_git`.
+///
+/// - `Promote`: create `<project_id>/decisions/<dec_id>.yml` from
+///   `emit::build_decision_yaml`; read and stamp the rec via
+///   `emit::stamp_promoted`.
+/// - `Reject`: read and stamp the rec via `emit::replace_outcome_line` →
+///   `rejected`.
+/// - `Stale`: read and stamp the rec via `emit::replace_outcome_line` →
+///   `stale`.
+fn write_event_files(paths: &Paths, event: &LifecycleEvent) -> Result<(), ApiError> {
+    let nb = &paths.notebook_git;
+    match event {
+        LifecycleEvent::Promote {
+            rec_ref,
+            new_decision,
+            commit_evidence,
+        } => {
+            let project_id = rec_ref
+                .project_id
+                .as_deref()
+                .ok_or_else(|| ApiError::Other {
+                    message: "rec_ref.project_id is required for Promote".into(),
+                })?;
+
+            // Build the decision YAML from new_decision's fields + commit_evidence.
+            let dec_yaml = emit::build_decision_yaml(&DecisionInput {
+                decision_id: new_decision.id.clone(),
+                project_id: new_decision.project_id.clone(),
+                source_rec_id: rec_ref.id.clone(),
+                // The decision's title carries the source rec's title (set by
+                // the api facade when it constructs new_decision). Fallback to
+                // the rec id only if the title is empty.
+                source_rec_title: if new_decision.title.is_empty() {
+                    rec_ref.id.clone()
+                } else {
+                    new_decision.title.clone()
+                },
+                agent: new_decision.agent.as_db_str().to_owned(),
+                created: new_decision.created,
+                commit_evidence: commit_evidence.clone(),
+                inherited_warnings: new_decision.provenance.inherited_warnings.clone(),
+            });
+
+            let dec_dir = nb.join(project_id).join("decisions");
+            std::fs::create_dir_all(&dec_dir).map_err(|e| ApiError::Other {
+                message: format!("create_dir_all {}: {e}", dec_dir.display()),
+            })?;
+            let dec_path = dec_dir.join(format!("{}.yml", new_decision.id));
+            std::fs::write(&dec_path, &dec_yaml).map_err(|e| ApiError::Other {
+                message: format!("write decision yaml {}: {e}", dec_path.display()),
+            })?;
+
+            // Stamp the recommendation.
+            let rec_path = nb
+                .join(project_id)
+                .join("recommendations")
+                .join(format!("{}.yml", rec_ref.id));
+            let rec_yaml = std::fs::read_to_string(&rec_path).map_err(|e| ApiError::Other {
+                message: format!("read rec {} for stamping: {e}", rec_path.display()),
+            })?;
+            let stamped = emit::stamp_promoted(&rec_yaml, &new_decision.id)?;
+            std::fs::write(&rec_path, &stamped).map_err(|e| ApiError::Other {
+                message: format!("write stamped rec {}: {e}", rec_path.display()),
+            })?;
+        }
+
+        LifecycleEvent::Reject { rec_ref } => {
+            let project_id = rec_ref
+                .project_id
+                .as_deref()
+                .ok_or_else(|| ApiError::Other {
+                    message: "rec_ref.project_id is required for Reject".into(),
+                })?;
+            let rec_path = nb
+                .join(project_id)
+                .join("recommendations")
+                .join(format!("{}.yml", rec_ref.id));
+            let rec_yaml = std::fs::read_to_string(&rec_path).map_err(|e| ApiError::Other {
+                message: format!("read rec {} for reject: {e}", rec_path.display()),
+            })?;
+            let stamped = emit::replace_outcome_line(&rec_yaml, "rejected")?;
+            std::fs::write(&rec_path, &stamped).map_err(|e| ApiError::Other {
+                message: format!("write rejected rec {}: {e}", rec_path.display()),
+            })?;
+        }
+
+        LifecycleEvent::Stale { rec_ref } => {
+            let project_id = rec_ref
+                .project_id
+                .as_deref()
+                .ok_or_else(|| ApiError::Other {
+                    message: "rec_ref.project_id is required for Stale".into(),
+                })?;
+            let rec_path = nb
+                .join(project_id)
+                .join("recommendations")
+                .join(format!("{}.yml", rec_ref.id));
+            let rec_yaml = std::fs::read_to_string(&rec_path).map_err(|e| ApiError::Other {
+                message: format!("read rec {} for stale: {e}", rec_path.display()),
+            })?;
+            let stamped = emit::replace_outcome_line(&rec_yaml, "stale")?;
+            std::fs::write(&rec_path, &stamped).map_err(|e| ApiError::Other {
+                message: format!("write stale rec {}: {e}", rec_path.display()),
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Translate a rollback result + the original error into the surface error.
+///
+/// On rollback success (`Ok(true)`) → return the original error.
+/// On rollback failure (`Ok(false)` or `Err`) → return
+/// `ApiError::RollbackFailed` so the caller knows the worktree is in an
+/// indeterminate state and manual intervention is required.
+///
+/// This mirrors `surface_rollback_err` in `api/mod.rs` but maps to
+/// `RollbackFailed` (the lifecycle-specific variant) rather than
+/// `TrustRegenerateFailed`.
+fn after_rollback(rollback: &Result<bool, std::io::Error>, original: ApiError) -> ApiError {
+    if matches!(rollback, Ok(true)) {
+        original
+    } else {
+        ApiError::RollbackFailed {
+            detail: format!("rollback failed after: {original}"),
+        }
     }
 }
 

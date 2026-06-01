@@ -19,7 +19,7 @@ pub mod index;
 pub mod indexer;
 pub mod init;
 pub mod migrate;
-mod notebook;
+pub mod notebook;
 pub mod paths;
 pub mod project;
 mod promote;
