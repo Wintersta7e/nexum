@@ -800,12 +800,34 @@ struct UpsertRow<'a> {
     crypto_result: &'a str,
     record_commit_sha: Option<&'a str>,
     signer_fingerprint: Option<&'a str>,
+    /// M3 lifecycle columns (NULL for non-promoted records).
+    commit_evidence_json: Option<String>,
+    promoted_from_json: Option<String>,
+    inherited_warnings_json: Option<String>,
 }
 
 impl<'a> UpsertRow<'a> {
     fn from_record(r: &'a UnifiedRecord) -> Self {
         let tags_json = serde_json::to_string(&r.tags).expect("serializable record fields");
         let tags_fts = normalize_tags_for_fts(&tags_json);
+        let commit_evidence_json = r
+            .provenance
+            .commit_evidence
+            .as_ref()
+            .map(|e| serde_json::to_string(e).expect("serializable commit_evidence"));
+        let promoted_from_json = r
+            .provenance
+            .promoted_from
+            .as_ref()
+            .map(|k| serde_json::to_string(k).expect("serializable promoted_from"));
+        let inherited_warnings_json = if r.provenance.inherited_warnings.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&r.provenance.inherited_warnings)
+                    .expect("serializable inherited_warnings"),
+            )
+        };
         Self {
             tags_json,
             tags_fts,
@@ -819,6 +841,9 @@ impl<'a> UpsertRow<'a> {
             crypto_result: r.provenance.crypto_result.as_db_str(),
             record_commit_sha: r.provenance.record_commit_sha.as_deref(),
             signer_fingerprint: r.provenance.signer_fingerprint.as_deref(),
+            commit_evidence_json,
+            promoted_from_json,
+            inherited_warnings_json,
         }
     }
 }
@@ -1018,7 +1043,8 @@ fn update_record(
          confidence = ?8, outcome = ?9, agent = ?10, session_refs = ?11, files = ?12, \
          commits = ?13, created = ?14, updated = ?15, content_hash = ?16, \
          index_hash = ?17, crypto_result = ?18, extras = ?19, indexed_at = ?20, \
-         record_commit_sha = ?22, signer_fingerprint = ?23 \
+         record_commit_sha = ?22, signer_fingerprint = ?23, \
+         commit_evidence = ?24, promoted_from = ?25, inherited_warnings = ?26 \
          WHERE rowid = ?21",
         params![
             r.record_type.as_db_str(),
@@ -1044,6 +1070,9 @@ fn update_record(
             rid,
             row.record_commit_sha,
             row.signer_fingerprint,
+            row.commit_evidence_json,
+            row.promoted_from_json,
+            row.inherited_warnings_json,
         ],
     )?;
     Ok(())
@@ -1060,9 +1089,10 @@ fn insert_record(
         "INSERT INTO records (id, source, project_id, record_type, title, summary, body, \
          body_origin_path, tags, tags_fts, confidence, outcome, agent, session_refs, \
          files, commits, created, updated, content_hash, index_hash, crypto_result, \
-         extras, indexed_at, record_commit_sha, signer_fingerprint) VALUES \
+         extras, indexed_at, record_commit_sha, signer_fingerprint, \
+         commit_evidence, promoted_from, inherited_warnings) VALUES \
          (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-          ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+          ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         params![
             r.id,
             source.as_db_str(),
@@ -1089,6 +1119,9 @@ fn insert_record(
             row.now,
             row.record_commit_sha,
             row.signer_fingerprint,
+            row.commit_evidence_json,
+            row.promoted_from_json,
+            row.inherited_warnings_json,
         ],
     )?;
     Ok(())

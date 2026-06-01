@@ -149,7 +149,8 @@ fn fetch_candidates(conn: &Connection, key: &RecordKey) -> Result<Vec<RawRow>, Q
                            body_origin_path, tags, confidence, outcome, agent, session_refs, \
                            files, commits, created, updated, content_hash, crypto_result, \
                            extras, record_commit_sha, signer_fingerprint, \
-                           relevant_trust_events_commit";
+                           relevant_trust_events_commit, \
+                           commit_evidence, promoted_from, inherited_warnings";
 
     let (where_clause, params): (&str, Vec<Box<dyn ToSql>>) =
         match (key.source, key.project_id.as_deref()) {
@@ -208,6 +209,9 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
         record_commit_sha: r.get::<_, Option<String>>(20)?,
         signer_fingerprint: r.get::<_, Option<String>>(21)?,
         relevant_trust_events_commit: r.get::<_, Option<String>>(22)?,
+        commit_evidence: r.get::<_, Option<String>>(23)?,
+        promoted_from: r.get::<_, Option<String>>(24)?,
+        inherited_warnings: r.get::<_, Option<String>>(25)?,
     })
 }
 
@@ -245,6 +249,40 @@ fn build_record(
     let record_type = RecordType::from_db_str(&raw.record_type);
     let source = Source::from_db_str(&raw.source);
 
+    let commit_evidence = raw
+        .commit_evidence
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| QueryError::InvalidFilter {
+            detail: format!("commit_evidence: {e}"),
+        })?;
+    let promoted_from = raw
+        .promoted_from
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| QueryError::InvalidFilter {
+            detail: format!("promoted_from: {e}"),
+        })?;
+    let inherited_warnings: Vec<String> = raw
+        .inherited_warnings
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| QueryError::InvalidFilter {
+            detail: format!("inherited_warnings: {e}"),
+        })?
+        .unwrap_or_default();
+
+    // Merge inherited warnings into the surfaced warnings without duplicating.
+    let mut warnings = projected.warnings;
+    for w in &inherited_warnings {
+        if !warnings.contains(w) {
+            warnings.push(w.clone());
+        }
+    }
+
     Ok(UnifiedRecord {
         id: raw.id,
         record_type,
@@ -273,10 +311,10 @@ fn build_record(
             crypto_result,
             relevant_trust_events_commit: raw.relevant_trust_events_commit,
             trust_basis: projected.trust_basis,
-            warnings: projected.warnings,
-            commit_evidence: None,
-            promoted_from: None,
-            inherited_warnings: Vec::new(),
+            warnings,
+            commit_evidence,
+            promoted_from,
+            inherited_warnings,
         },
         extras,
         content_hash: raw.content_hash,
@@ -312,6 +350,10 @@ struct RawRow {
     /// Forwarded into [`CachedCrypto`] for the read-time projection and onto
     /// `Provenance::relevant_trust_events_commit` for downstream consumers.
     relevant_trust_events_commit: Option<String>,
+    /// M3 lifecycle columns (JSON-encoded; NULL for non-promoted records).
+    commit_evidence: Option<String>,
+    promoted_from: Option<String>,
+    inherited_warnings: Option<String>,
 }
 
 #[cfg(test)]
@@ -587,5 +629,250 @@ mod tests {
             "the raw struct field name must not leak"
         );
         assert_eq!(v["record"]["id"], "alpha");
+    }
+
+    /// Direct DB insert with populated lifecycle columns verifies the read
+    /// path deserialization and the `inherited_warnings` merge.
+    #[test]
+    fn lifecycle_columns_round_trip_via_direct_insert() {
+        use crate::records::types::{CommitEvidence, TreeFingerprint, VerificationStatus};
+
+        let (_dir, conn) = open();
+
+        let evidence = CommitEvidence {
+            repo_identity: "git:abc".into(),
+            branch: "main".into(),
+            commit_sha: "a1b2c3d".into(),
+            commit_time: chrono::DateTime::parse_from_rfc3339("2026-05-20T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            commit_message_hash: "0".repeat(64),
+            tree_changes_fingerprint: TreeFingerprint {
+                strict: "11".into(),
+                loose: "22".into(),
+                file_paths: vec!["src/lib.rs".into()],
+            },
+            verification_status: VerificationStatus::Verified,
+        };
+        let prom_key = RecordKey::bare("2026-04-29-x");
+
+        let commit_evidence_json =
+            serde_json::to_string(&evidence).expect("serializable commit evidence");
+        let promoted_from_json = serde_json::to_string(&prom_key).expect("serializable record key");
+        let inherited_warnings_json =
+            serde_json::to_string(&["pre-recovery-record"]).expect("serializable warnings");
+
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, \
+             created, updated, content_hash, index_hash, crypto_result, indexed_at, \
+             commit_evidence, promoted_from, inherited_warnings) \
+             VALUES ('promoted-1', 'local', 'p', 'decision', 'promoted-1', '', '[]', '', \
+                     'manual', '[]', '[]', '[]', 'medium', 'working', \
+                     '2026-05-20T00:00:00Z', '2026-05-20T00:00:00Z', 'h', 'ih', \
+                     'no-signature', '2026-05-20T00:01:00Z', \
+                     ?1, ?2, ?3)",
+            rusqlite::params![
+                commit_evidence_json,
+                promoted_from_json,
+                inherited_warnings_json
+            ],
+        )
+        .unwrap();
+
+        let res = get(
+            &conn,
+            &RecordKey::bare("promoted-1"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .unwrap();
+        let GetOutcome::Found { record: r, .. } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert!(
+            r.provenance.commit_evidence.is_some(),
+            "commit_evidence must be populated"
+        );
+        assert_eq!(
+            r.provenance.commit_evidence.as_ref().unwrap().commit_sha,
+            "a1b2c3d"
+        );
+        assert!(
+            r.provenance.promoted_from.is_some(),
+            "promoted_from must be populated"
+        );
+        assert!(
+            r.provenance
+                .warnings
+                .contains(&"pre-recovery-record".to_owned()),
+            "inherited warning must be surfaced in warnings"
+        );
+        assert_eq!(r.provenance.inherited_warnings, vec!["pre-recovery-record"]);
+    }
+
+    /// End-to-end: write a promoted decision YAML, run `index_run`, read it back
+    /// via `api::get`, and assert the provenance fields survive the full round-trip.
+    #[test]
+    fn promoted_decision_round_trips_commit_evidence() {
+        use crate::api;
+        use crate::config::types::Config;
+        use crate::paths::Paths;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::with_home(dir.path().to_owned());
+
+        // Write the decision YAML into the per-project layout.
+        let decisions_dir = paths.notebook_git.join("nexum").join("decisions");
+        std::fs::create_dir_all(&decisions_dir).unwrap();
+
+        let yaml = r#"schema_version: 1
+id: 2026-05-21-promoted-e2e
+record_type: decision
+project_id: nexum
+outcome: working
+confidence: high
+agent: claude-code
+created: 2026-05-21T00:00:00Z
+updated: 2026-05-21T00:00:00Z
+problem: promoted e2e test decision
+provenance:
+  source: nexum-promoted
+  promoted_from: {source: local, project_id: nexum, id: 2026-04-29-original}
+  inherited_warnings: [pre-recovery-record]
+  commit_evidence:
+    repo_identity: "git:abc"
+    branch: main
+    commit_sha: a1b2c3ddeadbeef
+    commit_time: 2026-05-20T00:00:00Z
+    commit_message_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    tree_changes_fingerprint: {strict: "11", loose: "22", file_paths: ["src/lib.rs"]}
+    verification_status: verified
+"#;
+        std::fs::write(decisions_dir.join("2026-05-21-promoted-e2e.yml"), yaml).unwrap();
+
+        let mut cfg = Config::seed();
+        cfg.adapters.cc.enabled = false;
+        cfg.adapters.codex.enabled = false;
+        // local adapter enabled (default); points at paths.notebook_git.
+
+        api::index_run(&paths, &cfg).expect("index_run must succeed");
+
+        let res = api::get(
+            &paths,
+            &cfg,
+            &RecordKey::bare("2026-05-21-promoted-e2e"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .expect("get must succeed");
+
+        let GetOutcome::Found { record: r, .. } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert!(
+            r.provenance.commit_evidence.is_some(),
+            "commit_evidence must survive index→get round-trip"
+        );
+        assert_eq!(
+            r.provenance.commit_evidence.as_ref().unwrap().commit_sha,
+            "a1b2c3ddeadbeef"
+        );
+        assert!(
+            r.provenance
+                .warnings
+                .contains(&"pre-recovery-record".to_owned()),
+            "inherited_warnings must be merged into warnings"
+        );
+    }
+
+    /// UPDATE path: index a promoted record, then re-index it (content unchanged
+    /// but force via `index_run_force`) and confirm lifecycle columns survive.
+    #[test]
+    fn promoted_decision_update_preserves_lifecycle_columns() {
+        use crate::api;
+        use crate::config::types::Config;
+        use crate::paths::Paths;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::with_home(dir.path().to_owned());
+
+        let decisions_dir = paths.notebook_git.join("nexum").join("decisions");
+        std::fs::create_dir_all(&decisions_dir).unwrap();
+
+        let yaml = r#"schema_version: 1
+id: 2026-05-21-promoted-update
+record_type: decision
+project_id: nexum
+outcome: working
+confidence: high
+agent: claude-code
+created: 2026-05-21T00:00:00Z
+updated: 2026-05-21T00:00:00Z
+problem: promoted update test decision
+provenance:
+  source: nexum-promoted
+  promoted_from: {source: local, project_id: nexum, id: 2026-04-29-src}
+  inherited_warnings: [pre-recovery-record]
+  commit_evidence:
+    repo_identity: "git:abc"
+    branch: main
+    commit_sha: beef1234
+    commit_time: 2026-05-20T00:00:00Z
+    commit_message_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+    tree_changes_fingerprint: {strict: "1", loose: "2", file_paths: ["src/main.rs"]}
+    verification_status: verified
+"#;
+        let yaml_path = decisions_dir.join("2026-05-21-promoted-update.yml");
+        std::fs::write(&yaml_path, yaml).unwrap();
+
+        let mut cfg = Config::seed();
+        cfg.adapters.cc.enabled = false;
+        cfg.adapters.codex.enabled = false;
+
+        // First index pass — INSERT path.
+        api::index_run(&paths, &cfg).expect("first index_run must succeed");
+
+        // Second index pass — UPDATE path (content_hash unchanged, still re-runs upsert).
+        // index_run_force lowers the stale threshold so the existing row is touched.
+        api::index_run_force(&paths, &cfg).expect("second index_run must succeed");
+
+        let res = api::get(
+            &paths,
+            &cfg,
+            &RecordKey::bare("2026-05-21-promoted-update"),
+            &GetOpts {
+                include_unsigned: true,
+                trust_policy: TrustPolicy::WarnButShow,
+                strict_revocation: false,
+            },
+        )
+        .expect("get must succeed after update");
+
+        let GetOutcome::Found { record: r, .. } = res else {
+            panic!("expected Found, got {res:?}");
+        };
+        assert!(
+            r.provenance.commit_evidence.is_some(),
+            "commit_evidence must survive UPDATE path"
+        );
+        assert_eq!(
+            r.provenance.commit_evidence.as_ref().unwrap().commit_sha,
+            "beef1234"
+        );
+        assert!(
+            r.provenance
+                .warnings
+                .contains(&"pre-recovery-record".to_owned()),
+            "inherited_warnings must survive UPDATE path"
+        );
     }
 }
