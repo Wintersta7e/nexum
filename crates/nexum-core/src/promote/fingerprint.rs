@@ -3,6 +3,7 @@
 //! All git calls reuse the env-scrubbed `crate::trust::git_history::git`
 //! builder so no user git config leaks into the queries.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::api::ApiError;
@@ -116,6 +117,88 @@ pub(crate) fn commit_metadata(repo: &Path, sha: &str) -> Result<CommitMeta, ApiE
     })
 }
 
+/// Strict + loose tree fingerprints over the full tree at `sha`.
+///
+/// `strict` = sha256 over `"{mode}\0{blob_sha}\0{path}\n"` lines sorted by
+/// path; `loose` = sha256 over `"{mode}\0{path}\n"` lines (content-agnostic,
+/// so a rebase that rewrites blob SHAs but keeps content+structure still
+/// matches loosely).
+pub(crate) fn tree_fingerprint(
+    repo: &Path,
+    sha: &str,
+) -> Result<crate::records::types::TreeFingerprint, ApiError> {
+    let out = git(repo)
+        .args(["ls-tree", "-r", "-z", "--full-tree", sha])
+        .output()
+        .map_err(|e| ApiError::Other {
+            message: format!("git ls-tree: {e}"),
+        })?;
+    if !out.status.success() {
+        return Err(ApiError::CommitNotFound {
+            sha: sha.to_owned(),
+            repo: repo.to_owned(),
+        });
+    }
+    // Each NUL-terminated record: "<mode> <type> <objsha>\t<path>"
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut entries: Vec<(String, String, String)> = Vec::new(); // (path, mode, blob_sha)
+    for rec in text.split('\0').filter(|s| !s.is_empty()) {
+        let (meta, path) = rec.split_once('\t').ok_or_else(|| ApiError::Other {
+            message: "malformed ls-tree record".into(),
+        })?;
+        let mut it = meta.split_whitespace(); // mode, type, objsha
+        let mode = it.next().unwrap_or("").to_owned();
+        let _ty = it.next().unwrap_or("");
+        let blob = it.next().unwrap_or("").to_owned();
+        entries.push((path.to_owned(), mode, blob));
+    }
+    entries.sort();
+    let mut strict_buf = String::new();
+    let mut loose_buf = String::new();
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for (path, mode, blob) in &entries {
+        let _ = writeln!(strict_buf, "{mode}\0{blob}\0{path}");
+        let _ = writeln!(loose_buf, "{mode}\0{path}");
+        paths.push(std::path::PathBuf::from(path));
+    }
+    Ok(crate::records::types::TreeFingerprint {
+        strict: crate::records::hash::sha256_hex(strict_buf.as_bytes()),
+        loose: crate::records::hash::sha256_hex(loose_buf.as_bytes()),
+        file_paths: paths,
+    })
+}
+
+/// Paths changed by `sha` (new path for renames). `-M` enables rename
+/// detection; `--root` makes the first (parentless) commit report its adds.
+pub(crate) fn changed_paths(repo: &Path, sha: &str) -> Result<Vec<std::path::PathBuf>, ApiError> {
+    let out = git(repo)
+        .args([
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            "-M",
+            "--root",
+            sha,
+        ])
+        .output()
+        .map_err(|e| ApiError::Other {
+            message: format!("git diff-tree: {e}"),
+        })?;
+    if !out.status.success() {
+        return Err(ApiError::CommitNotFound {
+            sha: sha.to_owned(),
+            repo: repo.to_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,12 +306,137 @@ mod tests {
         assert_eq!(meta.message.trim(), "second commit");
         // hash is 64 lowercase hex chars
         assert_eq!(meta.message_hash.len(), 64);
-        assert!(meta
-            .message_hash
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            meta.message_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         // Stable: same sha produces the same hash
         let meta2 = commit_metadata(dir.path(), &sha2).unwrap();
         assert_eq!(meta.message_hash, meta2.message_hash);
+    }
+
+    // ---- tree_fingerprint ----
+
+    #[test]
+    fn tree_fingerprint_stable_hashes_and_strict_ne_loose() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_sha1, sha2) = init_repo(dir.path());
+        let fp = tree_fingerprint(dir.path(), &sha2).unwrap();
+
+        // Both are 64-char lowercase hex
+        assert_eq!(fp.strict.len(), 64);
+        assert_eq!(fp.loose.len(), 64);
+        assert!(
+            fp.strict
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert!(
+            fp.loose
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+
+        // strict includes blob SHA so it differs from loose
+        assert_ne!(
+            fp.strict, fp.loose,
+            "strict and loose must differ (strict encodes blob SHA)"
+        );
+
+        // file_paths contains exactly the two committed files
+        let mut paths: Vec<String> = fp
+            .file_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+
+        // Stable: re-running yields the same hashes
+        let fp2 = tree_fingerprint(dir.path(), &sha2).unwrap();
+        assert_eq!(fp.strict, fp2.strict);
+        assert_eq!(fp.loose, fp2.loose);
+    }
+
+    #[test]
+    fn tree_fingerprint_first_commit_has_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sha1, _sha2) = init_repo(dir.path());
+        let fp = tree_fingerprint(dir.path(), &sha1).unwrap();
+        let paths: Vec<String> = fp
+            .file_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, ["a.txt"]);
+    }
+
+    // ---- changed_paths ----
+
+    #[test]
+    fn changed_paths_second_commit_returns_added_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_sha1, sha2) = init_repo(dir.path());
+        let changed = changed_paths(dir.path(), &sha2).unwrap();
+        let names: Vec<String> = changed
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["b.txt"]);
+    }
+
+    #[test]
+    fn changed_paths_first_commit_via_root_reports_adds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sha1, _sha2) = init_repo(dir.path());
+        // --root makes the parentless first commit report its adds
+        let changed = changed_paths(dir.path(), &sha1).unwrap();
+        let names: Vec<String> = changed
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["a.txt"]);
+    }
+
+    #[test]
+    fn changed_paths_rename_surfaces_under_new_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(dir.path())
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .args(args)
+                .status()
+                .expect("git available");
+            assert!(status.success(), "git {args:?} failed");
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+
+        // First commit: create original.txt
+        std::fs::write(dir.path().join("original.txt"), "content").unwrap();
+        run(&["add", "original.txt"]);
+        run(&["commit", "--no-gpg-sign", "-m", "initial"]);
+
+        // Second commit: rename original.txt → renamed.txt
+        run(&["mv", "original.txt", "renamed.txt"]);
+        run(&["commit", "--no-gpg-sign", "-m", "rename file"]);
+
+        let rename_sha = sha_of(dir.path(), "HEAD");
+        let changed = changed_paths(dir.path(), &rename_sha).unwrap();
+        let names: Vec<String> = changed
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        // -M reports the new path (renamed.txt), not the old one
+        assert!(
+            names.contains(&"renamed.txt".to_owned()),
+            "expected renamed.txt in changed paths, got {names:?}"
+        );
     }
 }
