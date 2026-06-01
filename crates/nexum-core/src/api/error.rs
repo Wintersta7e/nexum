@@ -202,6 +202,38 @@ pub mod error_codes {
     /// Generic catch-all for logical errors that don't fit a more specific
     /// variant (e.g. missing required YAML field detected at runtime).
     pub const INTERNAL: &str = "INTERNAL";
+
+    // ── Lifecycle-mutation error codes (M3 promote / write path) ─────────────
+    // Note: REPO_IDENTITY_MISMATCH and REANCHOR_PENDING already exist above
+    // and are reused by the corresponding lifecycle variants.
+
+    /// `notebook.git` has uncommitted changes outside the lifecycle paths;
+    /// operator must commit or revert before retrying.
+    pub const NOTEBOOK_DIRTY: &str = "NOTEBOOK_DIRTY";
+    /// `notebook.git` is mid-merge; the operator must abort or complete it.
+    pub const MERGE_IN_PROGRESS: &str = "MERGE_IN_PROGRESS";
+    /// The resolved current git signer is not in `Active` role.
+    pub const SIGNER_INACTIVE: &str = "SIGNER_INACTIVE";
+    /// The source recommendation's signature is untrusted.
+    pub const SOURCE_REC_UNTRUSTED: &str = "SOURCE_REC_UNTRUSTED";
+    /// The source recommendation exists but cannot be promoted for a
+    /// structural reason (wrong type, already promoted, etc.).
+    pub const SOURCE_REC_INCOMPATIBLE: &str = "SOURCE_REC_INCOMPATIBLE";
+    /// The requested commit SHA does not exist in the project repo.
+    pub const COMMIT_NOT_FOUND: &str = "COMMIT_NOT_FOUND";
+    /// The commit SHA exists but is not reachable from the default branch.
+    pub const COMMIT_UNREACHABLE_FROM_DEFAULT: &str = "COMMIT_UNREACHABLE_FROM_DEFAULT";
+    /// The project repo has no resolvable default branch.
+    pub const REPO_NO_DEFAULT_BRANCH: &str = "REPO_NO_DEFAULT_BRANCH";
+    /// Signing the lifecycle commit failed.
+    pub const COMMIT_SIGN_FAILED: &str = "COMMIT_SIGN_FAILED";
+    /// A `notebook.git` pre-commit hook rejected the lifecycle commit.
+    pub const COMMIT_REJECTED_BY_HOOK: &str = "COMMIT_REJECTED_BY_HOOK";
+    /// The lifecycle commit landed but the post-commit index refresh failed.
+    pub const INDEX_REFRESH_FAILED: &str = "INDEX_REFRESH_FAILED";
+    /// The lifecycle commit failed and rollback itself failed; manual
+    /// intervention required.
+    pub const ROLLBACK_FAILED: &str = "ROLLBACK_FAILED";
 }
 
 // ───── ApiError → ErrorEnvelope builder (top-level dispatch) ────────────────
@@ -509,6 +541,241 @@ impl From<&crate::api::ApiError> for ErrorEnvelope {
                 severity: None,
                 state_mutated: None,
                 requires_reindex: None,
+            },
+
+            // ── Lifecycle-mutation: refused (state_mutated=false, requires_reindex=false) ──
+
+            ApiError::NotebookDirty { dirty_files } => ErrorEnvelope {
+                error_code: error_codes::NOTEBOOK_DIRTY,
+                message: "notebook.git has uncommitted changes outside the lifecycle paths".into(),
+                remediation: Some(Remediation {
+                    command: Some("git -C ~/.nexum/notebook.git status".into()),
+                    rationale: "Commit or revert the dirty files, then retry.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "notebook",
+                    "subkind": "dirty",
+                    "dirty_files": dirty_files,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::MergeInProgress => ErrorEnvelope {
+                error_code: error_codes::MERGE_IN_PROGRESS,
+                message: "notebook.git is mid-merge".into(),
+                remediation: Some(Remediation {
+                    command: Some("git -C ~/.nexum/notebook.git merge --abort".into()),
+                    rationale: "Abort or complete the in-progress merge, then retry.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "notebook",
+                    "subkind": "merge_in_progress",
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::ReanchorPending { sentinel_path } => ErrorEnvelope {
+                error_code: error_codes::REANCHOR_PENDING,
+                message: "a reanchor is pending; run `nexum doctor --resolve-pending-reanchor` first".into(),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor --resolve-pending-reanchor".into()),
+                    rationale: "Resolve the pending reanchor before attempting lifecycle mutations.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "reanchor_pending",
+                    "sentinel_path": sentinel_path.display().to_string(),
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::SignerInactive { reason } => ErrorEnvelope {
+                error_code: error_codes::SIGNER_INACTIVE,
+                message: format!("current git signer is not Active: {reason}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum keys list".into()),
+                    rationale: "Run `nexum keys list` to see which keys are Active, then swap user.signingkey.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "trust",
+                    "subkind": "signer_inactive",
+                    "reason": reason,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::SourceRecUntrusted { id, signature_status } => ErrorEnvelope {
+                error_code: error_codes::SOURCE_REC_UNTRUSTED,
+                message: format!("source recommendation {id} is untrusted ({signature_status})"),
+                remediation: Some(Remediation {
+                    command: Some(format!("nexum get {id}")),
+                    rationale: "Inspect the record's trust state and resolve before promoting.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "record",
+                    "subkind": "source_rec_untrusted",
+                    "id": id,
+                    "signature_status": signature_status,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::SourceRecIncompatible { id, reason } => ErrorEnvelope {
+                error_code: error_codes::SOURCE_REC_INCOMPATIBLE,
+                message: format!("source recommendation {id} cannot be promoted: {reason}"),
+                remediation: None,
+                context: serde_json::json!({
+                    "kind": "record",
+                    "subkind": "source_rec_incompatible",
+                    "id": id,
+                    "reason": reason,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::RepoIdentityMismatch { expected, observed, path } => ErrorEnvelope {
+                error_code: error_codes::REPO_IDENTITY_MISMATCH,
+                message: format!("repo identity mismatch: expected {expected}, observed {observed}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum project set-path <path>".into()),
+                    rationale: "Verify the project path points to the correct repo.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "repo",
+                    "subkind": "identity_mismatch",
+                    "expected": expected,
+                    "observed": observed,
+                    "path": path.display().to_string(),
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::CommitNotFound { sha, repo } => ErrorEnvelope {
+                error_code: error_codes::COMMIT_NOT_FOUND,
+                message: format!("commit {sha} not found in {}", repo.display()),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "The commit may have been force-pushed away or the repo path may be wrong.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "repo",
+                    "subkind": "commit_not_found",
+                    "sha": sha,
+                    "repo": repo.display().to_string(),
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::CommitUnreachableFromDefault { sha, branch } => ErrorEnvelope {
+                error_code: error_codes::COMMIT_UNREACHABLE_FROM_DEFAULT,
+                message: format!("commit {sha} is not reachable from {branch}"),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "The commit may have been rebased away. Verify it is merged into the default branch.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "repo",
+                    "subkind": "commit_unreachable_from_default",
+                    "sha": sha,
+                    "branch": branch,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::RepoNoDefaultBranch { repo } => ErrorEnvelope {
+                error_code: error_codes::REPO_NO_DEFAULT_BRANCH,
+                message: format!("no default branch resolvable in {}", repo.display()),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Ensure the repo has a default branch (main or master) or configure one.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "repo",
+                    "subkind": "no_default_branch",
+                    "repo": repo.display().to_string(),
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::CommitSignFailed { detail } => ErrorEnvelope {
+                error_code: error_codes::COMMIT_SIGN_FAILED,
+                message: format!("signing the lifecycle commit failed: {detail}"),
+                remediation: Some(Remediation {
+                    command: Some("ssh-add <signing-key-path>".into()),
+                    rationale: "Ensure the signing key is loaded in the ssh-agent and retry.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "notebook",
+                    "subkind": "commit_sign_failed",
+                    "detail": detail,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+            ApiError::CommitRejectedByHook { detail } => ErrorEnvelope {
+                error_code: error_codes::COMMIT_REJECTED_BY_HOOK,
+                message: format!("a notebook.git pre-commit hook rejected the lifecycle commit: {detail}"),
+                remediation: Some(Remediation {
+                    command: None,
+                    rationale: "Inspect the hook output in `detail`, fix the underlying issue, and retry.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "notebook",
+                    "subkind": "commit_rejected_by_hook",
+                    "detail": detail,
+                }),
+                severity: Some(Severity::Refused),
+                state_mutated: Some(false),
+                requires_reindex: Some(false),
+            },
+
+            // ── Lifecycle-mutation: partial (state_mutated=true, requires_reindex=true) ──
+
+            ApiError::IndexRefreshFailed { detail } => ErrorEnvelope {
+                error_code: error_codes::INDEX_REFRESH_FAILED,
+                message: format!("post-commit index refresh failed: {detail}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum index".into()),
+                    rationale: "The lifecycle commit landed; run `nexum index` to bring the index back in sync.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "indexer",
+                    "subkind": "index_refresh_failed",
+                    "detail": detail,
+                }),
+                severity: Some(Severity::Partial),
+                state_mutated: Some(true),
+                requires_reindex: Some(true),
+            },
+
+            // ── Lifecycle-mutation: inconsistent (state_mutated=true, requires_reindex=false) ──
+
+            ApiError::RollbackFailed { detail } => ErrorEnvelope {
+                error_code: error_codes::ROLLBACK_FAILED,
+                message: format!("rollback after a failed lifecycle commit itself failed: {detail}"),
+                remediation: Some(Remediation {
+                    command: Some("nexum doctor".into()),
+                    rationale: "Run `nexum doctor` to assess the notebook state; manual intervention may be required.".into(),
+                }),
+                context: serde_json::json!({
+                    "kind": "notebook",
+                    "subkind": "rollback_failed",
+                    "detail": detail,
+                }),
+                severity: Some(Severity::Inconsistent),
+                state_mutated: Some(true),
+                requires_reindex: Some(false),
             },
         }
     }
@@ -1733,5 +2000,211 @@ mod tests {
         let v = serde_json::to_value(&m3).unwrap();
         assert_eq!(v["severity"], "refused");
         assert_eq!(v["state_mutated"], false);
+    }
+
+    // ── Lifecycle-mutation routing tests ─────────────────────────────────────
+
+    #[test]
+    fn notebook_dirty_routes_to_envelope() {
+        let e = crate::api::ApiError::NotebookDirty {
+            dirty_files: vec!["x.yml".into()],
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::NOTEBOOK_DIRTY);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+        assert_eq!(env.requires_reindex, Some(false));
+    }
+
+    #[test]
+    fn merge_in_progress_routes_refused() {
+        let e = crate::api::ApiError::MergeInProgress;
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::MERGE_IN_PROGRESS);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+        assert_eq!(env.requires_reindex, Some(false));
+    }
+
+    #[test]
+    fn reanchor_pending_lifecycle_routes_refused() {
+        let e = crate::api::ApiError::ReanchorPending {
+            sentinel_path: std::path::PathBuf::from("/tmp/.reanchor_pending"),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::REANCHOR_PENDING);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn signer_inactive_routes_refused() {
+        let e = crate::api::ApiError::SignerInactive {
+            reason: "key is rotated".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::SIGNER_INACTIVE);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn source_rec_untrusted_routes_refused() {
+        let e = crate::api::ApiError::SourceRecUntrusted {
+            id: "rec:proj:abc".into(),
+            signature_status: "Unsigned".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::SOURCE_REC_UNTRUSTED);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn source_rec_incompatible_routes_refused() {
+        let e = crate::api::ApiError::SourceRecIncompatible {
+            id: "rec:proj:abc".into(),
+            reason: "already promoted".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::SOURCE_REC_INCOMPATIBLE);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn repo_identity_mismatch_routes_refused() {
+        let e = crate::api::ApiError::RepoIdentityMismatch {
+            expected: "git:abc".into(),
+            observed: "git:def".into(),
+            path: std::path::PathBuf::from("/tmp/repo"),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::REPO_IDENTITY_MISMATCH);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn commit_not_found_routes_refused() {
+        let e = crate::api::ApiError::CommitNotFound {
+            sha: "deadbeef".into(),
+            repo: std::path::PathBuf::from("/tmp/repo"),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::COMMIT_NOT_FOUND);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn commit_unreachable_from_default_routes_refused() {
+        let e = crate::api::ApiError::CommitUnreachableFromDefault {
+            sha: "deadbeef".into(),
+            branch: "main".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::COMMIT_UNREACHABLE_FROM_DEFAULT);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn repo_no_default_branch_routes_refused() {
+        let e = crate::api::ApiError::RepoNoDefaultBranch {
+            repo: std::path::PathBuf::from("/tmp/repo"),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::REPO_NO_DEFAULT_BRANCH);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn commit_sign_failed_routes_refused() {
+        let e = crate::api::ApiError::CommitSignFailed {
+            detail: "ssh-agent not running".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::COMMIT_SIGN_FAILED);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn commit_rejected_by_hook_routes_refused() {
+        let e = crate::api::ApiError::CommitRejectedByHook {
+            detail: "pre-commit: lint failed".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::COMMIT_REJECTED_BY_HOOK);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("refused"))
+        );
+        assert_eq!(env.state_mutated, Some(false));
+    }
+
+    #[test]
+    fn index_refresh_failed_routes_partial() {
+        let e = crate::api::ApiError::IndexRefreshFailed {
+            detail: "sqlite locked".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::INDEX_REFRESH_FAILED);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("partial"))
+        );
+        assert_eq!(env.state_mutated, Some(true));
+        assert_eq!(env.requires_reindex, Some(true));
+    }
+
+    #[test]
+    fn rollback_failed_routes_inconsistent() {
+        let e = crate::api::ApiError::RollbackFailed {
+            detail: "git reset failed".into(),
+        };
+        let env: ErrorEnvelope = (&e).into();
+        assert_eq!(env.error_code, error_codes::ROLLBACK_FAILED);
+        assert_eq!(
+            env.severity.map(|s| serde_json::to_value(s).unwrap()),
+            Some(serde_json::json!("inconsistent"))
+        );
+        assert_eq!(env.state_mutated, Some(true));
+        assert_eq!(env.requires_reindex, Some(false));
     }
 }

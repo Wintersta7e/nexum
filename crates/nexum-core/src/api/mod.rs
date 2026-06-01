@@ -126,6 +126,67 @@ pub enum ApiError {
     /// fit a more specific variant.
     #[error("{message}")]
     Other { message: String },
+
+    // ── Lifecycle-mutation errors (promote / write path) ─────────────────────
+    // These variants drive the M3 lifecycle verbs. They are refused, partial,
+    // or inconsistent failures as defined by the agent-facing failure contract.
+    /// `notebook.git` has uncommitted changes outside the lifecycle paths;
+    /// refusing to mutate protects unrelated operator work from rollback.
+    #[error("notebook.git has uncommitted changes outside the lifecycle paths")]
+    NotebookDirty { dirty_files: Vec<String> },
+    /// `notebook.git` is mid-merge; lifecycle mutations cannot proceed.
+    #[error("notebook.git is mid-merge")]
+    MergeInProgress,
+    /// A reanchor sentinel is present; trust state is indeterminate.
+    #[error("a reanchor is pending; run `nexum doctor --resolve-pending-reanchor` first")]
+    ReanchorPending { sentinel_path: std::path::PathBuf },
+    /// The resolved current git signer is not in `Active` role.
+    #[error("current git signer is not Active: {reason}")]
+    SignerInactive { reason: String },
+    /// The source recommendation is not in a trusted state and cannot be promoted.
+    #[error("source recommendation {id} is untrusted ({signature_status})")]
+    SourceRecUntrusted {
+        id: String,
+        signature_status: String,
+    },
+    /// The source recommendation exists but cannot be promoted for a
+    /// non-trust reason (e.g. wrong record type, already promoted).
+    #[error("source recommendation {id} cannot be promoted: {reason}")]
+    SourceRecIncompatible { id: String, reason: String },
+    /// The project repo's origin URL canonicalizes to a different identity
+    /// than the one on the record being promoted.
+    #[error("repo identity mismatch: expected {expected}, observed {observed}")]
+    RepoIdentityMismatch {
+        expected: String,
+        observed: String,
+        path: std::path::PathBuf,
+    },
+    /// The requested commit SHA does not exist in the project repo.
+    #[error("commit {sha} not found in {repo}")]
+    CommitNotFound {
+        sha: String,
+        repo: std::path::PathBuf,
+    },
+    /// The commit SHA exists but is not reachable from the default branch.
+    #[error("commit {sha} is not reachable from {branch}")]
+    CommitUnreachableFromDefault { sha: String, branch: String },
+    /// The project repo has no resolvable default branch.
+    #[error("no default branch resolvable in {repo}")]
+    RepoNoDefaultBranch { repo: std::path::PathBuf },
+    /// Signing the lifecycle commit failed.
+    #[error("signing the lifecycle commit failed: {detail}")]
+    CommitSignFailed { detail: String },
+    /// A `notebook.git` pre-commit hook rejected the lifecycle commit.
+    #[error("a notebook.git pre-commit hook rejected the lifecycle commit: {detail}")]
+    CommitRejectedByHook { detail: String },
+    /// The lifecycle commit landed but the post-commit index refresh failed;
+    /// the index may be stale.
+    #[error("post-commit index refresh failed: {detail}")]
+    IndexRefreshFailed { detail: String },
+    /// The lifecycle commit failed and the rollback attempt itself failed;
+    /// manual intervention is required.
+    #[error("rollback after a failed lifecycle commit itself failed: {detail}")]
+    RollbackFailed { detail: String },
 }
 
 impl From<crate::query::QueryError> for ApiError {
