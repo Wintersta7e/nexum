@@ -157,6 +157,9 @@ fn run_dismiss(args: &DismissArgs) -> ExitCode {
                     "subkind": "dismiss",
                     "unknown_codes": unknown,
                 }),
+                severity: None,
+                state_mutated: None,
+                requires_reindex: None,
             };
             if args.json {
                 return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
@@ -242,6 +245,9 @@ pub(crate) fn render_tampering(rows: &[TamperingRow], json: bool) -> ExitCode {
                     .into(),
             }),
             context: serde_json::json!({ "events": events }),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         };
         return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
     }

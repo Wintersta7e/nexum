@@ -122,6 +122,9 @@ mod tests {
             message: "test".into(),
             remediation: None,
             context: serde_json::json!({}),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         }
     }
 

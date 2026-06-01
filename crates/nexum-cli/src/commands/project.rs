@@ -197,6 +197,7 @@ fn set_path(project_id: &str, path: &Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[allow(clippy::result_large_err)] // ErrorEnvelope is the wire contract; boxing would break callers
 fn check_git_identity(path: &Path, project_id: &str) -> Result<(), ErrorEnvelope> {
     let url_output = std::process::Command::new("git")
         .arg("-C")
@@ -217,6 +218,9 @@ fn check_git_identity(path: &Path, project_id: &str) -> Result<(), ErrorEnvelope
                     rationale: "Set a git origin remote or use `nexum project register` for non-git projects.".into(),
                 }),
                 context: serde_json::json!({"path": path.display().to_string()}),
+                severity: None,
+                state_mutated: None,
+                requires_reindex: None,
             });
         }
     };
@@ -240,6 +244,9 @@ fn check_git_identity(path: &Path, project_id: &str) -> Result<(), ErrorEnvelope
                 "observed": derived,
                 "url": url,
             }),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         })
     }
 }
@@ -302,6 +309,9 @@ fn resolve_path(path: &Path, json: bool) -> ExitCode {
                     rationale: "Pass an existing directory path.".into(),
                 }),
                 context: serde_json::json!({ "path": path.to_string_lossy() }),
+                severity: None,
+                state_mutated: None,
+                requires_reindex: None,
             };
             return super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env));
         }
