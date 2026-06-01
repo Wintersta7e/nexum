@@ -742,6 +742,44 @@ pub struct Provenance {
     pub warnings: Vec<String>,
 }
 
+/// Strict + loose tree fingerprints over a project-repo commit, plus the
+/// changed file paths. `strict` binds blob contents; `loose` binds only
+/// (path, mode) so a rebase that preserves content still matches loosely.
+/// `file_paths` powers diff-shape similarity scoring in a later milestone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeFingerprint {
+    pub strict: ContentHash,
+    pub loose: ContentHash,
+    pub file_paths: Vec<PathBuf>,
+}
+
+/// Live-verification state of a decision's recorded commit evidence at
+/// promote time. Only `Verified` (matcher confirmed) and `Unknown` (repo
+/// unreachable / fingerprint skipped) are reachable today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerificationStatus {
+    Verified,
+    Unknown,
+}
+
+/// Tracked evidence that a decision was promoted against a real commit in
+/// the user's project repo. Persisted in the decision record's on-disk
+/// `provenance:` block and mirrored into index columns for the read path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitEvidence {
+    /// Canonicalized git origin URL (`git:<hex>` hint) or root-commit hash
+    /// for offline projects.
+    pub repo_identity: String,
+    pub branch: String,
+    pub commit_sha: String,
+    pub commit_time: DateTime<Utc>,
+    /// sha256 of the normalized commit message; stable across cherry-pick.
+    pub commit_message_hash: ContentHash,
+    pub tree_changes_fingerprint: TreeFingerprint,
+    pub verification_status: VerificationStatus,
+}
+
 /// Unified in-memory record. Every adapter normalizes its on-disk shape to
 /// this struct.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1334,5 +1372,28 @@ mod tests {
         ] {
             assert_eq!(CryptoResult::from_db_str(variant.as_db_str()), variant);
         }
+    }
+
+    #[test]
+    fn commit_evidence_round_trips_yaml() {
+        let ev = CommitEvidence {
+            repo_identity: "git:abc123".into(),
+            branch: "main".into(),
+            commit_sha: "a1b2c3d4".into(),
+            commit_time: chrono::DateTime::parse_from_rfc3339("2026-05-21T10:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            commit_message_hash: "0".repeat(64),
+            tree_changes_fingerprint: TreeFingerprint {
+                strict: "1".repeat(64),
+                loose: "2".repeat(64),
+                file_paths: vec![std::path::PathBuf::from("src/lib.rs")],
+            },
+            verification_status: VerificationStatus::Verified,
+        };
+        let s = serde_yaml::to_string(&ev).unwrap();
+        let back: CommitEvidence = serde_yaml::from_str(&s).unwrap();
+        assert_eq!(ev, back);
+        assert!(s.contains("verification_status: verified"));
     }
 }
