@@ -195,7 +195,9 @@ mod tests {
         let kinds: Vec<&str> = entries.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(
             kinds,
-            ["other", "project", "init", "trust", "stale", "reject", "promote"]
+            [
+                "other", "project", "init", "trust", "stale", "reject", "promote"
+            ]
         );
     }
 
