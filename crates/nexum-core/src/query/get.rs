@@ -793,8 +793,9 @@ provenance:
         );
     }
 
-    /// UPDATE path: index a promoted record, then re-index it (content unchanged
-    /// but force via `index_run_force`) and confirm lifecycle columns survive.
+    /// UPDATE path: index a promoted record, mutate a field that changes
+    /// `index_hash` but leaves `content_hash` (title/summary/body) intact,
+    /// re-index, and confirm `update_record` fired and lifecycle columns survive.
     #[test]
     fn promoted_decision_update_preserves_lifecycle_columns() {
         use crate::api;
@@ -808,7 +809,9 @@ provenance:
         let decisions_dir = paths.notebook_git.join("nexum").join("decisions");
         std::fs::create_dir_all(&decisions_dir).unwrap();
 
-        let yaml = r#"schema_version: 1
+        // confidence=high; title/summary/body are fixed so content_hash is
+        // stable across the two passes.
+        let yaml_v1 = r#"schema_version: 1
 id: 2026-05-21-promoted-update
 record_type: decision
 project_id: nexum
@@ -817,7 +820,8 @@ confidence: high
 agent: claude-code
 created: 2026-05-21T00:00:00Z
 updated: 2026-05-21T00:00:00Z
-problem: promoted update test decision
+title: promoted update test
+body: stable body text
 provenance:
   source: nexum-promoted
   promoted_from: {source: local, project_id: nexum, id: 2026-04-29-src}
@@ -832,18 +836,31 @@ provenance:
     verification_status: verified
 "#;
         let yaml_path = decisions_dir.join("2026-05-21-promoted-update.yml");
-        std::fs::write(&yaml_path, yaml).unwrap();
+        std::fs::write(&yaml_path, yaml_v1).unwrap();
 
         let mut cfg = Config::seed();
         cfg.adapters.cc.enabled = false;
         cfg.adapters.codex.enabled = false;
 
-        // First index pass — INSERT path.
-        api::index_run(&paths, &cfg).expect("first index_run must succeed");
+        // First pass: INSERT path.
+        let outcome1 = api::index_run(&paths, &cfg).expect("first index_run must succeed");
+        assert_eq!(outcome1.upserts, 1, "first pass must insert");
 
-        // Second index pass — UPDATE path (content_hash unchanged, still re-runs upsert).
-        // index_run_force lowers the stale threshold so the existing row is touched.
-        api::index_run_force(&paths, &cfg).expect("second index_run must succeed");
+        // Mutate confidence high→medium: title/summary/body unchanged so
+        // content_hash is identical, but confidence is part of index_hash so
+        // index_hash changes. The dual-hash skip therefore does NOT fire and
+        // apply_upserts calls update_record.
+        let yaml_v2 = yaml_v1.replace("confidence: high", "confidence: medium");
+        assert_ne!(yaml_v1, yaml_v2, "mutation must change the YAML");
+        std::fs::write(&yaml_path, yaml_v2).unwrap();
+
+        // Second pass: normal incremental run — the changed index_hash forces
+        // a real UPDATE via update_record (no force flag needed).
+        let outcome2 = api::index_run(&paths, &cfg).expect("second index_run must succeed");
+        assert!(
+            outcome2.upserts > 0,
+            "second pass must upsert (update_record must fire); outcome={outcome2:?}"
+        );
 
         let res = api::get(
             &paths,

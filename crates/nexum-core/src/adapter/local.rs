@@ -23,9 +23,9 @@ use crate::{
         Adapter, AdapterError, AdapterPass, PassCompleteness, SkipKind, SkipReason,
     },
     records::{
-        content_hash, Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome,
-        ProjectId, Provenance, RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus,
-        Source, UnifiedRecord,
+        Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome, ProjectId,
+        Provenance, RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source,
+        UnifiedRecord, content_hash,
     },
 };
 
@@ -502,11 +502,7 @@ fn compute_record_commit_sha(notebook_git: &Path, record_path: &Path) -> Option<
         return None;
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
+    if sha.is_empty() { None } else { Some(sha) }
 }
 
 #[cfg(test)]
@@ -803,6 +799,46 @@ provenance:
         );
         assert!(rec.provenance.commit_evidence.is_some());
         assert_eq!(rec.provenance.promoted_from.unwrap().id, "2026-04-29-x");
+    }
+
+    #[test]
+    fn malformed_provenance_block_degrades_gracefully() {
+        // A record whose `provenance:` block cannot be deserialized into
+        // `ProvenanceBlock` (e.g. a scalar where an object is expected) must
+        // still parse successfully: the `.ok()` fallback in `parse_local_record`
+        // substitutes `ProvenanceBlock::default()`, leaving lifecycle fields empty
+        // rather than rejecting the record.
+        let dir = tempfile::tempdir().unwrap();
+        let nb = dir.path();
+        let p = nb.join("nexum/decisions/2026-05-21-malformed-prov.yml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            "schema_version: 1\n\
+             id: 2026-05-21-malformed-prov\n\
+             record_type: decision\n\
+             project_id: nexum\n\
+             outcome: working\n\
+             confidence: high\n\
+             agent: manual\n\
+             created: 2026-05-21T00:00:00Z\n\
+             updated: 2026-05-21T00:00:00Z\n\
+             title: malformed provenance record\n\
+             provenance:\n  commit_evidence: \"not_an_object\"\n",
+        )
+        .unwrap();
+        let rec = super::parse_local_record(nb, &p)
+            .expect("record with malformed provenance must still parse");
+        assert_eq!(rec.id, "2026-05-21-malformed-prov");
+        assert_eq!(rec.title, "malformed provenance record");
+        assert!(
+            rec.provenance.commit_evidence.is_none(),
+            "malformed commit_evidence must degrade to None"
+        );
+        assert!(
+            rec.provenance.inherited_warnings.is_empty(),
+            "malformed provenance must degrade to empty inherited_warnings"
+        );
     }
 
     #[test]
