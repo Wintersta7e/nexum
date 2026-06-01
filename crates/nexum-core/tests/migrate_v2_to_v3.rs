@@ -4,8 +4,8 @@
 use std::collections::HashSet;
 use std::sync::Once;
 
-use nexum_core::migrate::index_db::{migrate_to_latest, INDEX_DB_LATEST_VERSION};
 use nexum_core::migrate::MigrationOutcome;
+use nexum_core::migrate::index_db::{INDEX_DB_LATEST_VERSION, migrate_to_latest};
 use rusqlite::Connection;
 use tempfile::tempdir;
 

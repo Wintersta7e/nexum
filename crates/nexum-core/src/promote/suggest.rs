@@ -124,8 +124,8 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
 
     use super::{candidate_commits, scan};
-    use crate::config::types::PromoteConfig;
     use crate::config::Config;
+    use crate::config::types::PromoteConfig;
     use crate::paths::Paths;
     use crate::records::types::{
         Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome, Provenance,
