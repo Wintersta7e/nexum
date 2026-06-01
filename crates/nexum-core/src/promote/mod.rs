@@ -24,6 +24,11 @@ pub(crate) mod correlate;
 #[allow(dead_code)]
 pub(crate) mod suggest;
 
+// Stale-recommendation identification. Consumed by the promotion facade in a
+// later change; the transitional dead_code allow is removed then.
+#[allow(dead_code)]
+pub(crate) mod reaper;
+
 /// Resolve a record's project repo path from the config registry.
 /// Thin wrapper over `crate::api::project_path_for` so `promote::*` submodules
 /// don't need to reach into `api` directly.
