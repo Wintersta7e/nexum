@@ -197,8 +197,36 @@ pub(crate) fn check_promote_eligibility(
 
 // ── lifecycle-event writer ─────────────────────────────────────────────────
 
+/// Repo-relative paths that a lifecycle event will touch, split into newly
+/// created files and pre-existing files. The split drives rollback: new files
+/// must be deleted (`remove_file`); existing files must be restored from HEAD
+/// (`git checkout HEAD --`). Merging both sets gives the paths to stage.
+struct EventPaths {
+    /// Files that already exist in HEAD and will be modified (e.g. the
+    /// stamped recommendation YAML).
+    existing: Vec<PathBuf>,
+    /// Files that do not yet exist in HEAD and will be created (e.g. the
+    /// new decision YAML for a Promote event).
+    new: Vec<PathBuf>,
+}
+
+impl EventPaths {
+    /// All paths in stage order: existing first, then new.
+    fn all(&self) -> Vec<&Path> {
+        self.existing
+            .iter()
+            .chain(self.new.iter())
+            .map(PathBuf::as_path)
+            .collect()
+    }
+}
+
 /// The sole lifecycle-mutation entry into `notebook.git`. One signed commit
 /// per event. Returns the commit SHA.
+///
+/// `pub` visibility is for external integration tests only; the api facade is
+/// the sole intended production caller. Callers that bypass the facade skip
+/// the post-commit `index_run` and will leave the search index stale.
 ///
 /// Does **not** re-index after the commit — the api facade owns the
 /// post-commit `index_run` so it can surface the partial-failure warning
@@ -207,8 +235,9 @@ pub(crate) fn check_promote_eligibility(
 /// Critical invariants:
 /// - `preflight` runs **inside** the writer lock (TOCTOU-safe).
 /// - `Promote` stages two files in one commit (decision yaml + stamped rec).
-/// - On verify-failure: `rollback_last_commit`; on commit-failure:
-///   `restore_paths_from_head`. Both failures route through `after_rollback`.
+/// - On verify-failure: `rollback_last_commit`; on commit-failure: delete
+///   each newly created path and restore each pre-existing path from HEAD.
+///   Both failure paths route through `after_rollback`.
 ///
 /// # Errors
 ///
@@ -221,17 +250,17 @@ pub(crate) fn check_promote_eligibility(
 /// (worktree may be in an indeterminate state; manual intervention required).
 pub fn commit_lifecycle_event(paths: &Paths, event: &LifecycleEvent) -> Result<String, ApiError> {
     let plan = plan_paths(paths, event)?;
-    let rel_refs: Vec<&Path> = plan.iter().map(PathBuf::as_path).collect();
+    let all_refs = plan.all();
     let message = render_message(event);
 
     crate::api::with_writer_lock(paths, || {
         // Pre-flight INSIDE the lock (TOCTOU-safe). Eligibility (check_promote_eligibility)
         // is checked by the caller before the event is built.
-        preflight(paths, &rel_refs)?;
+        preflight(paths, &all_refs)?;
         write_event_files(paths, event)?;
 
         let historical = paths.notebook_git.join(".trust/historical_signers");
-        match crate::init::git_ops::git_commit_signed(&paths.notebook_git, &rel_refs, &message) {
+        match crate::init::git_ops::git_commit_signed(&paths.notebook_git, &all_refs, &message) {
             Ok(sha) => {
                 match crate::init::git_ops::git_verify_commit_with_signers(
                     &paths.notebook_git,
@@ -239,7 +268,9 @@ pub fn commit_lifecycle_event(paths: &Paths, event: &LifecycleEvent) -> Result<S
                     &historical,
                 ) {
                     Ok(()) => Ok(sha),
-                    // Commit landed but verify failed: hard-reset.
+                    // Commit landed but verify failed: hard-reset removes the
+                    // commit and restores the tree — safe for both new and
+                    // existing files.
                     Err(e) => Err(after_rollback(
                         &crate::api::rollback_last_commit(&paths.notebook_git),
                         ApiError::CommitSignFailed {
@@ -248,24 +279,40 @@ pub fn commit_lifecycle_event(paths: &Paths, event: &LifecycleEvent) -> Result<S
                     )),
                 }
             }
-            // Commit itself failed: restore the written paths from HEAD.
-            Err(e) => Err(after_rollback(
-                &crate::api::restore_paths_from_head(&paths.notebook_git, &rel_refs),
-                ApiError::CommitSignFailed {
-                    detail: e.to_string(),
-                },
-            )),
+            // Commit itself failed. `git_commit_signed` staged every path via
+            // `git add` before the failed commit, so new files are staged as
+            // additions. `git rm -f` clears both the index entry and the
+            // worktree copy (`git checkout HEAD --` would error on a path with
+            // no HEAD entry); pre-existing files are then restored from HEAD.
+            Err(e) => {
+                for new_path in &plan.new {
+                    let _ = crate::trust::git_history::git(&paths.notebook_git)
+                        .args(["rm", "-f", "--quiet", "--ignore-unmatch", "--"])
+                        .arg(new_path)
+                        .status();
+                }
+                let existing_refs: Vec<&Path> =
+                    plan.existing.iter().map(PathBuf::as_path).collect();
+                let restore =
+                    crate::api::restore_paths_from_head(&paths.notebook_git, &existing_refs);
+                Err(after_rollback(
+                    &restore,
+                    ApiError::CommitSignFailed {
+                        detail: e.to_string(),
+                    },
+                ))
+            }
         }
     })
 }
 
 /// Compute the repo-relative paths that `event` will touch (relative to
-/// `paths.notebook_git`).
+/// `paths.notebook_git`), split into pre-existing and newly created files.
 ///
-/// - `Promote`: rec's `recommendations/<id>.yml` + decision's `decisions/<id>.yml`
-///   (both under `<project_id>/`).
-/// - `Reject` / `Stale`: rec's `recommendations/<id>.yml` only.
-fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<Vec<PathBuf>, ApiError> {
+/// - `Promote`: the stamped rec (`recommendations/<id>.yml`) is EXISTING;
+///   the decision YAML (`decisions/<id>.yml`) is NEW.
+/// - `Reject` / `Stale`: the stamped rec is EXISTING; nothing new.
+fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<EventPaths, ApiError> {
     let nb = &paths.notebook_git;
     match event {
         LifecycleEvent::Promote {
@@ -293,7 +340,10 @@ fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<Vec<PathBuf>, Api
                 .strip_prefix(nb)
                 .unwrap()
                 .to_owned();
-            Ok(vec![rec_path, dec_path])
+            Ok(EventPaths {
+                existing: vec![rec_path],
+                new: vec![dec_path],
+            })
         }
         LifecycleEvent::Reject { rec_ref } | LifecycleEvent::Stale { rec_ref } => {
             let project_id = rec_ref
@@ -309,7 +359,10 @@ fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<Vec<PathBuf>, Api
                 .strip_prefix(nb)
                 .unwrap()
                 .to_owned();
-            Ok(vec![rec_path])
+            Ok(EventPaths {
+                existing: vec![rec_path],
+                new: vec![],
+            })
         }
     }
 }
@@ -356,6 +409,20 @@ fn write_event_files(paths: &Paths, event: &LifecycleEvent) -> Result<(), ApiErr
                 .ok_or_else(|| ApiError::Other {
                     message: "rec_ref.project_id is required for Promote".into(),
                 })?;
+
+            // Guard: the decision's `project_id` field must agree with the
+            // path component derived from the rec. The adapter derives
+            // `project_id` from the directory on read, so a mismatch would
+            // produce a record whose YAML field contradicts its location.
+            if new_decision.project_id != project_id {
+                return Err(ApiError::Other {
+                    message: format!(
+                        "project_id mismatch: rec path component is \"{project_id}\" \
+                         but new_decision.project_id is \"{}\"",
+                        new_decision.project_id
+                    ),
+                });
+            }
 
             // Build the decision YAML from new_decision's fields + commit_evidence.
             let dec_yaml = emit::build_decision_yaml(&DecisionInput {

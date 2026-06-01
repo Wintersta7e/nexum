@@ -407,11 +407,110 @@ fn promote_writes_decision_and_stamps_rec_in_one_commit() {
     assert!(worktree_clean(nb), "worktree must be clean after Promote");
 }
 
-// ── Rollback: no valid signer ─────────────────────────────────────────────────
+// ── Rollback: commit fails via pre-commit hook (Promote) ──────────────────────
 
-/// When no `user.signingkey` is set the commit will fail (git refuses to
-/// sign), `restore_paths_from_head` is called, and the error surfaces as
-/// `ApiError::CommitSignFailed`. The worktree must be clean afterward.
+/// Exercises the commit-failure rollback for a Promote event via a pre-commit
+/// hook that exits 1. This keeps a VALID signer configured so `preflight`
+/// passes, then makes the commit itself fail — the code path that had the
+/// bug. Asserts: `CommitSignFailed` returned (NOT `RollbackFailed`), the new
+/// decision file does NOT exist on disk, the rec is unchanged (still
+/// `outcome: proposed`), and the worktree is clean.
+#[test]
+fn promote_commit_hook_failure_returns_commit_sign_failed_and_clean_tree() {
+    let (fixture, primary, _bootstrap_ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+    let nb = fixture.path();
+    let project_id = "testproject";
+    let rec_id = "2026-04-29-promote-hook-fail";
+    let decision_id = "2026-05-01-hook-fail-decision";
+
+    seed_rec(&fixture, &primary, project_id, rec_id, "proposed");
+
+    // Capture the rec content before the event so we can assert it is
+    // unchanged after the failed promote.
+    let rec_path = nb
+        .join(project_id)
+        .join("recommendations")
+        .join(format!("{rec_id}.yml"));
+    let rec_before = std::fs::read_to_string(&rec_path).expect("read rec before promote");
+
+    // Install a pre-commit hook that always exits 1. The signer IS still
+    // configured so preflight passes; git itself refuses to commit.
+    let hooks_dir = nb.join(".git/hooks");
+    std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+    let hook_path = hooks_dir.join("pre-commit");
+    std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").expect("write pre-commit hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x pre-commit hook");
+    }
+
+    let paths = paths_for(&fixture);
+    let commit_evidence = sample_commit_evidence();
+    let new_decision = sample_decision(decision_id, project_id, "should we cache responses?");
+
+    let event = LifecycleEvent::Promote {
+        rec_ref: RecordKey {
+            source: Some(Source::Local),
+            project_id: Some(project_id.into()),
+            id: rec_id.into(),
+        },
+        new_decision,
+        commit_evidence,
+    };
+
+    let result = commit_lifecycle_event(&paths, &event);
+
+    // Must be CommitSignFailed (not RollbackFailed — that would mean the
+    // rollback itself failed, i.e. the bug).
+    assert!(
+        matches!(
+            result,
+            Err(nexum_core::api::ApiError::CommitSignFailed { .. })
+        ),
+        "expected CommitSignFailed, got {result:?}"
+    );
+
+    // The decision YAML must NOT exist — it was newly created and must be
+    // removed during rollback.
+    let dec_path = nb
+        .join(project_id)
+        .join("decisions")
+        .join(format!("{decision_id}.yml"));
+    assert!(
+        !dec_path.exists(),
+        "decision file must not exist after failed commit: {dec_path:?}"
+    );
+
+    // The rec must be unchanged — outcome: proposed, no promoted_to line.
+    let rec_after = std::fs::read_to_string(&rec_path).expect("read rec after failed promote");
+    assert_eq!(
+        rec_before, rec_after,
+        "rec file must be identical before and after a failed promote rollback"
+    );
+    assert!(
+        rec_after.contains("outcome: proposed"),
+        "rec must still have outcome: proposed after rollback"
+    );
+    assert!(
+        !rec_after.contains("promoted_to:"),
+        "rec must not have a promoted_to line after rollback"
+    );
+
+    // Worktree must be clean.
+    assert!(
+        worktree_clean(nb),
+        "worktree must be clean after promote commit-failure rollback"
+    );
+}
+
+// ── Rollback: no valid signer (preflight) ─────────────────────────────────────
+
+/// When no `user.signingkey` is set, `preflight` returns `SignerInactive`
+/// before any files are written. This is a distinct path from the commit-
+/// failure rollback above (no files written, no rollback needed).
 #[test]
 fn no_signer_returns_commit_sign_failed_and_leaves_clean_worktree() {
     let (fixture, primary, _bootstrap_ev, _key_dir) = fresh_notebook_with_bootstrap();
