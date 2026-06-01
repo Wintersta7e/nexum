@@ -1,4 +1,5 @@
-//! Pre-flight guard for lifecycle mutations against `notebook.git`.
+//! Pre-flight guard and source-record eligibility for lifecycle mutations
+//! against `notebook.git`.
 //!
 //! `preflight` is **invoked inside the `with_writer_lock` closure** (wired in
 //! the next task) so the dirty/merge/reanchor store-state checks cannot race
@@ -7,7 +8,11 @@
 
 use std::path::Path;
 
-use crate::{api::ApiError, paths::Paths};
+use crate::{
+    api::ApiError,
+    paths::Paths,
+    records::types::{SignatureStatus, TrustBasis, UnifiedRecord},
+};
 
 /// Refuse the lifecycle mutation if the notebook store is in a bad state.
 ///
@@ -116,6 +121,75 @@ fn dirty_outside_event_paths(repo: &Path, event_paths: &[&Path]) -> Result<Vec<S
     }
 
     Ok(dirty)
+}
+
+/// Promote-eligibility for the source recommendation. Returns the warnings to
+/// inherit onto the new decision, or the refusal. `force_untrusted` bypasses
+/// only unsigned + unknown-signer (never bad-signature / tampered / compromised
+/// / Case-B). Keys on the projected (`signature_status`, `trust_basis`, `warnings`).
+#[allow(dead_code)]
+pub(crate) fn check_promote_eligibility(
+    rec: &UnifiedRecord,
+    force_untrusted: bool,
+) -> Result<Vec<String>, ApiError> {
+    let p = &rec.provenance;
+    let has = |code: &str| p.warnings.iter().any(|w| w == code);
+    match p.signature_status {
+        SignatureStatus::Verified => match p.trust_basis {
+            // Rotation is benign (the signature was valid at sign time) and the new
+            // decision is signed by the CURRENT active key, so the source's
+            // `signer-key-rotated` warning pertains to the source signature, not
+            // the decision's provenance — deliberately NOT inherited (only true
+            // provenance caveats below are propagated).
+            Some(TrustBasis::Current | TrustBasis::RotatedHistorical) => Ok(vec![]),
+            // Case A pre-reanchor (the only Verified+PreReanchor): allow + inherit.
+            Some(TrustBasis::PreReanchor) => Ok(vec!["pre-recovery-record".to_string()]),
+            // Compromised (default policy projects Verified): refuse, no bypass.
+            Some(TrustBasis::RotatedHistoricalCompromised) => {
+                Err(ApiError::SourceRecIncompatible {
+                    id: rec.id.clone(),
+                    reason: "source signed by a later-compromised key".into(),
+                })
+            }
+            None => Err(ApiError::SourceRecIncompatible {
+                id: rec.id.clone(),
+                reason: "verified record without a trust basis".into(),
+            }),
+        },
+        SignatureStatus::Unsigned => {
+            if force_untrusted {
+                Ok(vec!["unsigned-source".to_string()])
+            } else {
+                Err(ApiError::SourceRecUntrusted {
+                    id: rec.id.clone(),
+                    signature_status: "unsigned".into(),
+                })
+            }
+        }
+        // The projection collapses an unknown signer into Invalid + "unknown-signature";
+        // that specific case is the bypassable "unknown" row of the matrix.
+        SignatureStatus::Invalid if has("unknown-signature") => {
+            if force_untrusted {
+                Ok(vec!["unknown-signer-source".to_string()])
+            } else {
+                Err(ApiError::SourceRecUntrusted {
+                    id: rec.id.clone(),
+                    signature_status: "unknown".into(),
+                })
+            }
+        }
+        // Every other Invalid (bad-signature, broken chain, event-tampered, Case-B
+        // chain-anchor-lost, compromised-under-strict, key-not-yet-trusted) is non-bypassable.
+        SignatureStatus::Invalid => Err(ApiError::SourceRecIncompatible {
+            id: rec.id.clone(),
+            reason: format!("source signature is invalid ({})", p.warnings.join(",")),
+        }),
+        // Never produced by the projection for local records; defensive.
+        SignatureStatus::Unknown => Err(ApiError::SourceRecIncompatible {
+            id: rec.id.clone(),
+            reason: "unverifiable source".into(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -303,5 +377,192 @@ mod tests {
             }
             Err(e) => panic!("unexpected error from resolve_active_signer_fingerprint: {e:?}"),
         }
+    }
+
+    // ── check_promote_eligibility ──────────────────────────────────────────────
+
+    use crate::records::types::{
+        Agent, Confidence, CryptoResult, Outcome, Provenance, RecordType, Source,
+    };
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    /// Build the minimal `UnifiedRecord` needed for eligibility tests.
+    /// Only `provenance.signature_status`, `provenance.trust_basis`, and
+    /// `provenance.warnings` are load-bearing here; other fields are placeholders.
+    fn make_rec(
+        sig: SignatureStatus,
+        basis: Option<TrustBasis>,
+        warnings: &[&str],
+    ) -> UnifiedRecord {
+        UnifiedRecord {
+            id: "2026-04-29-test-rec".into(),
+            record_type: RecordType::Recommendation,
+            source: Source::Local,
+            project_id: "git:abc123".into(),
+            title: "test".into(),
+            summary: None,
+            body: String::new(),
+            body_origin_path: None,
+            tags: vec![],
+            agent: Agent::Manual,
+            session_refs: vec![],
+            files: vec![],
+            commits: vec![],
+            created: Utc::now(),
+            updated: Utc::now(),
+            confidence: Confidence::High,
+            outcome: Outcome::Proposed,
+            provenance: Provenance {
+                source: Source::Local,
+                signature_status: sig,
+                extractor: None,
+                digest_hash: None,
+                record_commit_sha: None,
+                signer_fingerprint: None,
+                crypto_result: CryptoResult::Good,
+                relevant_trust_events_commit: None,
+                trust_basis: basis,
+                warnings: warnings.iter().map(|s| (*s).to_string()).collect(),
+                commit_evidence: None,
+                promoted_from: None,
+                inherited_warnings: vec![],
+            },
+            extras: HashMap::new(),
+            content_hash: "deadbeef".into(),
+        }
+    }
+
+    // Verified + Current → Ok(empty)
+    #[test]
+    fn eligibility_verified_current_ok_empty() {
+        let rec = make_rec(SignatureStatus::Verified, Some(TrustBasis::Current), &[]);
+        assert_eq!(
+            check_promote_eligibility(&rec, false).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    // Verified + RotatedHistorical → Ok(empty)
+    #[test]
+    fn eligibility_verified_rotated_historical_ok_empty() {
+        let rec = make_rec(
+            SignatureStatus::Verified,
+            Some(TrustBasis::RotatedHistorical),
+            &[],
+        );
+        assert_eq!(
+            check_promote_eligibility(&rec, false).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    // Verified + PreReanchor → Ok(["pre-recovery-record"])
+    #[test]
+    fn eligibility_verified_pre_reanchor_inherits_warning() {
+        let rec = make_rec(
+            SignatureStatus::Verified,
+            Some(TrustBasis::PreReanchor),
+            &[],
+        );
+        assert_eq!(
+            check_promote_eligibility(&rec, false).unwrap(),
+            vec!["pre-recovery-record"]
+        );
+    }
+
+    // Verified + RotatedHistoricalCompromised → Err SourceRecIncompatible
+    #[test]
+    fn eligibility_verified_compromised_incompatible() {
+        let rec = make_rec(
+            SignatureStatus::Verified,
+            Some(TrustBasis::RotatedHistoricalCompromised),
+            &[],
+        );
+        assert!(
+            matches!(
+                check_promote_eligibility(&rec, false),
+                Err(ApiError::SourceRecIncompatible { .. })
+            ),
+            "expected SourceRecIncompatible for compromised key"
+        );
+    }
+
+    // Unsigned, force_untrusted=false → Err SourceRecUntrusted
+    #[test]
+    fn eligibility_unsigned_no_force_untrusted() {
+        let rec = make_rec(SignatureStatus::Unsigned, None, &[]);
+        assert!(
+            matches!(
+                check_promote_eligibility(&rec, false),
+                Err(ApiError::SourceRecUntrusted {
+                    signature_status,
+                    ..
+                }) if signature_status == "unsigned"
+            ),
+            "expected SourceRecUntrusted(unsigned)"
+        );
+    }
+
+    // Unsigned, force_untrusted=true → Ok(["unsigned-source"])
+    #[test]
+    fn eligibility_unsigned_force_untrusted_bypasses() {
+        let rec = make_rec(SignatureStatus::Unsigned, None, &[]);
+        assert_eq!(
+            check_promote_eligibility(&rec, true).unwrap(),
+            vec!["unsigned-source"]
+        );
+    }
+
+    // Invalid + warnings=["unknown-signature"], force=false → Err SourceRecUntrusted
+    #[test]
+    fn eligibility_invalid_unknown_signature_no_force_untrusted() {
+        let rec = make_rec(SignatureStatus::Invalid, None, &["unknown-signature"]);
+        assert!(
+            matches!(
+                check_promote_eligibility(&rec, false),
+                Err(ApiError::SourceRecUntrusted {
+                    signature_status,
+                    ..
+                }) if signature_status == "unknown"
+            ),
+            "expected SourceRecUntrusted(unknown)"
+        );
+    }
+
+    // Invalid + warnings=["unknown-signature"], force=true → Ok(["unknown-signer-source"])
+    #[test]
+    fn eligibility_invalid_unknown_signature_force_untrusted_bypasses() {
+        let rec = make_rec(SignatureStatus::Invalid, None, &["unknown-signature"]);
+        assert_eq!(
+            check_promote_eligibility(&rec, true).unwrap(),
+            vec!["unknown-signer-source"]
+        );
+    }
+
+    // Invalid + warnings=["bad-signature"] → Err SourceRecIncompatible even with force=true
+    #[test]
+    fn eligibility_invalid_bad_signature_incompatible_no_bypass() {
+        let rec = make_rec(SignatureStatus::Invalid, None, &["bad-signature"]);
+        assert!(
+            matches!(
+                check_promote_eligibility(&rec, true),
+                Err(ApiError::SourceRecIncompatible { .. })
+            ),
+            "expected SourceRecIncompatible for bad-signature even with force_untrusted=true"
+        );
+    }
+
+    // Unknown signature_status → Err SourceRecIncompatible (defensive)
+    #[test]
+    fn eligibility_unknown_status_defensive_incompatible() {
+        let rec = make_rec(SignatureStatus::Unknown, None, &[]);
+        assert!(
+            matches!(
+                check_promote_eligibility(&rec, true),
+                Err(ApiError::SourceRecIncompatible { .. })
+            ),
+            "expected SourceRecIncompatible for Unknown status"
+        );
     }
 }
