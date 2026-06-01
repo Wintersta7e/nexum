@@ -740,6 +740,19 @@ pub struct Provenance {
     /// projection populates on its way out to API consumers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Set for promoted decisions: the project-repo commit this decision
+    /// was promoted against. `None` for every non-promoted record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_evidence: Option<CommitEvidence>,
+    /// Set for promoted decisions: the recommendation this decision came
+    /// from. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promoted_from: Option<RecordKey>,
+    /// Warning codes inherited from the source recommendation at promote
+    /// time (e.g. `pre-recovery-record`), preserved permanently. Merged
+    /// into the surfaced `warnings` array on read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_warnings: Vec<String>,
 }
 
 /// Strict + loose tree fingerprints over a project-repo commit, plus the
@@ -939,6 +952,9 @@ mod tests {
                 // with a None basis; no test derives trust_basis from here.
                 trust_basis: None,
                 warnings: Vec::new(),
+                commit_evidence: None,
+                promoted_from: None,
+                inherited_warnings: Vec::new(),
             },
             extras: HashMap::new(),
             content_hash: "ec22deadbeef".into(),
@@ -969,6 +985,9 @@ mod tests {
             relevant_trust_events_commit: None,
             trust_basis: None,
             warnings: vec!["unsigned".into()],
+            commit_evidence: None,
+            promoted_from: None,
+            inherited_warnings: Vec::new(),
         };
         let json = serde_json::to_string(&none_basis).unwrap();
         assert!(
@@ -991,6 +1010,9 @@ mod tests {
             relevant_trust_events_commit: Some("def456".into()),
             trust_basis: Some(TrustBasis::RotatedHistorical),
             warnings: vec!["signer-key-rotated".into()],
+            commit_evidence: None,
+            promoted_from: None,
+            inherited_warnings: Vec::new(),
         };
         let json = serde_json::to_string(&some_basis).unwrap();
         assert!(
@@ -1005,6 +1027,29 @@ mod tests {
         let legacy = r#"{"source":"local","signature_status":"verified","crypto_result":"good"}"#;
         let parsed: Provenance = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.trust_basis, None);
+    }
+
+    #[test]
+    fn provenance_lifecycle_fields_skip_when_empty() {
+        let p = Provenance {
+            source: Source::Local,
+            signature_status: SignatureStatus::Unsigned,
+            extractor: None,
+            digest_hash: None,
+            record_commit_sha: None,
+            signer_fingerprint: None,
+            crypto_result: CryptoResult::NoSignature,
+            relevant_trust_events_commit: None,
+            trust_basis: None,
+            warnings: Vec::new(),
+            commit_evidence: None,
+            promoted_from: None,
+            inherited_warnings: Vec::new(),
+        };
+        let s = serde_yaml::to_string(&p).unwrap();
+        assert!(!s.contains("commit_evidence"));
+        assert!(!s.contains("promoted_from"));
+        assert!(!s.contains("inherited_warnings"));
     }
 
     #[test]

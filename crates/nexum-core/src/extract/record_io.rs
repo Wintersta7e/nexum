@@ -208,6 +208,9 @@ pub fn raw_to_unified(raw: &RawRecord) -> Result<UnifiedRecord, ExtractError> {
         relevant_trust_events_commit: None,
         trust_basis: None,
         warnings: Vec::new(),
+        commit_evidence: None,
+        promoted_from: None,
+        inherited_warnings: Vec::new(),
     };
 
     let body = serde_yaml::to_string(&raw.yaml).unwrap_or_default();
