@@ -2910,6 +2910,382 @@ fn nibble_char(n: u8) -> char {
     }
 }
 
+// ── Lifecycle promotion / rejection ─────────────────────────────────────────
+
+/// Parameters for [`promote`].
+pub struct PromoteParams<'a> {
+    /// Bare id or `source/project_id/id` triple.
+    pub rec: &'a str,
+    /// Commit SHA to bind to the decision.
+    pub commit: &'a str,
+    /// Override the repo path; defaults to `project_path_for(rec.project_id)`.
+    pub repo: Option<&'a std::path::Path>,
+    /// Override the default-branch resolution.
+    pub branch: Option<&'a str>,
+    /// When `true`, skip all repo access and produce `Unknown` evidence.
+    pub skip_fingerprint: bool,
+    /// Bypass the unsigned / unknown-signer eligibility gate (never bypasses
+    /// invalid-signature or compromised-key failures).
+    pub force_untrusted: bool,
+}
+
+/// Returned by a successful [`promote`] call.
+#[derive(Debug)]
+pub struct PromoteOutcome {
+    /// Id of the newly-created decision record.
+    pub decision_id: String,
+    /// SHA of the signed lifecycle commit in `notebook.git`.
+    pub notebook_commit: String,
+    /// `"verified"` or `"unknown"` — mirrors `CommitEvidence::verification_status`.
+    pub commit_evidence_status: String,
+    /// Set when the post-commit reindex failed (severity = partial; the commit
+    /// is durable and the caller should surface this to the agent).
+    pub index_warning: Option<crate::api::error::ErrorEnvelope>,
+}
+
+/// Returned by a successful [`reject`] call.
+#[derive(Debug)]
+pub struct RejectOutcome {
+    /// SHA of the signed lifecycle commit in `notebook.git`.
+    pub notebook_commit: String,
+    /// Set when the post-commit reindex failed (partial; commit is durable).
+    pub index_warning: Option<crate::api::error::ErrorEnvelope>,
+}
+
+/// Promote a local recommendation to a decision.
+///
+/// Resolves the source record, checks eligibility, assembles commit evidence
+/// (online or offline depending on `p.skip_fingerprint`), writes a single
+/// signed lifecycle commit, then runs the incremental reindex.
+///
+/// # Errors
+///
+/// Returns `ApiError::SourceRecIncompatible` when the record is not promotable.
+/// Returns `ApiError::CommitUnreachableFromDefault` when the commit is not
+/// reachable from the default branch (online path only).
+/// Returns lifecycle-mutation errors on signing or preflight failures.
+pub fn promote(
+    paths: &Paths,
+    cfg: &Config,
+    p: &PromoteParams<'_>,
+) -> Result<PromoteOutcome, ApiError> {
+    use crate::records::types::{Source, VerificationStatus};
+
+    // 1. Resolve + read the source rec. Ambiguous -> propagate.
+    let rec = resolve_and_get_local_rec(paths, cfg, p.rec)?;
+    let rec_ref = RecordKey {
+        source: Some(Source::Local),
+        project_id: Some(rec.project_id.clone()),
+        id: rec.id.clone(),
+    };
+
+    // 2. Eligibility check — returns inherited warnings for the decision.
+    let inherited = crate::notebook::writer::check_promote_eligibility(&rec, p.force_untrusted)?;
+
+    // 3. Build commit evidence. --skip-fingerprint = OFFLINE: no repo access.
+    let evidence = if p.skip_fingerprint {
+        crate::promote::fingerprint::build_commit_evidence_offline(
+            p.commit,
+            p.branch,
+            &rec.project_id,
+            chrono::Utc::now(),
+        )
+    } else {
+        // Resolve repo path: caller override or config registry.
+        let repo: std::path::PathBuf = match p.repo {
+            Some(r) => r.to_owned(),
+            None => project_path_for(&rec.project_id, cfg)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| ApiError::Other {
+                    message: format!(
+                        "no local path bound for {}; run `nexum project set-path` \
+                         (or pass --repo / --skip-fingerprint)",
+                        rec.project_id
+                    ),
+                })?,
+        };
+
+        // Repo identity check: only for git-identity projects.
+        verify_repo_identity_if_git(&rec.project_id, &repo)?;
+
+        // Commit existence.
+        if !crate::promote::fingerprint::commit_exists(&repo, p.commit) {
+            return Err(ApiError::CommitNotFound {
+                sha: p.commit.into(),
+                repo,
+            });
+        }
+
+        // Default-branch resolution + reachability.
+        let branch = match p.branch {
+            Some(b) => b.to_owned(),
+            None => crate::promote::fingerprint::resolve_default_branch(&repo)?,
+        };
+        if !crate::promote::fingerprint::is_reachable(&repo, p.commit, &branch)? {
+            return Err(ApiError::CommitUnreachableFromDefault {
+                sha: p.commit.into(),
+                branch,
+            });
+        }
+
+        crate::promote::fingerprint::build_commit_evidence(&repo, p.commit, &branch)?
+    };
+
+    // 4. Derive a collision-free decision id and build the record.
+    let decision_id = derive_decision_id(paths, cfg, &rec);
+    let new_decision = build_decision_record(&rec, &decision_id, &evidence, &inherited);
+
+    // 5. Commit evidence status for the outcome.
+    let evidence_status = match evidence.verification_status {
+        VerificationStatus::Verified => "verified".to_owned(),
+        VerificationStatus::Unknown => "unknown".to_owned(),
+    };
+
+    // 6. Single signed lifecycle commit (stamps rec + creates decision).
+    let event = crate::notebook::lifecycle::LifecycleEvent::Promote {
+        rec_ref,
+        new_decision: Box::new(new_decision),
+        commit_evidence: evidence,
+    };
+    let sha = crate::notebook::writer::commit_lifecycle_event(paths, &event)?;
+
+    // 7. Post-commit incremental reindex — fail-soft (partial).
+    let index_warning = index_run(paths, cfg).err().map(|e| {
+        crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
+            detail: e.to_string(),
+        })
+    });
+
+    Ok(PromoteOutcome {
+        decision_id,
+        notebook_commit: sha,
+        commit_evidence_status: evidence_status,
+        index_warning,
+    })
+}
+
+/// Reject a local recommendation.
+///
+/// Stamps the source record as `rejected` in one signed lifecycle commit, then
+/// runs the incremental reindex.
+///
+/// # Errors
+///
+/// Returns `ApiError::SourceRecIncompatible` if the record does not exist or is
+/// not a local recommendation. Returns lifecycle-mutation errors on signing or
+/// preflight failures.
+pub fn reject(paths: &Paths, cfg: &Config, rec_arg: &str) -> Result<RejectOutcome, ApiError> {
+    use crate::records::types::Source;
+
+    let rec = resolve_and_get_local_rec(paths, cfg, rec_arg)?;
+    let rec_ref = RecordKey {
+        source: Some(Source::Local),
+        project_id: Some(rec.project_id.clone()),
+        id: rec.id.clone(),
+    };
+
+    let notebook_commit = crate::notebook::writer::commit_lifecycle_event(
+        paths,
+        &crate::notebook::lifecycle::LifecycleEvent::Reject { rec_ref },
+    )?;
+
+    // Post-commit incremental reindex — fail-soft (partial).
+    let index_warning = index_run(paths, cfg).err().map(|e| {
+        crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
+            detail: e.to_string(),
+        })
+    });
+
+    Ok(RejectOutcome {
+        notebook_commit,
+        index_warning,
+    })
+}
+
+// ── Helpers (promote / reject) ───────────────────────────────────────────────
+
+/// Resolve a bare or qualified `rec_arg` to a `UnifiedRecord`, asserting that
+/// it is a `Source::Local` record. Non-local records surface `SourceRecIncompatible`.
+fn resolve_and_get_local_rec(
+    paths: &Paths,
+    cfg: &Config,
+    rec_arg: &str,
+) -> Result<crate::records::types::UnifiedRecord, ApiError> {
+    use crate::records::types::Source;
+
+    let key = RecordKey::bare(rec_arg.to_owned());
+    let opts = crate::query::GetOpts {
+        include_unsigned: true,
+        ..Default::default()
+    };
+    let outcome = get(paths, cfg, &key, &opts)?;
+    match outcome {
+        GetOutcome::Found { record, .. } => {
+            if record.source != Source::Local {
+                return Err(ApiError::SourceRecIncompatible {
+                    id: record.id.clone(),
+                    reason: format!(
+                        "only local records can be promoted or rejected (source={})",
+                        record.source
+                    ),
+                });
+            }
+            Ok(*record)
+        }
+        GetOutcome::NotFound => Err(ApiError::SourceRecIncompatible {
+            id: rec_arg.to_owned(),
+            reason: "record not found".into(),
+        }),
+        GetOutcome::HiddenByPolicy { .. } => Err(ApiError::SourceRecIncompatible {
+            id: rec_arg.to_owned(),
+            reason: "record hidden by trust policy; retry with include_unsigned=true".into(),
+        }),
+    }
+}
+
+/// Verify the project repo's git origin identity matches `project_id` when the
+/// id has a `git:` prefix. Returns `Ok(())` for non-git identities (they have
+/// no canonical URL to check) or when no origin is set.
+fn verify_repo_identity_if_git(project_id: &str, repo: &std::path::Path) -> Result<(), ApiError> {
+    if !project_id.starts_with("git:") {
+        return Ok(());
+    }
+    let url_output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["remote", "get-url", "origin"])
+        .output();
+    let url = match url_output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+        // No origin remote — skip identity check (caller passed an explicit
+        // repo path; non-origin repos are valid for local-only projects).
+        _ => return Ok(()),
+    };
+    let canonical = crate::project::canon::canonicalize_git_url(&url);
+    let derived = crate::project::canon::git_url_hint(&canonical);
+    if derived == project_id {
+        Ok(())
+    } else {
+        Err(ApiError::RepoIdentityMismatch {
+            expected: project_id.to_owned(),
+            observed: derived,
+            path: repo.to_owned(),
+        })
+    }
+}
+
+/// Derive a collision-free decision id of the form `<today>-<rec-slug>-decision`.
+///
+/// `<rec-slug>` is the record's id with the leading date prefix stripped
+/// (if present). Appends `-2`, `-3`, … on collision by checking whether a
+/// record with that id already exists in the index.
+fn derive_decision_id(
+    paths: &Paths,
+    cfg: &Config,
+    rec: &crate::records::types::UnifiedRecord,
+) -> String {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    // Strip a leading date prefix from the rec id (e.g. `2026-04-29-my-rec`
+    // → `my-rec`) so the decision id reads `2026-05-01-my-rec-decision`.
+    let slug: String = {
+        let parts: Vec<&str> = rec.id.splitn(4, '-').collect();
+        if parts.len() == 4 && parts[0].len() == 4 && parts[1].len() == 2 && parts[2].len() == 2 {
+            parts[3].to_owned()
+        } else {
+            rec.id.clone()
+        }
+    };
+
+    let base = format!("{today}-{slug}-decision");
+
+    // Collision check: if a record with this id already exists, append a counter.
+    let opts = crate::query::GetOpts {
+        include_unsigned: true,
+        ..Default::default()
+    };
+    let key = RecordKey::bare(base.clone());
+    let exists = matches!(get(paths, cfg, &key, &opts), Ok(GetOutcome::Found { .. }));
+    if !exists {
+        return base;
+    }
+    for n in 2u32.. {
+        let candidate = format!("{base}-{n}");
+        let k = RecordKey::bare(candidate.clone());
+        if !matches!(get(paths, cfg, &k, &opts), Ok(GetOutcome::Found { .. })) {
+            return candidate;
+        }
+    }
+    base
+}
+
+/// Assemble the `UnifiedRecord` for the new decision. The `body` is the
+/// canonical YAML produced by the emitter; the in-memory fields mirror it so
+/// the writer's `project_id` guard and round-trip assertions pass.
+fn build_decision_record(
+    rec: &crate::records::types::UnifiedRecord,
+    decision_id: &str,
+    evidence: &crate::records::types::CommitEvidence,
+    inherited_warnings: &[String],
+) -> crate::records::types::UnifiedRecord {
+    use crate::records::types::{
+        Confidence, CryptoResult, Outcome, Provenance, RecordType, SignatureStatus, Source,
+    };
+
+    let now = chrono::Utc::now();
+
+    let input = crate::notebook::emit::DecisionInput {
+        decision_id: decision_id.to_owned(),
+        project_id: rec.project_id.clone(),
+        source_rec_id: rec.id.clone(),
+        source_rec_title: rec.title.clone(),
+        agent: rec.agent.as_db_str().to_owned(),
+        created: now,
+        commit_evidence: evidence.clone(),
+        inherited_warnings: inherited_warnings.to_vec(),
+    };
+    let body = crate::notebook::emit::build_decision_yaml(&input);
+
+    crate::records::types::UnifiedRecord {
+        id: decision_id.to_owned(),
+        record_type: RecordType::Decision,
+        source: Source::Local,
+        // CRITICAL: project_id must equal rec.project_id so the writer's
+        // path-component guard passes.
+        project_id: rec.project_id.clone(),
+        title: rec.title.clone(),
+        summary: None,
+        body,
+        body_origin_path: None,
+        tags: vec![],
+        agent: rec.agent,
+        session_refs: vec![],
+        files: vec![],
+        commits: vec![evidence.commit_sha.clone()],
+        created: now,
+        updated: now,
+        confidence: Confidence::High,
+        outcome: Outcome::Working,
+        provenance: Provenance {
+            source: Source::Local,
+            signature_status: SignatureStatus::Unsigned,
+            extractor: None,
+            digest_hash: None,
+            record_commit_sha: None,
+            signer_fingerprint: None,
+            crypto_result: CryptoResult::Good,
+            relevant_trust_events_commit: None,
+            trust_basis: None,
+            warnings: vec![],
+            commit_evidence: Some(evidence.clone()),
+            promoted_from: None,
+            inherited_warnings: inherited_warnings.to_vec(),
+        },
+        extras: std::collections::HashMap::new(),
+        content_hash: String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
