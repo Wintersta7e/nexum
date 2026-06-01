@@ -23,9 +23,9 @@ use crate::{
         Adapter, AdapterError, AdapterPass, PassCompleteness, SkipKind, SkipReason,
     },
     records::{
-        Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome, ProjectId,
-        Provenance, RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus, Source,
-        UnifiedRecord, content_hash,
+        content_hash, Agent, Confidence, CryptoResult, FileEvidence, FileEvidenceKind, Outcome,
+        ProjectId, Provenance, RecordId, RecordSummary, RecordType, SessionRef, SignatureStatus,
+        Source, UnifiedRecord,
     },
 };
 
@@ -256,9 +256,23 @@ struct LocalRecordYaml {
     problem: Option<String>,
 }
 
+#[derive(Debug)]
 enum LocalParseError {
     Malformed(SkipReason),
     IoTransient(SkipReason),
+}
+
+/// Typed mirror of the on-disk `provenance:` block used to carry lifecycle
+/// fields written by the promotion pipeline. Unknown keys are silently
+/// dropped; absent keys fall back to `Default`.
+#[derive(Debug, Deserialize, Default)]
+struct ProvenanceBlock {
+    #[serde(default)]
+    commit_evidence: Option<crate::records::types::CommitEvidence>,
+    #[serde(default)]
+    promoted_from: Option<crate::records::types::RecordKey>,
+    #[serde(default)]
+    inherited_warnings: Vec<String>,
 }
 
 fn parse_local_record(
@@ -315,6 +329,12 @@ fn parse_local_record(
     // record. The placeholders below are deliberate stubs.
     let record_commit_sha = compute_record_commit_sha(notebook_git, path);
 
+    let prov_block: ProvenanceBlock = parsed
+        .provenance
+        .as_ref()
+        .and_then(|v| serde_yaml::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
     Ok(Box::new(UnifiedRecord {
         id: parsed.id,
         record_type,
@@ -348,9 +368,9 @@ fn parse_local_record(
             relevant_trust_events_commit: None,
             trust_basis: None,
             warnings: Vec::new(),
-            commit_evidence: None,
-            promoted_from: None,
-            inherited_warnings: Vec::new(),
+            commit_evidence: prov_block.commit_evidence,
+            promoted_from: prov_block.promoted_from,
+            inherited_warnings: prov_block.inherited_warnings,
         },
         extras: HashMap::new(),
         content_hash: hash,
@@ -482,7 +502,11 @@ fn compute_record_commit_sha(notebook_git: &Path, record_path: &Path) -> Option<
         return None;
     }
     let sha = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if sha.is_empty() { None } else { Some(sha) }
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
 }
 
 #[cfg(test)]
@@ -737,6 +761,74 @@ mod tests {
         let pass = adapter.list().expect("list ok");
         assert_eq!(pass.records.len(), 1);
         assert_eq!(pass.records[0].id, "real");
+    }
+
+    #[test]
+    fn parse_local_reads_provenance_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let nb = dir.path();
+        let p = nb.join("nexum/decisions/2026-05-21-x-decision.yml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            r#"schema_version: 1
+id: 2026-05-21-x-decision
+record_type: decision
+project_id: nexum
+outcome: working
+confidence: high
+agent: claude-code
+created: 2026-05-21T00:00:00Z
+updated: 2026-05-21T00:00:00Z
+problem: promoted decision
+provenance:
+  source: nexum-promoted
+  promoted_from: {source: local, project_id: nexum, id: 2026-04-29-x}
+  inherited_warnings: [pre-recovery-record]
+  commit_evidence:
+    repo_identity: "git:abc"
+    branch: main
+    commit_sha: a1b2c3d
+    commit_time: 2026-05-20T00:00:00Z
+    commit_message_hash: 0000000000000000000000000000000000000000000000000000000000000000
+    tree_changes_fingerprint: {strict: "11", loose: "22", file_paths: ["src/lib.rs"]}
+    verification_status: verified
+"#,
+        )
+        .unwrap();
+        let rec = super::parse_local_record(nb, &p).unwrap();
+        assert_eq!(
+            rec.provenance.inherited_warnings,
+            vec!["pre-recovery-record".to_string()]
+        );
+        assert!(rec.provenance.commit_evidence.is_some());
+        assert_eq!(rec.provenance.promoted_from.unwrap().id, "2026-04-29-x");
+    }
+
+    #[test]
+    fn parse_local_no_provenance_block_leaves_fields_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let nb = dir.path();
+        let p = nb.join("nexum/decisions/2026-05-21-plain.yml");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(
+            &p,
+            "schema_version: 1\n\
+             id: 2026-05-21-plain\n\
+             record_type: decision\n\
+             project_id: nexum\n\
+             outcome: working\n\
+             confidence: high\n\
+             agent: manual\n\
+             created: 2026-05-21T00:00:00Z\n\
+             updated: 2026-05-21T00:00:00Z\n\
+             title: plain record\n",
+        )
+        .unwrap();
+        let rec = super::parse_local_record(nb, &p).unwrap();
+        assert!(rec.provenance.inherited_warnings.is_empty());
+        assert!(rec.provenance.commit_evidence.is_none());
+        assert!(rec.provenance.promoted_from.is_none());
     }
 
     #[test]
