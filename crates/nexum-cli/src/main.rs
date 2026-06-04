@@ -59,6 +59,10 @@ enum Commands {
     PromoteSuggestions(commands::promote_suggestions::PromoteSuggestionsArgs),
     /// Reject a local recommendation.
     Reject(commands::reject::RejectArgs),
+    /// Show the notebook lifecycle history (newest-first).
+    AuditLog(commands::audit_log::AuditLogArgs),
+    /// Re-verify a single record's signature and commit evidence.
+    Verify(commands::verify::VerifyArgs),
     /// Manage signing keys. This release supports `rotate` (additive —
     /// adds a new trusted key without retiring the old one).
     Keys {
@@ -88,6 +92,8 @@ fn main() -> ExitCode {
         Commands::Promote(args) => commands::promote::run(&args),
         Commands::PromoteSuggestions(args) => commands::promote_suggestions::run(&args),
         Commands::Reject(args) => commands::reject::run(&args),
+        Commands::AuditLog(args) => commands::audit_log::run(&args),
+        Commands::Verify(args) => commands::verify::run(&args),
         Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
 }

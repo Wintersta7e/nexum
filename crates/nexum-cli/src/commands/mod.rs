@@ -1,5 +1,6 @@
 //! CLI subcommand handlers.
 
+pub mod audit_log;
 pub mod by_session;
 pub(crate) mod common;
 pub mod doctor;
@@ -20,3 +21,4 @@ pub mod recent;
 pub mod reject;
 pub mod search;
 pub mod trust;
+pub mod verify;
