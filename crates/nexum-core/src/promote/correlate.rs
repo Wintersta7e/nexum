@@ -1,7 +1,7 @@
 //! Correlation signals: check whether a commit plausibly relates to a record.
 //!
 //! Both functions are pure (no I/O, no git). They are consumed by the
-//! promotion facade in a later change.
+//! promotion facade.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

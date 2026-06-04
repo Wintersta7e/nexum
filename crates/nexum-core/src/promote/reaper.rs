@@ -1,10 +1,9 @@
 //! Stale-recommendation identification.
 //!
 //! Identifies proposed local recommendations whose age exceeds the configured
-//! correlation window. The caller (`api::promote_suggestions`, landing in a
-//! later change) composes this with the suggestion scan to exclude records that
-//! still have a candidate commit. The transitional `dead_code` allow on this
-//! module is removed when that facade lands.
+//! correlation window. The caller (`api::promote_suggestions`) composes this
+//! with the suggestion scan to exclude records that still have a candidate
+//! commit.
 
 use crate::config::Config;
 use crate::records::types::{Outcome, RecordKey, Source, UnifiedRecord};

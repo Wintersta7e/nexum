@@ -1,8 +1,7 @@
 //! Suggestion scan: match proposed local recommendations against candidate
 //! commits in their project repo within the configured correlation window.
 //!
-//! Consumed by the `api::promote_suggestions` facade (lands in a later change;
-//! the transitional `dead_code` allow on this module is removed then).
+//! Consumed by the `api::promote_suggestions` facade.
 
 use std::path::Path;
 
