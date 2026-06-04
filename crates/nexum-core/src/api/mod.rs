@@ -436,28 +436,28 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
 /// Returns `Ok(true)` on success, `Ok(false)` if `git checkout` exited
 /// non-zero, `Err` if the binary couldn't be spawned. Used by rollback paths
 /// that need to revert specific files without touching unrelated changes the
-/// operator may have in the worktree.
+/// operator may have in the worktree. Routed through the env-scrubbed `git`
+/// builder so a user gitconfig can't run a checkout filter/hook.
 pub(crate) fn restore_paths_from_head(
     repo: &std::path::Path,
     paths: &[&std::path::Path],
 ) -> Result<bool, std::io::Error> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::trust::git_history::git(repo);
     cmd.arg("checkout").arg("HEAD").arg("--");
     for p in paths {
         cmd.arg(p);
     }
-    let out = cmd.current_dir(repo).output()?;
+    let out = cmd.output()?;
     Ok(out.status.success())
 }
 
 /// Drop the last commit and restore the worktree to `HEAD~1`. Returns
 /// `Ok(true)` on success, `Ok(false)` on non-zero exit, `Err` if the binary
 /// couldn't be spawned. Used when a commit landed but its post-commit
-/// verification failed.
+/// verification failed. Routed through the env-scrubbed `git` builder.
 pub(crate) fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
-    let out = std::process::Command::new("git")
+    let out = crate::trust::git_history::git(repo)
         .args(["reset", "--hard", "HEAD~1"])
-        .current_dir(repo)
         .output()?;
     Ok(out.status.success())
 }
@@ -3102,21 +3102,24 @@ pub fn reject(paths: &Paths, cfg: &Config, rec_arg: &str) -> Result<RejectOutcom
 // ── Helpers (promote / reject) ───────────────────────────────────────────────
 
 /// Resolve a bare or qualified `rec_arg` to a `UnifiedRecord`, asserting that
-/// it is a `Source::Local` record. Non-local records surface `SourceRecIncompatible`.
+/// it is a `Source::Local`, `RecordType::Recommendation` with `Outcome::Proposed`.
+/// Anything else (non-local, a decision, or an already-terminal recommendation)
+/// surfaces `SourceRecIncompatible` so a double-promote / double-reject / promote
+/// of a decision can't silently corrupt the store.
 fn resolve_and_get_local_rec(
     paths: &Paths,
     cfg: &Config,
     rec_arg: &str,
 ) -> Result<crate::records::types::UnifiedRecord, ApiError> {
-    use crate::records::types::Source;
+    use crate::records::types::{Outcome, RecordType, Source};
 
     let key = RecordKey::bare(rec_arg.to_owned());
     let opts = crate::query::GetOpts {
         include_unsigned: true,
         ..Default::default()
     };
-    let outcome = get(paths, cfg, &key, &opts)?;
-    match outcome {
+    let got = get(paths, cfg, &key, &opts)?;
+    match got {
         GetOutcome::Found { record, .. } => {
             if record.source != Source::Local {
                 return Err(ApiError::SourceRecIncompatible {
@@ -3124,6 +3127,25 @@ fn resolve_and_get_local_rec(
                     reason: format!(
                         "only local records can be promoted or rejected (source={})",
                         record.source
+                    ),
+                });
+            }
+            if record.record_type != RecordType::Recommendation {
+                return Err(ApiError::SourceRecIncompatible {
+                    id: record.id.clone(),
+                    reason: format!(
+                        "only recommendations can be promoted or rejected (type={})",
+                        record.record_type.as_db_str()
+                    ),
+                });
+            }
+            if record.outcome != Outcome::Proposed {
+                return Err(ApiError::SourceRecIncompatible {
+                    id: record.id.clone(),
+                    reason: format!(
+                        "recommendation is already {} — only proposed recommendations \
+                         can be promoted or rejected",
+                        record.outcome.as_db_str()
                     ),
                 });
             }
@@ -3292,14 +3314,21 @@ pub struct SuggestOutcome {
 pub fn promote_suggestions(paths: &Paths, cfg: &Config) -> Result<SuggestOutcome, ApiError> {
     let recs = list_local_recommendations(paths, cfg)?;
     let suggestions = crate::promote::suggest::scan(paths, cfg, &recs)?;
-    let suggested: std::collections::HashSet<&str> =
-        suggestions.iter().map(|s| s.rec_id.as_str()).collect();
+    // Key the exclusion set on (project_id, rec_id) — a bare rec-id collision
+    // across two projects must not exempt one project's stale rec from the sweep.
+    let suggested: std::collections::HashSet<(&str, &str)> = suggestions
+        .iter()
+        .map(|s| (s.project_id.as_str(), s.rec_id.as_str()))
+        .collect();
 
     // Stale = age-based proposed recs that got no suggestion this pass.
     let now = chrono::Utc::now();
     let stale: Vec<_> = crate::promote::reaper::find_stale(cfg, &recs, now)
         .into_iter()
-        .filter(|rk| !suggested.contains(rk.id.as_str()))
+        .filter(|rk| {
+            let pid = rk.project_id.as_deref().unwrap_or("");
+            !suggested.contains(&(pid, rk.id.as_str()))
+        })
         .collect();
 
     let mut marked = 0;

@@ -84,16 +84,9 @@ pub(crate) fn preflight(paths: &Paths, event_paths: &[&Path]) -> Result<(), ApiE
     Ok(())
 }
 
-/// Run `git status --porcelain -z` in `repo` and return the list of dirty
-/// files that are **not** in `event_paths`.
-///
-/// Returns an empty vec when the worktree is clean or when `git status`
-/// exits non-zero (in the latter case downstream git commands will surface
-/// the real error).
 fn dirty_outside_event_paths(repo: &Path, event_paths: &[&Path]) -> Result<Vec<String>, ApiError> {
-    let out = std::process::Command::new("git")
+    let out = crate::trust::git_history::git(repo)
         .args(["status", "--porcelain", "-z"])
-        .current_dir(repo)
         .output()
         .map_err(|e| {
             ApiError::Indexer(crate::indexer::IndexerError::Io {
@@ -102,24 +95,40 @@ fn dirty_outside_event_paths(repo: &Path, event_paths: &[&Path]) -> Result<Vec<S
             })
         })?;
 
+    // Fail closed: a cleanliness check that itself failed must NOT be read as
+    // "clean", or a dirty worktree could be mutated and then clobbered on
+    // rollback. Surface the failure instead of silently proceeding.
     if !out.status.success() {
-        // Let downstream commands surface the real error.
-        return Ok(vec![]);
+        return Err(ApiError::Other {
+            message: format!(
+                "git status failed in {} (exit {}): {}",
+                repo.display(),
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        });
     }
 
     let our_set: std::collections::HashSet<&Path> = event_paths.iter().copied().collect();
     let mut dirty = Vec::new();
-
-    for record in out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty()) {
-        // Each NUL-terminated record: "XY<space><path>" (3-byte prefix).
+    // `git status --porcelain -z` separates records with NUL. A rename/copy
+    // record (index status R/C) is followed by a SECOND NUL-delimited chunk
+    // carrying the original path — consume it so it isn't misread as its own
+    // status record (which would surface a truncated, spurious dirty path).
+    let mut chunks = out.stdout.split(|&b| b == 0).filter(|r| !r.is_empty());
+    while let Some(record) = chunks.next() {
+        // Each record is "XY<space><path>" — a 3-byte prefix then the path.
         if record.len() < 4 {
             continue;
         }
-        let path_bytes = &record[3..];
-        let path_str = std::str::from_utf8(path_bytes).unwrap_or("");
+        let is_rename_or_copy = record[0] == b'R' || record[0] == b'C';
+        let path_str = std::str::from_utf8(&record[3..]).unwrap_or("");
         let path: &Path = Path::new(path_str);
         if !our_set.contains(path) {
             dirty.push(path_str.to_owned());
+        }
+        if is_rename_or_copy {
+            chunks.next(); // skip the origin-path chunk
         }
     }
 
@@ -256,7 +265,19 @@ pub fn commit_lifecycle_event(paths: &Paths, event: &LifecycleEvent) -> Result<S
         // Pre-flight INSIDE the lock (TOCTOU-safe). Eligibility (check_promote_eligibility)
         // is checked by the caller before the event is built.
         preflight(paths, &all_refs)?;
-        write_event_files(paths, event)?;
+        // Partial write recovery: if writing the event files fails midway,
+        // nothing is staged yet, so the commit-failure rollback below never
+        // runs. Remove any newly created files and restore modified existing
+        // files from HEAD here, or an orphan/partial file would wedge the next
+        // preflight as an unrelated dirty file.
+        if let Err(e) = write_event_files(paths, event) {
+            for new_path in &plan.new {
+                let _ = std::fs::remove_file(paths.notebook_git.join(new_path));
+            }
+            let existing_refs: Vec<&Path> = plan.existing.iter().map(PathBuf::as_path).collect();
+            let _ = crate::api::restore_paths_from_head(&paths.notebook_git, &existing_refs);
+            return Err(e);
+        }
 
         let historical = paths.notebook_git.join(".trust/historical_signers");
         match crate::init::git_ops::git_commit_signed(&paths.notebook_git, &all_refs, &message) {
@@ -447,6 +468,18 @@ fn write_event_files(paths: &Paths, event: &LifecycleEvent) -> Result<(), ApiErr
                 message: format!("create_dir_all {}: {e}", dec_dir.display()),
             })?;
             let dec_path = dec_dir.join(format!("{}.yml", new_decision.id));
+            // Under the writer lock: a pre-existing decision file means a
+            // concurrent promotion of the same rec already derived this id and
+            // committed it. Refuse rather than silently overwrite its content.
+            if dec_path.exists() {
+                return Err(ApiError::Other {
+                    message: format!(
+                        "decision {} already exists; a concurrent promotion likely \
+                         created it — re-run to derive a fresh id",
+                        new_decision.id
+                    ),
+                });
+            }
             std::fs::write(&dec_path, &dec_yaml).map_err(|e| ApiError::Other {
                 message: format!("write decision yaml {}: {e}", dec_path.display()),
             })?;
@@ -465,43 +498,28 @@ fn write_event_files(paths: &Paths, event: &LifecycleEvent) -> Result<(), ApiErr
             })?;
         }
 
-        LifecycleEvent::Reject { rec_ref } => {
+        LifecycleEvent::Reject { rec_ref } | LifecycleEvent::Stale { rec_ref } => {
+            let outcome = if matches!(event, LifecycleEvent::Reject { .. }) {
+                "rejected"
+            } else {
+                "stale"
+            };
             let project_id = rec_ref
                 .project_id
                 .as_deref()
                 .ok_or_else(|| ApiError::Other {
-                    message: "rec_ref.project_id is required for Reject".into(),
+                    message: "rec_ref.project_id is required for Reject/Stale".into(),
                 })?;
             let rec_path = nb
                 .join(project_id)
                 .join("recommendations")
                 .join(format!("{}.yml", rec_ref.id));
             let rec_yaml = std::fs::read_to_string(&rec_path).map_err(|e| ApiError::Other {
-                message: format!("read rec {} for reject: {e}", rec_path.display()),
+                message: format!("read rec {} for {outcome}: {e}", rec_path.display()),
             })?;
-            let stamped = emit::replace_outcome_line(&rec_yaml, "rejected")?;
+            let stamped = emit::replace_outcome_line(&rec_yaml, outcome)?;
             std::fs::write(&rec_path, &stamped).map_err(|e| ApiError::Other {
-                message: format!("write rejected rec {}: {e}", rec_path.display()),
-            })?;
-        }
-
-        LifecycleEvent::Stale { rec_ref } => {
-            let project_id = rec_ref
-                .project_id
-                .as_deref()
-                .ok_or_else(|| ApiError::Other {
-                    message: "rec_ref.project_id is required for Stale".into(),
-                })?;
-            let rec_path = nb
-                .join(project_id)
-                .join("recommendations")
-                .join(format!("{}.yml", rec_ref.id));
-            let rec_yaml = std::fs::read_to_string(&rec_path).map_err(|e| ApiError::Other {
-                message: format!("read rec {} for stale: {e}", rec_path.display()),
-            })?;
-            let stamped = emit::replace_outcome_line(&rec_yaml, "stale")?;
-            std::fs::write(&rec_path, &stamped).map_err(|e| ApiError::Other {
-                message: format!("write stale rec {}: {e}", rec_path.display()),
+                message: format!("write {outcome} rec {}: {e}", rec_path.display()),
             })?;
         }
     }

@@ -131,6 +131,12 @@ pub fn git_verify_commit_with_signers(
     let signers_path = historical_signers.display().to_string();
     let out = Command::new("git")
         .current_dir(repo_path)
+        // Scrub global/system config so a user gitconfig can't redirect the SSH
+        // verifier program (`gpg.ssh.program`) on this signature-verification
+        // path. The allowedSignersFile + format are pinned via `-c` below.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args([
             "-c",
             "gpg.format=ssh",
