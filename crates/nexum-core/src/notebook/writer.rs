@@ -368,7 +368,7 @@ fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<EventPaths, ApiEr
 
 /// Build the commit message for `event`. For `Promote`, the "via" SHA is the
 /// project-repo commit SHA from `commit_evidence` (known pre-commit — NOT the
-/// notebook commit). This must agree with the audit-log parser (T24).
+/// notebook commit). This must agree with the audit-log parser.
 fn render_message(event: &LifecycleEvent) -> String {
     match event {
         LifecycleEvent::Promote {
@@ -679,7 +679,7 @@ mod tests {
     /// Note: testing the "key is Rotated/Revoked in events.yml" branch would
     /// require a fully bootstrapped signed notebook.git (a git repo with a valid
     /// events.yml signed commit), which is too heavy for a unit test. That path
-    /// is exercised by integration tests in T19 against a real bootstrapped
+    /// is exercised by integration tests against a real bootstrapped
     /// store.
     #[test]
     fn no_signingkey_configured_returns_signer_inactive() {

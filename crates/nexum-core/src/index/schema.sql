@@ -33,7 +33,7 @@ CREATE TABLE records (
     -- commit) and for local records where no events.yml commit is reachable.
     relevant_trust_events_commit TEXT,
     extras JSON,
-    -- M3 lifecycle (set only on promoted decisions; NULL otherwise).
+    -- Lifecycle columns (set only on promoted decisions; NULL otherwise).
     commit_evidence JSON,
     promoted_from JSON,
     inherited_warnings JSON,

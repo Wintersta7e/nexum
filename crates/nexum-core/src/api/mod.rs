@@ -129,7 +129,7 @@ pub enum ApiError {
     Other { message: String },
 
     // ── Lifecycle-mutation errors (promote / write path) ─────────────────────
-    // These variants drive the M3 lifecycle verbs. They are refused, partial,
+    // These variants drive the lifecycle verbs. They are refused, partial,
     // or inconsistent failures as defined by the agent-facing failure contract.
     /// `notebook.git` has uncommitted changes outside the lifecycle paths;
     /// refusing to mutate protects unrelated operator work from rollback.

@@ -1,4 +1,4 @@
-//! v2 -> v3: add the M3 lifecycle columns (`commit_evidence`, `promoted_from`,
+//! v2 -> v3: add the lifecycle columns (`commit_evidence`, `promoted_from`,
 //! `inherited_warnings`) to the records table. All nullable; populated only
 //! for promoted decisions.
 

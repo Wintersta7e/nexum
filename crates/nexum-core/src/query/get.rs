@@ -350,7 +350,7 @@ struct RawRow {
     /// Forwarded into [`CachedCrypto`] for the read-time projection and onto
     /// `Provenance::relevant_trust_events_commit` for downstream consumers.
     relevant_trust_events_commit: Option<String>,
-    /// M3 lifecycle columns (JSON-encoded; NULL for non-promoted records).
+    /// Lifecycle columns (JSON-encoded; NULL for non-promoted records).
     commit_evidence: Option<String>,
     promoted_from: Option<String>,
     inherited_warnings: Option<String>,

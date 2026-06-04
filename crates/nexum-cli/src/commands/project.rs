@@ -43,8 +43,8 @@ pub enum ProjectSub {
     /// Bind a local filesystem path to a non-`name:` `project_id`.
     ///
     /// Lets `git:` / `cc-slug:` / `codex-cwd:` identities — which carry
-    /// no path by default — get a registered local checkout so M3 can
-    /// scan their git history during promotion. Writes
+    /// no path by default — get a registered local checkout so promotion
+    /// can scan their git history. Writes
     /// `[projects."<project_id>"] path = "<path>"` to `~/.nexum/config.toml`.
     SetPath {
         /// Full `project_id` including identity prefix (e.g.

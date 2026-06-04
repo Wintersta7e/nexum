@@ -800,7 +800,7 @@ struct UpsertRow<'a> {
     crypto_result: &'a str,
     record_commit_sha: Option<&'a str>,
     signer_fingerprint: Option<&'a str>,
-    /// M3 lifecycle columns (NULL for non-promoted records).
+    /// Lifecycle columns (NULL for non-promoted records).
     commit_evidence_json: Option<String>,
     promoted_from_json: Option<String>,
     inherited_warnings_json: Option<String>,

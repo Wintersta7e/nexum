@@ -203,7 +203,7 @@ pub mod error_codes {
     /// variant (e.g. missing required YAML field detected at runtime).
     pub const INTERNAL: &str = "INTERNAL";
 
-    // ── Lifecycle-mutation error codes (M3 promote / write path) ─────────────
+    // ── Lifecycle-mutation error codes (promote / write path) ─────────────
     // Note: REPO_IDENTITY_MISMATCH and REANCHOR_PENDING already exist above
     // and are reused by the corresponding lifecycle variants.
 
