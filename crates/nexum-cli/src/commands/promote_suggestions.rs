@@ -81,6 +81,7 @@ fn interactive_walk(paths: &Paths, cfg: &Config, suggestions: &[Suggestion]) -> 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let mut skipped_recs: HashSet<&str> = HashSet::new();
+    let mut any_failed = false;
     for s in suggestions {
         if skipped_recs.contains(s.rec_id.as_str()) {
             continue;
@@ -95,7 +96,7 @@ fn interactive_walk(paths: &Paths, cfg: &Config, suggestions: &[Suggestion]) -> 
             break; // EOF or read error → skip-rest
         };
         match line.trim() {
-            "y" => promote_one(paths, cfg, s),
+            "y" => any_failed |= !promote_one(paths, cfg, s),
             "skip-rec" => {
                 skipped_recs.insert(s.rec_id.as_str());
             }
@@ -104,12 +105,18 @@ fn interactive_walk(paths: &Paths, cfg: &Config, suggestions: &[Suggestion]) -> 
             _ => {}
         }
     }
-    ExitCode::SUCCESS
+    // A failed promotion in the walk must surface as a non-zero exit so a
+    // wrapping script/agent doesn't read "all done" as "all succeeded".
+    if any_failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
-/// Promote a single suggestion, printing the outcome. Errors are surfaced on
-/// stderr without aborting the walk.
-fn promote_one(paths: &Paths, cfg: &Config, s: &Suggestion) {
+/// Promote a single suggestion, printing the outcome. Returns whether it
+/// succeeded; errors are surfaced on stderr without aborting the walk.
+fn promote_one(paths: &Paths, cfg: &Config, s: &Suggestion) -> bool {
     let params = api::PromoteParams {
         rec: &s.rec_id,
         commit: &s.commit_sha,
@@ -127,10 +134,12 @@ fn promote_one(paths: &Paths, cfg: &Config, s: &Suggestion) {
             if o.index_warning.is_some() {
                 eprintln!("  warning: index refresh failed; run `nexum index`");
             }
+            true
         }
         Err(e) => {
             let env: nexum_core::api::error::ErrorEnvelope = (&e).into();
             eprintln!("  error: {}", env.message);
+            false
         }
     }
 }
