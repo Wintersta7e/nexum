@@ -5,6 +5,7 @@
 pub mod active_signer;
 pub mod error;
 
+pub use crate::promote::suggest::Suggestion;
 pub use active_signer::resolve_active_signer_fingerprint;
 
 use crate::{
@@ -126,6 +127,67 @@ pub enum ApiError {
     /// fit a more specific variant.
     #[error("{message}")]
     Other { message: String },
+
+    // ── Lifecycle-mutation errors (promote / write path) ─────────────────────
+    // These variants drive the lifecycle verbs. They are refused, partial,
+    // or inconsistent failures as defined by the agent-facing failure contract.
+    /// `notebook.git` has uncommitted changes outside the lifecycle paths;
+    /// refusing to mutate protects unrelated operator work from rollback.
+    #[error("notebook.git has uncommitted changes outside the lifecycle paths")]
+    NotebookDirty { dirty_files: Vec<String> },
+    /// `notebook.git` is mid-merge; lifecycle mutations cannot proceed.
+    #[error("notebook.git is mid-merge")]
+    MergeInProgress,
+    /// A reanchor sentinel is present; trust state is indeterminate.
+    #[error("a reanchor is pending; run `nexum doctor --resolve-pending-reanchor` first")]
+    ReanchorPending { sentinel_path: std::path::PathBuf },
+    /// The resolved current git signer is not in `Active` role.
+    #[error("current git signer is not Active: {reason}")]
+    SignerInactive { reason: String },
+    /// The source recommendation is not in a trusted state and cannot be promoted.
+    #[error("source recommendation {id} is untrusted ({signature_status})")]
+    SourceRecUntrusted {
+        id: String,
+        signature_status: String,
+    },
+    /// The source recommendation exists but cannot be promoted for a
+    /// non-trust reason (e.g. wrong record type, already promoted).
+    #[error("source recommendation {id} cannot be promoted: {reason}")]
+    SourceRecIncompatible { id: String, reason: String },
+    /// The project repo's origin URL canonicalizes to a different identity
+    /// than the one on the record being promoted.
+    #[error("repo identity mismatch: expected {expected}, observed {observed}")]
+    RepoIdentityMismatch {
+        expected: String,
+        observed: String,
+        path: std::path::PathBuf,
+    },
+    /// The requested commit SHA does not exist in the project repo.
+    #[error("commit {sha} not found in {repo}")]
+    CommitNotFound {
+        sha: String,
+        repo: std::path::PathBuf,
+    },
+    /// The commit SHA exists but is not reachable from the default branch.
+    #[error("commit {sha} is not reachable from {branch}")]
+    CommitUnreachableFromDefault { sha: String, branch: String },
+    /// The project repo has no resolvable default branch.
+    #[error("no default branch resolvable in {repo}")]
+    RepoNoDefaultBranch { repo: std::path::PathBuf },
+    /// Signing the lifecycle commit failed.
+    #[error("signing the lifecycle commit failed: {detail}")]
+    CommitSignFailed { detail: String },
+    /// A `notebook.git` pre-commit hook rejected the lifecycle commit.
+    #[error("a notebook.git pre-commit hook rejected the lifecycle commit: {detail}")]
+    CommitRejectedByHook { detail: String },
+    /// The lifecycle commit landed but the post-commit index refresh failed;
+    /// the index may be stale.
+    #[error("post-commit index refresh failed: {detail}")]
+    IndexRefreshFailed { detail: String },
+    /// The lifecycle commit failed and the rollback attempt itself failed;
+    /// manual intervention is required.
+    #[error("rollback after a failed lifecycle commit itself failed: {detail}")]
+    RollbackFailed { detail: String },
 }
 
 impl From<crate::query::QueryError> for ApiError {
@@ -374,28 +436,28 @@ pub fn migrate_index_db(paths: &Paths) -> Result<crate::migrate::MigrationOutcom
 /// Returns `Ok(true)` on success, `Ok(false)` if `git checkout` exited
 /// non-zero, `Err` if the binary couldn't be spawned. Used by rollback paths
 /// that need to revert specific files without touching unrelated changes the
-/// operator may have in the worktree.
+/// operator may have in the worktree. Routed through the env-scrubbed `git`
+/// builder so a user gitconfig can't run a checkout filter/hook.
 pub(crate) fn restore_paths_from_head(
     repo: &std::path::Path,
     paths: &[&std::path::Path],
 ) -> Result<bool, std::io::Error> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::trust::git_history::git(repo);
     cmd.arg("checkout").arg("HEAD").arg("--");
     for p in paths {
         cmd.arg(p);
     }
-    let out = cmd.current_dir(repo).output()?;
+    let out = cmd.output()?;
     Ok(out.status.success())
 }
 
 /// Drop the last commit and restore the worktree to `HEAD~1`. Returns
 /// `Ok(true)` on success, `Ok(false)` on non-zero exit, `Err` if the binary
 /// couldn't be spawned. Used when a commit landed but its post-commit
-/// verification failed.
+/// verification failed. Routed through the env-scrubbed `git` builder.
 pub(crate) fn rollback_last_commit(repo: &std::path::Path) -> Result<bool, std::io::Error> {
-    let out = std::process::Command::new("git")
+    let out = crate::trust::git_history::git(repo)
         .args(["reset", "--hard", "HEAD~1"])
-        .current_dir(repo)
         .output()?;
     Ok(out.status.success())
 }
@@ -737,23 +799,16 @@ pub fn keys_rotate(
         let events_yml = paths.notebook_git.join(".trust/events.yml");
         let event_log =
             crate::trust::events::load_events_yml(&events_yml).map_err(ApiError::Trust)?;
-        if let Some(signer_fp) = resolve_active_signer_fingerprint(paths)? {
-            let signer_trusted = event_log.events.iter().all(|e| match &e.payload {
-                crate::trust::events::EventKind::KeyRotatedOut { fingerprint, .. }
-                | crate::trust::events::EventKind::KeyCompromised { fingerprint, .. } => {
-                    fingerprint != &signer_fp
-                }
-                _ => true,
+        if let Some(signer_fp) = resolve_active_signer_fingerprint(paths)?
+            && !crate::trust::events::is_active_signer(&signer_fp, &event_log)
+        {
+            return Err(ApiError::TrustRegenerateRefused {
+                reason: format!(
+                    "current git signer {signer_fp} is no longer trusted; \
+                     swap notebook.git/.git/config user.signingkey to an Active key \
+                     (run `nexum keys list` to see which keys qualify)"
+                ),
             });
-            if !signer_trusted {
-                return Err(ApiError::TrustRegenerateRefused {
-                    reason: format!(
-                        "current git signer {signer_fp} is no longer trusted; \
-                         swap notebook.git/.git/config user.signingkey to an Active key \
-                         (run `nexum keys list` to see which keys qualify)"
-                    ),
-                });
-            }
         }
 
         // Read the new key's public-key blob and compute its fingerprint.
@@ -2148,7 +2203,7 @@ pub fn list_projects(paths: &Paths, cfg: &Config) -> Result<ProjectListing, ApiE
 ///      `git:`, `cc-slug:`, `codex-cwd:`.
 ///
 /// Returns `None` when neither key carries a path.
-fn project_path_for(project_id: &str, cfg: &Config) -> Option<String> {
+pub(crate) fn project_path_for(project_id: &str, cfg: &Config) -> Option<String> {
     // First try the legacy `name:` lookup (strip prefix, key under <name>).
     // This is what `nexum project register` writes today.
     if let Some(name) = project_id.strip_prefix("name:") {
@@ -2856,6 +2911,540 @@ fn nibble_char(n: u8) -> char {
     }
 }
 
+// ── Lifecycle promotion / rejection ─────────────────────────────────────────
+
+/// Parameters for [`promote`].
+pub struct PromoteParams<'a> {
+    /// Bare id or `source/project_id/id` triple.
+    pub rec: &'a str,
+    /// Project of the rec, when known (e.g. from a suggestion scan). Qualifies
+    /// the lookup so a bare rec id that collides across projects resolves to the
+    /// right record; `None` falls back to a bare lookup.
+    pub project_id: Option<&'a str>,
+    /// Commit SHA to bind to the decision.
+    pub commit: &'a str,
+    /// Override the repo path; defaults to `project_path_for(rec.project_id)`.
+    pub repo: Option<&'a std::path::Path>,
+    /// Override the default-branch resolution.
+    pub branch: Option<&'a str>,
+    /// When `true`, skip all repo access and produce `Unknown` evidence.
+    pub skip_fingerprint: bool,
+    /// Bypass the unsigned / unknown-signer eligibility gate (never bypasses
+    /// invalid-signature or compromised-key failures).
+    pub force_untrusted: bool,
+}
+
+/// Returned by a successful [`promote`] call.
+#[derive(Debug)]
+pub struct PromoteOutcome {
+    /// Id of the newly-created decision record.
+    pub decision_id: String,
+    /// SHA of the signed lifecycle commit in `notebook.git`.
+    pub notebook_commit: String,
+    /// `"verified"` or `"unknown"` — mirrors `CommitEvidence::verification_status`.
+    pub commit_evidence_status: String,
+    /// Set when the post-commit reindex failed (severity = partial; the commit
+    /// is durable and the caller should surface this to the agent).
+    pub index_warning: Option<crate::api::error::ErrorEnvelope>,
+}
+
+/// Returned by a successful [`reject`] call.
+#[derive(Debug)]
+pub struct RejectOutcome {
+    /// SHA of the signed lifecycle commit in `notebook.git`.
+    pub notebook_commit: String,
+    /// Set when the post-commit reindex failed (partial; commit is durable).
+    pub index_warning: Option<crate::api::error::ErrorEnvelope>,
+}
+
+/// Post-commit incremental reindex, fail-soft: a reindex failure becomes a
+/// `partial`-severity `IndexRefreshFailed` warning rather than aborting the
+/// already-durable lifecycle commit. Shared by the promote / reject /
+/// promote-suggestions facades.
+fn reindex_warning(paths: &Paths, cfg: &Config) -> Option<crate::api::error::ErrorEnvelope> {
+    index_run(paths, cfg).err().map(|e| {
+        crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
+            detail: e.to_string(),
+        })
+    })
+}
+
+/// Promote a local recommendation to a decision.
+///
+/// Resolves the source record, checks eligibility, assembles commit evidence
+/// (online or offline depending on `p.skip_fingerprint`), writes a single
+/// signed lifecycle commit, then runs the incremental reindex.
+///
+/// # Errors
+///
+/// Returns `ApiError::SourceRecIncompatible` when the record is not promotable.
+/// Returns `ApiError::CommitUnreachableFromDefault` when the commit is not
+/// reachable from the default branch (online path only).
+/// Returns lifecycle-mutation errors on signing or preflight failures.
+pub fn promote(
+    paths: &Paths,
+    cfg: &Config,
+    p: &PromoteParams<'_>,
+) -> Result<PromoteOutcome, ApiError> {
+    use crate::records::types::{Source, VerificationStatus};
+
+    // 1. Resolve + read the source rec. Ambiguous -> propagate.
+    let rec = resolve_and_get_local_rec(paths, cfg, p.rec, p.project_id)?;
+    let rec_ref = RecordKey::exact(Source::Local, rec.project_id.clone(), rec.id.clone());
+
+    // 2. Eligibility check — returns inherited warnings for the decision.
+    let inherited = crate::notebook::writer::check_promote_eligibility(&rec, p.force_untrusted)?;
+
+    // 3. Build commit evidence. --skip-fingerprint = OFFLINE: no repo access.
+    let evidence = if p.skip_fingerprint {
+        crate::promote::fingerprint::build_commit_evidence_offline(
+            p.commit,
+            p.branch,
+            &rec.project_id,
+            chrono::Utc::now(),
+        )
+    } else {
+        // Resolve repo path: caller override or config registry.
+        let repo: std::path::PathBuf = match p.repo {
+            Some(r) => r.to_owned(),
+            None => project_path_for(&rec.project_id, cfg)
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| ApiError::Other {
+                    message: format!(
+                        "no local path bound for {}; run `nexum project set-path` \
+                         (or pass --repo / --skip-fingerprint)",
+                        rec.project_id
+                    ),
+                })?,
+        };
+
+        // Repo identity check: only for git-identity projects.
+        verify_repo_identity_if_git(&rec.project_id, &repo)?;
+
+        // Commit existence.
+        if !crate::promote::fingerprint::commit_exists(&repo, p.commit) {
+            return Err(ApiError::CommitNotFound {
+                sha: p.commit.into(),
+                repo,
+            });
+        }
+
+        // Default-branch resolution + reachability.
+        let branch = match p.branch {
+            Some(b) => b.to_owned(),
+            None => crate::promote::fingerprint::resolve_default_branch(&repo)?,
+        };
+        if !crate::promote::fingerprint::is_reachable(&repo, p.commit, &branch)? {
+            return Err(ApiError::CommitUnreachableFromDefault {
+                sha: p.commit.into(),
+                branch,
+            });
+        }
+
+        crate::promote::fingerprint::build_commit_evidence(&repo, p.commit, &branch)?
+    };
+
+    // 4. Derive a collision-free decision id and build the record.
+    let decision_id = derive_decision_id(paths, cfg, &rec);
+    let new_decision = build_decision_record(&rec, &decision_id, &evidence, &inherited);
+
+    // 5. Commit evidence status for the outcome.
+    let evidence_status = match evidence.verification_status {
+        VerificationStatus::Verified => "verified".to_owned(),
+        VerificationStatus::Unknown => "unknown".to_owned(),
+    };
+
+    // 6. Single signed lifecycle commit (stamps rec + creates decision).
+    let event = crate::notebook::lifecycle::LifecycleEvent::Promote {
+        rec_ref,
+        new_decision: Box::new(new_decision),
+        commit_evidence: evidence,
+    };
+    let sha = crate::notebook::writer::commit_lifecycle_event(paths, &event)?;
+
+    // 7. Post-commit incremental reindex — fail-soft (partial).
+    let index_warning = reindex_warning(paths, cfg);
+
+    Ok(PromoteOutcome {
+        decision_id,
+        notebook_commit: sha,
+        commit_evidence_status: evidence_status,
+        index_warning,
+    })
+}
+
+/// Reject a local recommendation.
+///
+/// Stamps the source record as `rejected` in one signed lifecycle commit, then
+/// runs the incremental reindex.
+///
+/// # Errors
+///
+/// Returns `ApiError::SourceRecIncompatible` if the record does not exist or is
+/// not a local recommendation. Returns lifecycle-mutation errors on signing or
+/// preflight failures.
+pub fn reject(paths: &Paths, cfg: &Config, rec_arg: &str) -> Result<RejectOutcome, ApiError> {
+    use crate::records::types::Source;
+
+    let rec = resolve_and_get_local_rec(paths, cfg, rec_arg, None)?;
+    let rec_ref = RecordKey::exact(Source::Local, rec.project_id.clone(), rec.id.clone());
+
+    let notebook_commit = crate::notebook::writer::commit_lifecycle_event(
+        paths,
+        &crate::notebook::lifecycle::LifecycleEvent::Reject { rec_ref },
+    )?;
+
+    // Post-commit incremental reindex — fail-soft (partial).
+    let index_warning = reindex_warning(paths, cfg);
+
+    Ok(RejectOutcome {
+        notebook_commit,
+        index_warning,
+    })
+}
+
+// ── Helpers (promote / reject) ───────────────────────────────────────────────
+
+/// Resolve a bare or qualified `rec_arg` to a `UnifiedRecord`, asserting that
+/// it is a `Source::Local`, `RecordType::Recommendation` with `Outcome::Proposed`.
+/// Anything else (non-local, a decision, or an already-terminal recommendation)
+/// surfaces `SourceRecIncompatible` so a double-promote / double-reject / promote
+/// of a decision can't silently corrupt the store.
+fn resolve_and_get_local_rec(
+    paths: &Paths,
+    cfg: &Config,
+    rec_arg: &str,
+    project_id: Option<&str>,
+) -> Result<crate::records::types::UnifiedRecord, ApiError> {
+    use crate::records::types::{Outcome, RecordType, Source};
+
+    let key = match project_id {
+        Some(pid) => RecordKey::exact(Source::Local, pid, rec_arg),
+        None => RecordKey::bare(rec_arg.to_owned()),
+    };
+    let opts = crate::query::GetOpts {
+        include_unsigned: true,
+        ..Default::default()
+    };
+    let got = get(paths, cfg, &key, &opts)?;
+    match got {
+        GetOutcome::Found { record, .. } => {
+            if record.source != Source::Local {
+                return Err(ApiError::SourceRecIncompatible {
+                    id: record.id.clone(),
+                    reason: format!(
+                        "only local records can be promoted or rejected (source={})",
+                        record.source
+                    ),
+                });
+            }
+            if record.record_type != RecordType::Recommendation {
+                return Err(ApiError::SourceRecIncompatible {
+                    id: record.id.clone(),
+                    reason: format!(
+                        "only recommendations can be promoted or rejected (type={})",
+                        record.record_type.as_db_str()
+                    ),
+                });
+            }
+            if record.outcome != Outcome::Proposed {
+                return Err(ApiError::SourceRecIncompatible {
+                    id: record.id.clone(),
+                    reason: format!(
+                        "recommendation is already {} — only proposed recommendations \
+                         can be promoted or rejected",
+                        record.outcome.as_db_str()
+                    ),
+                });
+            }
+            Ok(*record)
+        }
+        GetOutcome::NotFound => Err(ApiError::SourceRecIncompatible {
+            id: rec_arg.to_owned(),
+            reason: "record not found".into(),
+        }),
+        GetOutcome::HiddenByPolicy { .. } => Err(ApiError::SourceRecIncompatible {
+            id: rec_arg.to_owned(),
+            reason: "record hidden by trust policy; retry with include_unsigned=true".into(),
+        }),
+    }
+}
+
+fn verify_repo_identity_if_git(project_id: &str, repo: &std::path::Path) -> Result<(), ApiError> {
+    if !project_id.starts_with("git:") {
+        return Ok(());
+    }
+    // Reuse the same env-scrubbed identity derivation that evidence assembly
+    // uses, so the two can't disagree. `repo_identity` falls back to a `root:`
+    // id when there's no origin remote; a non-`git:` result means there's
+    // nothing to check (non-origin repos are valid for local-only projects),
+    // so skip rather than flag a mismatch.
+    let derived = crate::promote::fingerprint::repo_identity(repo);
+    if !derived.starts_with("git:") || derived == project_id {
+        Ok(())
+    } else {
+        Err(ApiError::RepoIdentityMismatch {
+            expected: project_id.to_owned(),
+            observed: derived,
+            path: repo.to_owned(),
+        })
+    }
+}
+
+/// Derive a collision-free decision id of the form `<today>-<rec-slug>-decision`.
+///
+/// `<rec-slug>` is the record's id with the leading date prefix stripped
+/// (if present). Appends `-2`, `-3`, … on collision by checking whether a
+/// record with that id already exists in the index.
+fn derive_decision_id(
+    paths: &Paths,
+    cfg: &Config,
+    rec: &crate::records::types::UnifiedRecord,
+) -> String {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    // Strip a leading date prefix from the rec id (e.g. `2026-04-29-my-rec`
+    // → `my-rec`) so the decision id reads `2026-05-01-my-rec-decision`.
+    let slug: String = {
+        let parts: Vec<&str> = rec.id.splitn(4, '-').collect();
+        if parts.len() == 4 && parts[0].len() == 4 && parts[1].len() == 2 && parts[2].len() == 2 {
+            parts[3].to_owned()
+        } else {
+            rec.id.clone()
+        }
+    };
+
+    let base = format!("{today}-{slug}-decision");
+
+    // Collision check: if a record with this id already exists, append a counter.
+    let opts = crate::query::GetOpts {
+        include_unsigned: true,
+        ..Default::default()
+    };
+    let key = RecordKey::bare(base.clone());
+    let exists = matches!(get(paths, cfg, &key, &opts), Ok(GetOutcome::Found { .. }));
+    if !exists {
+        return base;
+    }
+    for n in 2u32.. {
+        let candidate = format!("{base}-{n}");
+        let k = RecordKey::bare(candidate.clone());
+        if !matches!(get(paths, cfg, &k, &opts), Ok(GetOutcome::Found { .. })) {
+            return candidate;
+        }
+    }
+    base
+}
+
+/// Assemble the `UnifiedRecord` for the new decision. The `body` is the
+/// canonical YAML produced by the emitter; the in-memory fields mirror it so
+/// the writer's `project_id` guard and round-trip assertions pass.
+fn build_decision_record(
+    rec: &crate::records::types::UnifiedRecord,
+    decision_id: &str,
+    evidence: &crate::records::types::CommitEvidence,
+    inherited_warnings: &[String],
+) -> crate::records::types::UnifiedRecord {
+    use crate::records::types::{
+        Confidence, CryptoResult, Outcome, Provenance, RecordType, SignatureStatus, Source,
+    };
+
+    let now = chrono::Utc::now();
+
+    crate::records::types::UnifiedRecord {
+        id: decision_id.to_owned(),
+        record_type: RecordType::Decision,
+        source: Source::Local,
+        // CRITICAL: project_id must equal rec.project_id so the writer's
+        // path-component guard passes.
+        project_id: rec.project_id.clone(),
+        title: rec.title.clone(),
+        summary: None,
+        // The writer regenerates the on-disk YAML from the record's fields via
+        // its own `build_decision_yaml` call; `body` is never read back.
+        body: String::new(),
+        body_origin_path: None,
+        tags: vec![],
+        agent: rec.agent,
+        session_refs: vec![],
+        files: vec![],
+        commits: vec![evidence.commit_sha.clone()],
+        created: now,
+        updated: now,
+        confidence: Confidence::High,
+        outcome: Outcome::Working,
+        provenance: Provenance {
+            source: Source::Local,
+            signature_status: SignatureStatus::Unsigned,
+            extractor: None,
+            digest_hash: None,
+            record_commit_sha: None,
+            signer_fingerprint: None,
+            crypto_result: CryptoResult::Good,
+            relevant_trust_events_commit: None,
+            trust_basis: None,
+            warnings: vec![],
+            commit_evidence: Some(evidence.clone()),
+            promoted_from: None,
+            inherited_warnings: inherited_warnings.to_vec(),
+        },
+        extras: std::collections::HashMap::new(),
+        content_hash: String::new(),
+    }
+}
+
+// ── promote_suggestions ───────────────────────────────────────────────────────
+
+/// Outcome of `api::promote_suggestions`.
+pub struct SuggestOutcome {
+    /// Number of recommendations marked stale this pass.
+    pub marked_stale: usize,
+    /// (recommendation, commit) pairs that pass the correlation predicate.
+    pub suggestions: Vec<crate::promote::suggest::Suggestion>,
+    /// Set when the post-stale-sweep reindex failed (severity=partial).
+    pub index_warning: Option<crate::api::error::ErrorEnvelope>,
+}
+
+/// Reaper sweep (mutating: stamps stale) then suggestion scan (read-only).
+///
+/// Flow:
+/// 1. Enumerate proposed local recommendations via the index.
+/// 2. Run the suggestion scan — each passing (rec, commit) pair is a candidate.
+/// 3. Stale = age-based candidates MINUS the recs that got a suggestion this pass.
+/// 4. For each stale rec, commit a `LifecycleEvent::Stale` to the notebook.
+/// 5. If any were marked, run `index_run` fail-soft and capture any partial failure.
+///
+/// # Errors
+///
+/// Returns `ApiError::Query` if the index cannot be opened or listed.
+/// Stale lifecycle commits propagate write errors immediately (the commit
+/// is the durable side-effect; a partial-index failure becomes `index_warning`).
+pub fn promote_suggestions(paths: &Paths, cfg: &Config) -> Result<SuggestOutcome, ApiError> {
+    let recs = list_local_recommendations(paths, cfg)?;
+    let suggestions = crate::promote::suggest::scan(paths, cfg, &recs)?;
+    // Key the exclusion set on (project_id, rec_id) — a bare rec-id collision
+    // across two projects must not exempt one project's stale rec from the sweep.
+    let suggested: std::collections::HashSet<(&str, &str)> = suggestions
+        .iter()
+        .map(|s| (s.project_id.as_str(), s.rec_id.as_str()))
+        .collect();
+
+    // Stale = age-based proposed recs that got no suggestion this pass.
+    let now = chrono::Utc::now();
+    let stale: Vec<_> = crate::promote::reaper::find_stale(cfg, &recs, now)
+        .into_iter()
+        .filter(|rk| {
+            let pid = rk.project_id.as_deref().unwrap_or("");
+            !suggested.contains(&(pid, rk.id.as_str()))
+        })
+        .collect();
+
+    let mut marked = 0;
+    for rk in stale {
+        crate::notebook::writer::commit_lifecycle_event(
+            paths,
+            &crate::notebook::lifecycle::LifecycleEvent::Stale { rec_ref: rk },
+        )?;
+        marked += 1;
+    }
+
+    // Surface a partial index failure only when there were stale commits to reindex.
+    let index_warning = if marked > 0 {
+        reindex_warning(paths, cfg)
+    } else {
+        None
+    };
+
+    Ok(SuggestOutcome {
+        marked_stale: marked,
+        suggestions,
+        index_warning,
+    })
+}
+
+/// Enumerate all proposed local recommendations from the index.
+///
+/// Pages through the list verb (filter: type=recommendation, source=local)
+/// and fetches the full `UnifiedRecord` for each ID, then discards non-proposed
+/// outcomes. The page size is generous (1000) to avoid truncating realistic
+/// workloads without introducing unbounded memory growth.
+fn list_local_recommendations(
+    paths: &Paths,
+    cfg: &Config,
+) -> Result<Vec<crate::records::types::UnifiedRecord>, ApiError> {
+    use crate::records::types::{Outcome, RecordType, Source};
+
+    let filters = Filters {
+        record_type: Some(RecordType::Recommendation),
+        source: Some(Source::Local),
+        ..Default::default()
+    };
+    let opts = GetOpts {
+        include_unsigned: true,
+        ..Default::default()
+    };
+
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let page = list(paths, cfg, &filters, 1000, cursor.as_deref())?;
+        let has_more = page.next_cursor.is_some();
+        cursor = page.next_cursor;
+
+        let conn = open_for_query(paths)?;
+        for result in page.results {
+            let key = RecordKey {
+                id: result.id.clone(),
+                source: Some(Source::Local),
+                project_id: Some(result.project_id.clone()),
+            };
+            if let GetOutcome::Found { record, .. } = query_get(&conn, &key, &opts)?
+                && record.outcome == Outcome::Proposed
+            {
+                out.push(*record);
+            }
+        }
+
+        if !has_more {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+/// Walk `notebook.git` history newest-first, classifying each commit by its
+/// message prefix (see [`crate::notebook::audit::AuditEntry`]).
+///
+/// # Errors
+///
+/// Returns `ApiError::Other` if `git` cannot be invoked or exits non-zero.
+pub fn audit_log(
+    paths: &Paths,
+    limit: Option<usize>,
+) -> Result<Vec<crate::notebook::audit::AuditEntry>, ApiError> {
+    crate::notebook::audit::audit_log(paths, limit)
+}
+
+/// Fresh cryptographic verification of a single record.
+///
+/// Re-runs `git verify-commit` against the record's notebook commit SHA and
+/// combines the live verdict with the read-time projection already stored in
+/// the record's `provenance` fields. Read-only — no writer lock.
+///
+/// # Errors
+///
+/// Returns `ApiError::SourceRecIncompatible` when the record does not exist.
+/// Returns `ApiError::Other` if the `git` binary cannot be spawned.
+pub fn verify_record(
+    paths: &Paths,
+    cfg: &Config,
+    rec_arg: &str,
+) -> Result<crate::notebook::verify::VerifyOutcome, ApiError> {
+    crate::notebook::verify::verify_record(paths, cfg, rec_arg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3122,4 +3711,134 @@ mod tests {
         assert!(!res.meta.embed_pool_saturated);
         assert!(res.results.len() <= 5);
     }
+
+    // ── promote_suggestions / list_local_recommendations ─────────────────────
+
+    /// Seed a minimal recommendation row directly into the index DB.
+    fn seed_recommendation(
+        conn: &rusqlite::Connection,
+        id: &str,
+        project_id: &str,
+        outcome: &str,
+        source: &str,
+        created: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, tags, \
+             tags_fts, agent, session_refs, files, commits, confidence, outcome, created, updated, \
+             content_hash, index_hash, crypto_result, indexed_at) VALUES \
+             (?1, ?2, ?3, 'recommendation', 'test rec', 'body', '[]', '', 'manual', '[]', \
+              '[]', '[]', 'medium', ?4, ?5, ?5, 'h', 'ih', 'no-signature', ?5)",
+            rusqlite::params![id, source, project_id, outcome, created],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_local_recommendations_returns_proposed_local_recs() {
+        let (_dir, paths) = paths_with_temp_home();
+        let conn = open_or_create(&paths.index_db).unwrap();
+
+        seed_recommendation(
+            &conn,
+            "2026-01-01-alpha",
+            "git:proj",
+            "proposed",
+            "local",
+            "2026-01-01T00:00:00Z",
+        );
+        // Non-proposed: should be excluded.
+        seed_recommendation(
+            &conn,
+            "2026-01-02-beta",
+            "git:proj",
+            "promoted",
+            "local",
+            "2026-01-02T00:00:00Z",
+        );
+        // Non-local: should be excluded.
+        seed_recommendation(
+            &conn,
+            "2026-01-03-gamma",
+            "git:proj",
+            "proposed",
+            "cc-native",
+            "2026-01-03T00:00:00Z",
+        );
+        drop(conn);
+
+        let cfg = Config::seed();
+        let recs = list_local_recommendations(&paths, &cfg).unwrap();
+        assert_eq!(
+            recs.len(),
+            1,
+            "expected one proposed local rec, got {recs:?}"
+        );
+        assert_eq!(recs[0].id, "2026-01-01-alpha");
+    }
+
+    #[test]
+    fn list_local_recommendations_empty_store_returns_empty() {
+        let (_dir, paths) = paths_with_temp_home();
+        let _conn = open_or_create(&paths.index_db).unwrap();
+        let cfg = Config::seed();
+        let recs = list_local_recommendations(&paths, &cfg).unwrap();
+        assert!(recs.is_empty());
+    }
+
+    /// `promote_suggestions` with an empty index: `marked_stale=0`,
+    /// `suggestions=[]`, `index_warning=None`.
+    #[test]
+    fn promote_suggestions_empty_store_returns_zero_outcome() {
+        let (_dir, paths) = paths_with_temp_home();
+        let _conn = open_or_create(&paths.index_db).unwrap();
+        let cfg = Config::seed();
+        let outcome = promote_suggestions(&paths, &cfg).unwrap();
+        assert_eq!(outcome.marked_stale, 0);
+        assert!(outcome.suggestions.is_empty());
+        assert!(outcome.index_warning.is_none());
+    }
+
+    /// When all proposed local recs are within the correlation window, none
+    /// are marked stale and `marked_stale=0` with no `index_warning`.
+    #[test]
+    fn promote_suggestions_recent_rec_not_marked_stale() {
+        let (_dir, paths) = paths_with_temp_home();
+        let conn = open_or_create(&paths.index_db).unwrap();
+        // A rec created 5 days ago — well within the default 30-day window.
+        let recent = (chrono::Utc::now() - chrono::Duration::days(5)).to_rfc3339();
+        seed_recommendation(
+            &conn,
+            "2026-05-27-recent-rec",
+            "git:proj",
+            "proposed",
+            "local",
+            &recent,
+        );
+        drop(conn);
+
+        let mut cfg = Config::seed();
+        // No path registered for git:proj — scan will skip it (no repo → no suggestions).
+        cfg.promote.correlation_window_days = 30;
+        // Disable project-path lookup so scan skips gracefully (no repo → no commit scan).
+        let outcome = promote_suggestions(&paths, &cfg).unwrap();
+        assert_eq!(
+            outcome.marked_stale, 0,
+            "recent rec must not be marked stale"
+        );
+        assert!(outcome.suggestions.is_empty());
+        assert!(outcome.index_warning.is_none());
+    }
+
+    // NOTE: the "old proposed rec gets marked stale" happy path requires
+    // `commit_lifecycle_event` to succeed, which needs a fully bootstrapped
+    // notebook.git with an active signing key. This is covered by the live e2e
+    // harness; the unit test above (recent_rec_not_marked_stale) verifies the
+    // age-filter logic with a rec that is too young to be reaped.
+    //
+    // The scan-produces-suggestions path is covered by the
+    // `promote::suggest` unit tests (scan_returns_suggestion_when_*), which
+    // exercise the full scan predicate against a real git repo fixture.
+    // The `promote_suggestions` function composes `list_local_recommendations`
+    // + `scan` + `find_stale` — each of those three is independently tested.
 }

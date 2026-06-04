@@ -45,6 +45,7 @@ use crate::trust::events::TrustError;
 ///
 /// Returns an [`ErrorEnvelope`] as described above. The envelope is the
 /// failure channel — callers decide how to surface it.
+#[allow(clippy::result_large_err)] // ErrorEnvelope is the wire contract; boxing would break callers
 pub fn resolve_runtime() -> Result<(Paths, Config), ErrorEnvelope> {
     let paths = Paths::resolve().map_err(|e| ErrorEnvelope {
         error_code: error_codes::NOT_INITIALIZED,
@@ -54,6 +55,9 @@ pub fn resolve_runtime() -> Result<(Paths, Config), ErrorEnvelope> {
             rationale: "Initialize a nexum home (notebook.git + config + signing key).".into(),
         }),
         context: serde_json::json!({ "phase": "paths_resolve" }),
+        severity: None,
+        state_mutated: None,
+        requires_reindex: None,
     })?;
     resolve_from(paths)
 }
@@ -73,6 +77,7 @@ pub fn resolve_runtime() -> Result<(Paths, Config), ErrorEnvelope> {
 /// # Errors
 ///
 /// Returns an [`ErrorEnvelope`] for a `pre_check` or `load_config` failure.
+#[allow(clippy::result_large_err)] // ErrorEnvelope is the wire contract; boxing would break callers
 pub fn resolve_runtime_for(home: &Path) -> Result<(Paths, Config), ErrorEnvelope> {
     resolve_from(Paths::with_home(home.to_path_buf()))
 }
@@ -81,6 +86,7 @@ pub fn resolve_runtime_for(home: &Path) -> Result<(Paths, Config), ErrorEnvelope
 /// an already-built [`Paths`]. Used by [`resolve_runtime`] (which resolves
 /// the home from the process environment) and [`resolve_runtime_for`]
 /// (which takes the home as an argument).
+#[allow(clippy::result_large_err)] // ErrorEnvelope is the wire contract; boxing would break callers
 fn resolve_from(paths: Paths) -> Result<(Paths, Config), ErrorEnvelope> {
     pre_check(&paths.home).map_err(|e| match e {
         StartupError::Trust(TrustError::ReanchorPending { message }) => ErrorEnvelope {
@@ -94,6 +100,9 @@ fn resolve_from(paths: Paths) -> Result<(Paths, Config), ErrorEnvelope> {
                     .into(),
             }),
             context: serde_json::json!({ "phase": "pre_check" }),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         },
         // Any other trust-layer pre-check failure routes through the
         // canonical `From<&ApiError>` envelope builder so the trust-error
@@ -113,6 +122,9 @@ fn resolve_from(paths: Paths) -> Result<(Paths, Config), ErrorEnvelope> {
             rationale: "Re-running `nexum init` heals a missing or malformed config.toml.".into(),
         }),
         context: serde_json::json!({ "phase": "load_config" }),
+        severity: None,
+        state_mutated: None,
+        requires_reindex: None,
     })?;
 
     Ok((paths, cfg))

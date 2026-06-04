@@ -740,6 +740,57 @@ pub struct Provenance {
     /// projection populates on its way out to API consumers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Set for promoted decisions: the project-repo commit this decision
+    /// was promoted against. `None` for every non-promoted record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_evidence: Option<CommitEvidence>,
+    /// Set for promoted decisions: the recommendation this decision came
+    /// from. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promoted_from: Option<RecordKey>,
+    /// Warning codes inherited from the source recommendation at promote
+    /// time (e.g. `pre-recovery-record`), preserved permanently. Merged
+    /// into the surfaced `warnings` array on read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_warnings: Vec<String>,
+}
+
+/// Strict + loose tree fingerprints over a project-repo commit, plus the
+/// changed file paths. `strict` binds blob contents; `loose` binds only
+/// (path, mode) so a rebase that preserves content still matches loosely.
+/// `file_paths` powers diff-shape similarity scoring in a later milestone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeFingerprint {
+    pub strict: ContentHash,
+    pub loose: ContentHash,
+    pub file_paths: Vec<PathBuf>,
+}
+
+/// Live-verification state of a decision's recorded commit evidence at
+/// promote time. Only `Verified` (matcher confirmed) and `Unknown` (repo
+/// unreachable / fingerprint skipped) are reachable today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerificationStatus {
+    Verified,
+    Unknown,
+}
+
+/// Tracked evidence that a decision was promoted against a real commit in
+/// the user's project repo. Persisted in the decision record's on-disk
+/// `provenance:` block and mirrored into index columns for the read path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitEvidence {
+    /// Canonicalized git origin URL (`git:<hex>` hint) or root-commit hash
+    /// for offline projects.
+    pub repo_identity: String,
+    pub branch: String,
+    pub commit_sha: String,
+    pub commit_time: DateTime<Utc>,
+    /// sha256 of the normalized commit message; stable across cherry-pick.
+    pub commit_message_hash: ContentHash,
+    pub tree_changes_fingerprint: TreeFingerprint,
+    pub verification_status: VerificationStatus,
 }
 
 /// Unified in-memory record. Every adapter normalizes its on-disk shape to
@@ -901,6 +952,9 @@ mod tests {
                 // with a None basis; no test derives trust_basis from here.
                 trust_basis: None,
                 warnings: Vec::new(),
+                commit_evidence: None,
+                promoted_from: None,
+                inherited_warnings: Vec::new(),
             },
             extras: HashMap::new(),
             content_hash: "ec22deadbeef".into(),
@@ -931,6 +985,9 @@ mod tests {
             relevant_trust_events_commit: None,
             trust_basis: None,
             warnings: vec!["unsigned".into()],
+            commit_evidence: None,
+            promoted_from: None,
+            inherited_warnings: Vec::new(),
         };
         let json = serde_json::to_string(&none_basis).unwrap();
         assert!(
@@ -953,6 +1010,9 @@ mod tests {
             relevant_trust_events_commit: Some("def456".into()),
             trust_basis: Some(TrustBasis::RotatedHistorical),
             warnings: vec!["signer-key-rotated".into()],
+            commit_evidence: None,
+            promoted_from: None,
+            inherited_warnings: Vec::new(),
         };
         let json = serde_json::to_string(&some_basis).unwrap();
         assert!(
@@ -967,6 +1027,29 @@ mod tests {
         let legacy = r#"{"source":"local","signature_status":"verified","crypto_result":"good"}"#;
         let parsed: Provenance = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.trust_basis, None);
+    }
+
+    #[test]
+    fn provenance_lifecycle_fields_skip_when_empty() {
+        let p = Provenance {
+            source: Source::Local,
+            signature_status: SignatureStatus::Unsigned,
+            extractor: None,
+            digest_hash: None,
+            record_commit_sha: None,
+            signer_fingerprint: None,
+            crypto_result: CryptoResult::NoSignature,
+            relevant_trust_events_commit: None,
+            trust_basis: None,
+            warnings: Vec::new(),
+            commit_evidence: None,
+            promoted_from: None,
+            inherited_warnings: Vec::new(),
+        };
+        let s = serde_yaml::to_string(&p).unwrap();
+        assert!(!s.contains("commit_evidence"));
+        assert!(!s.contains("promoted_from"));
+        assert!(!s.contains("inherited_warnings"));
     }
 
     #[test]
@@ -1334,5 +1417,28 @@ mod tests {
         ] {
             assert_eq!(CryptoResult::from_db_str(variant.as_db_str()), variant);
         }
+    }
+
+    #[test]
+    fn commit_evidence_round_trips_yaml() {
+        let ev = CommitEvidence {
+            repo_identity: "git:abc123".into(),
+            branch: "main".into(),
+            commit_sha: "a1b2c3d4".into(),
+            commit_time: chrono::DateTime::parse_from_rfc3339("2026-05-21T10:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            commit_message_hash: "0".repeat(64),
+            tree_changes_fingerprint: TreeFingerprint {
+                strict: "1".repeat(64),
+                loose: "2".repeat(64),
+                file_paths: vec![std::path::PathBuf::from("src/lib.rs")],
+            },
+            verification_status: VerificationStatus::Verified,
+        };
+        let s = serde_yaml::to_string(&ev).unwrap();
+        let back: CommitEvidence = serde_yaml::from_str(&s).unwrap();
+        assert_eq!(ev, back);
+        assert!(s.contains("verification_status: verified"));
     }
 }

@@ -43,14 +43,11 @@ will trust.
 ## Status
 
 Actively developed personal tool. The read path, the write path, the trust
-state machine, the MCP stdio server, semantic ranking, typed extraction, and the
-admin / recovery command surface are all in `main` and validated end-to-end
-against real Codex + Claude Code data via the Docker harness. Three crates
-compile clean; the gate is green at
-`cargo fmt + check + clippy -D warnings + test`.
-
-**Remaining work:** a recommendation → decision promotion flow when matching
-commits land in your project repo.
+state machine, the MCP stdio server, semantic ranking, typed extraction, the
+admin / recovery command surface, and the recommendation → decision promotion
+lifecycle are all in `main` and validated end-to-end against real Codex +
+Claude Code data via the Docker harness. Three crates compile clean; the gate
+is green at `cargo fmt + check + clippy -D warnings + test`.
 
 ## Features
 
@@ -109,6 +106,24 @@ commits land in your project repo.
   cost-acknowledgement loop; first-run consent is recorded per (provider, model
   family) for `--quiet` and cron-style use. Committed records are immediately
   queryable via the standard read verbs (`get` / `list` / `search`).
+
+### Promotion lifecycle
+
+- **Recommendation → decision promotion** — `nexum promote <rec> --commit <sha>`
+  turns a proposed local recommendation into a signed decision once a matching
+  commit lands in your project repo. nexum correlates the commit (reachability,
+  changed-path overlap, message reference), records cryptographic commit
+  evidence on the decision, and inherits the recommendation's trust warnings.
+  `--skip-fingerprint` records the claim offline; `--force-untrusted` (with an
+  explicit acknowledgement) promotes despite an unsigned source.
+- **Reject + sweep** — `nexum reject <rec>` stamps a recommendation rejected;
+  `nexum promote-suggestions` scans proposed recommendations for candidate
+  commits — interactive `[y/n/skip-rec/skip-rest]`, or `--json --non-interactive`
+  for agents — and ages out long-unactioned ones as stale.
+- **Audit + re-verify** — `nexum audit-log` walks the notebook lifecycle history
+  (promote / reject / stale / …) with each commit's signer; `nexum verify
+  <record>` re-runs a fresh signature check and exits non-zero on an invalid
+  signature. Both support `--json`.
 
 ### Admin / recovery
 
@@ -169,6 +184,11 @@ cargo build --release
 
 # Inspect trust state (each known key + role + current git signer)
 ./target/release/nexum keys list
+
+# Promote a recommendation to a decision once a matching commit lands
+./target/release/nexum promote <rec-id> --commit <sha> --json
+./target/release/nexum audit-log --json
+./target/release/nexum verify <decision-id>
 
 # Store health (key-state + signer files + sentinel + merge-commit)
 ./target/release/nexum doctor --json

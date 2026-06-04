@@ -20,7 +20,7 @@ pub const DDL: &str = include_str!("schema.sql");
 
 /// Latest index DB schema version known to this binary. Mirrors the
 /// `PRAGMA user_version` value set inside `schema.sql`.
-pub const INDEX_DB_LATEST_VERSION: u32 = 2;
+pub const INDEX_DB_LATEST_VERSION: u32 = 3;
 
 /// Apply the index DDL to a connection.
 ///
@@ -103,7 +103,7 @@ pub(crate) fn read_user_version(conn: &Connection) -> rusqlite::Result<u32> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0))
 }
 
-/// Verify the v2 schema shape is in place after `apply` returns Ok. Catches
+/// Verify the v3 schema shape is in place after `apply` returns Ok. Catches
 /// scenarios where the DDL ran partially or a migration left tables missing.
 pub(crate) fn verify_post_apply(conn: &Connection) -> Result<(), SchemaError> {
     for name in [
@@ -143,6 +143,9 @@ pub(crate) fn verify_post_apply(conn: &Connection) -> Result<(), SchemaError> {
         "signer_fingerprint",
         "crypto_result",
         "relevant_trust_events_commit",
+        "commit_evidence",
+        "promoted_from",
+        "inherited_warnings",
     ] {
         if !cols.contains(col) {
             return Err(SchemaError::Missing {
@@ -196,12 +199,15 @@ mod tests {
     }
 
     #[test]
-    fn ddl_constant_includes_v2_columns_and_tables() {
+    fn ddl_constant_includes_v3_columns_and_tables() {
         for col in [
             "record_commit_sha",
             "signer_fingerprint",
             "crypto_result",
             "relevant_trust_events_commit",
+            "commit_evidence",
+            "promoted_from",
+            "inherited_warnings",
         ] {
             assert!(DDL.contains(col), "DDL must include records column `{col}`");
         }
@@ -212,8 +218,8 @@ mod tests {
             );
         }
         assert!(
-            DDL.contains("PRAGMA user_version = 2"),
-            "DDL must bump user_version to 2"
+            DDL.contains("PRAGMA user_version = 3"),
+            "DDL must bump user_version to 3"
         );
     }
 }

@@ -1,6 +1,7 @@
 //! Index DB migration registry. Each entry maps (from, to) to a migration fn.
 
 mod v1_to_v2;
+mod v2_to_v3;
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +20,7 @@ pub const INDEX_DB_LATEST_VERSION: u32 = crate::index::schema::INDEX_DB_LATEST_V
 pub type Migration = fn(tx: &Transaction, from: u32) -> Result<(), MigrationError>;
 
 /// Ordered list of registered migrations. New steps append in version order.
-const MIGRATIONS: &[(u32, u32, Migration)] = &[(1, 2, v1_to_v2::apply)];
+const MIGRATIONS: &[(u32, u32, Migration)] = &[(1, 2, v1_to_v2::apply), (2, 3, v2_to_v3::apply)];
 
 /// Migrate the on-disk index DB up to `INDEX_DB_LATEST_VERSION`.
 ///
@@ -31,7 +32,7 @@ const MIGRATIONS: &[(u32, u32, Migration)] = &[(1, 2, v1_to_v2::apply)];
 /// `SQLite`'s online-backup API before applying any mutation. Each migration
 /// runs inside its own transaction; `PRAGMA user_version` is bumped on
 /// successful commit. After the migration loop, `verify_post_apply` confirms
-/// every expected v2 table / trigger / column is present so a step that
+/// every expected v3 table / trigger / column is present so a step that
 /// silently forgot to create something fails loud rather than committing
 /// cleanly.
 ///
@@ -46,7 +47,7 @@ const MIGRATIONS: &[(u32, u32, Migration)] = &[(1, 2, v1_to_v2::apply)];
 /// - `MigrationError::StepFailed` when a registered migration returns an
 ///   error; the underlying message is preserved in `cause`.
 /// - `MigrationError::Schema` when post-apply verification finds any
-///   expected v2 table / trigger / column missing after the loop.
+///   expected v3 table / trigger / column missing after the loop.
 // Caller asserts lock ownership at runtime; we have no compile-time check.
 // The lock-guard newtype lands when the lock-holder code lands.
 pub fn migrate_to_latest(

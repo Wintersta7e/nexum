@@ -270,6 +270,9 @@ fn run_revoke(args: &RevokeArgs) -> ExitCode {
                 "kind": "cli",
                 "subkind": "strict_yes_required",
             }),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         };
         return json_emit::emit_error(&env, 2);
     }
@@ -396,6 +399,9 @@ fn run_recover(args: &RecoverArgs) -> ExitCode {
                 "subkind": "recover",
                 "reason": "json_yes_required",
             }),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         };
         return json_emit::emit_error(&env, 2);
     }

@@ -14,6 +14,13 @@ use super::options::InitError;
 fn run_git(repo: &Path, args: &[&str]) -> Result<Output, InitError> {
     let out = Command::new("git")
         .current_dir(repo)
+        // Scrub global/system config so a user gitconfig can't run a
+        // `core.hooksPath` hook or redirect the signer during the notebook's
+        // signed commit. The signing identity + key live in the notebook's
+        // LOCAL config (set by `git_config_signing`), which this does not touch.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(args)
         .output()
         .map_err(|e| InitError::Io {
@@ -131,6 +138,12 @@ pub fn git_verify_commit_with_signers(
     let signers_path = historical_signers.display().to_string();
     let out = Command::new("git")
         .current_dir(repo_path)
+        // Scrub global/system config so a user gitconfig can't redirect the SSH
+        // verifier program (`gpg.ssh.program`) on this signature-verification
+        // path. The allowedSignersFile + format are pinned via `-c` below.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args([
             "-c",
             "gpg.format=ssh",
@@ -260,10 +273,33 @@ pub(crate) fn git_verify_commit_outcome(
     })
 }
 
-/// Read `user.name` and `user.email` from the global git config.
-///
-/// Returns `("", "")` if the values are not set (init will use empty strings
-/// for the repository-local git config; user can fix later via `git config`).
+/// Author identity used for notebook commits when the user has no global git
+/// identity configured. The SSH signature is the trust anchor — the commit
+/// author is cosmetic — so a sane default lets `nexum init` work on a fresh
+/// machine instead of failing with git's "Author identity unknown".
+const DEFAULT_AUTHOR_NAME: &str = "nexum";
+const DEFAULT_AUTHOR_EMAIL: &str = "nexum@localhost";
+
+/// Fill any empty `(name, email)` field with the default author identity.
+/// A present global identity is preferred; only blanks are substituted.
+fn identity_or_default(name: String, email: String) -> (String, String) {
+    let name = if name.trim().is_empty() {
+        DEFAULT_AUTHOR_NAME.to_owned()
+    } else {
+        name
+    };
+    let email = if email.trim().is_empty() {
+        DEFAULT_AUTHOR_EMAIL.to_owned()
+    } else {
+        email
+    };
+    (name, email)
+}
+
+/// Read `user.name` and `user.email` from the global git config, falling back
+/// to a default author identity for any unset field. The result is therefore
+/// never empty, so the notebook's signed bootstrap commit always has a valid
+/// author even on a machine with no global git identity.
 ///
 /// # Errors
 ///
@@ -276,7 +312,10 @@ pub fn git_global_identity() -> Result<(String, String), InitError> {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
             .unwrap_or_default()
     }
-    Ok((read_global("user.name"), read_global("user.email")))
+    Ok(identity_or_default(
+        read_global("user.name"),
+        read_global("user.email"),
+    ))
 }
 
 #[cfg(test)]
@@ -313,6 +352,36 @@ mod tests {
         let dir = tempdir().unwrap();
         git_init(dir.path()).unwrap();
         assert!(dir.path().join(".git").exists());
+    }
+
+    #[test]
+    fn identity_or_default_fills_only_empty_fields() {
+        // Both blank -> both defaulted (the no-global-identity case).
+        assert_eq!(
+            identity_or_default(String::new(), String::new()),
+            ("nexum".to_owned(), "nexum@localhost".to_owned())
+        );
+        // Whitespace counts as blank; the set field is preserved.
+        assert_eq!(
+            identity_or_default("   ".to_owned(), "a@b.test".to_owned()),
+            ("nexum".to_owned(), "a@b.test".to_owned())
+        );
+        // A present identity is preferred and left untouched.
+        assert_eq!(
+            identity_or_default("Alice".to_owned(), "alice@b.test".to_owned()),
+            ("Alice".to_owned(), "alice@b.test".to_owned())
+        );
+    }
+
+    /// Regression: `nexum init` once failed with git's "Author identity unknown"
+    /// on a machine with no global git identity, because the bootstrap commit
+    /// inherited empty author fields. `git_global_identity` must now never yield
+    /// an empty field, regardless of the runner's global config.
+    #[test]
+    fn git_global_identity_is_never_empty() {
+        let (name, email) = git_global_identity().unwrap();
+        assert!(!name.trim().is_empty(), "author name must never be empty");
+        assert!(!email.trim().is_empty(), "author email must never be empty");
     }
 
     #[test]

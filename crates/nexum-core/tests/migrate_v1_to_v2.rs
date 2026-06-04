@@ -113,7 +113,7 @@ fn migrate_to_latest_without_lock_returns_migration_required() {
         err,
         nexum_core::migrate::MigrationError::MigrationRequired {
             v_disk: 1,
-            v_code: 2
+            v_code: 3
         }
     ));
 }
@@ -140,7 +140,7 @@ fn migrate_to_latest_on_current_version_is_noop() {
     let db_path = dir.path().join("index.db");
     {
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        conn.execute_batch("PRAGMA user_version = 3;").unwrap();
     }
     let mut conn = Connection::open(&db_path).unwrap();
     let outcome = migrate_to_latest(&mut conn, &db_path, true).unwrap();

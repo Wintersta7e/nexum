@@ -1,4 +1,4 @@
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 -- records table
 CREATE TABLE records (
@@ -33,6 +33,10 @@ CREATE TABLE records (
     -- commit) and for local records where no events.yml commit is reachable.
     relevant_trust_events_commit TEXT,
     extras JSON,
+    -- Lifecycle columns (set only on promoted decisions; NULL otherwise).
+    commit_evidence JSON,
+    promoted_from JSON,
+    inherited_warnings JSON,
     indexed_at TEXT NOT NULL,
     UNIQUE (source, project_id, id)
 );

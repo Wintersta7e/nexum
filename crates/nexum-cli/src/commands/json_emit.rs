@@ -52,6 +52,9 @@ pub(crate) fn emit_serialize_failure(e: &serde_json::Error) -> ExitCode {
         message: format!("serialize: {e}"),
         remediation: None,
         context: serde_json::json!({ "kind": "json" }),
+        severity: None,
+        state_mutated: None,
+        requires_reindex: None,
     };
     let code = super::exit_codes::for_envelope(&env);
     emit_error(&env, code)
@@ -87,6 +90,9 @@ mod tests {
                 rationale: "test".into(),
             }),
             context: serde_json::json!({ "v_disk": 3, "v_code": 5 }),
+            severity: None,
+            state_mutated: None,
+            requires_reindex: None,
         }
     }
 

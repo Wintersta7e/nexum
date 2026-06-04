@@ -368,6 +368,9 @@ impl NexumServer {
                             .into(),
                     }),
                     context: serde_json::json!({ "requested_id": requested_id }),
+                    severity: None,
+                    state_mutated: None,
+                    requires_reindex: None,
                 };
                 Ok(envelope_to_result(&env))
             }
@@ -387,6 +390,9 @@ impl NexumServer {
                         "signature_status": signature_status.to_string(),
                         "requested_id": requested_id,
                     }),
+                    severity: None,
+                    state_mutated: None,
+                    requires_reindex: None,
                 };
                 Ok(envelope_to_result(&env))
             }

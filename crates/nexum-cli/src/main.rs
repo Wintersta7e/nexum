@@ -53,6 +53,16 @@ enum Commands {
     /// Diagnose store health and (with `--resolve-pending-reanchor`) clean
     /// up a partial-reanchor sentinel.
     Doctor(commands::doctor::DoctorArgs),
+    /// Promote a local recommendation to a decision.
+    Promote(commands::promote::PromoteArgs),
+    /// Scan proposed recommendations for candidate commits to promote.
+    PromoteSuggestions(commands::promote_suggestions::PromoteSuggestionsArgs),
+    /// Reject a local recommendation.
+    Reject(commands::reject::RejectArgs),
+    /// Show the notebook lifecycle history (newest-first).
+    AuditLog(commands::audit_log::AuditLogArgs),
+    /// Re-verify a single record's signature and commit evidence.
+    Verify(commands::verify::VerifyArgs),
     /// Manage signing keys. This release supports `rotate` (additive —
     /// adds a new trusted key without retiring the old one).
     Keys {
@@ -79,6 +89,11 @@ fn main() -> ExitCode {
         Commands::Trust { cmd } => commands::trust::run(&cmd),
         Commands::Migrate(args) => commands::migrate::run(&args),
         Commands::Doctor(args) => commands::doctor::run(&args),
+        Commands::Promote(args) => commands::promote::run(&args),
+        Commands::PromoteSuggestions(args) => commands::promote_suggestions::run(&args),
+        Commands::Reject(args) => commands::reject::run(&args),
+        Commands::AuditLog(args) => commands::audit_log::run(&args),
+        Commands::Verify(args) => commands::verify::run(&args),
         Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
 }

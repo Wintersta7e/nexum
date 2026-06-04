@@ -74,6 +74,9 @@ pub fn run(args: &GetArgs) -> ExitCode {
                         .into(),
                 }),
                 context: serde_json::json!({ "requested_id": args.id }),
+                severity: None,
+                state_mutated: None,
+                requires_reindex: None,
             };
             if args.json {
                 super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))
@@ -97,6 +100,9 @@ pub fn run(args: &GetArgs) -> ExitCode {
                 context: serde_json::json!({
                     "signature_status": signature_status.to_string(),
                 }),
+                severity: None,
+                state_mutated: None,
+                requires_reindex: None,
             };
             if args.json {
                 super::json_emit::emit_error(&env, super::exit_codes::for_envelope(&env))

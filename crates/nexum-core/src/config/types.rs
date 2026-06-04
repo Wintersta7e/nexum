@@ -199,8 +199,8 @@ impl Config {
                 enabled: false,
                 auto_promote: false,
                 correlation_window_days: 30,
-                file_overlap_threshold: 0.7,
-                require_message_reference: false,
+                file_overlap_threshold: 1.0,
+                require_message_reference: true,
             },
             projects: toml::Table::new(),
         }
@@ -244,6 +244,18 @@ mod tests {
     fn seed_extractor_state_path_defaults_to_extract_dir() {
         let cfg = Config::seed();
         assert_eq!(cfg.extractor.state_path, "~/.nexum/extract/state.json");
+    }
+
+    #[test]
+    fn seed_promote_defaults_are_precision_favored() {
+        let c = Config::seed();
+        // Comparing against a literal seed constant; exact equality is correct here.
+        #[allow(clippy::float_cmp)]
+        let threshold_ok = c.promote.file_overlap_threshold == 1.0;
+        assert!(threshold_ok);
+        assert!(c.promote.require_message_reference);
+        assert_eq!(c.promote.correlation_window_days, 30);
+        assert!(!c.promote.auto_promote);
     }
 
     #[test]
