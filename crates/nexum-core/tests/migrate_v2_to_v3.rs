@@ -169,3 +169,50 @@ fn migrate_v2_to_v3_adds_lifecycle_columns() {
     let bak_dir = dir.path().join(".bak");
     assert!(bak_dir.exists(), "backup dir should exist");
 }
+
+/// A v2 store with an existing row migrates without losing it: the row
+/// survives and the three new lifecycle columns read back as NULL (the real
+/// production case — old rows predate the lifecycle columns).
+#[test]
+fn migrate_v2_to_v3_preserves_existing_row() {
+    register_sqlite_vec();
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("index.db");
+
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(V2_FIXTURE_DDL).unwrap();
+        conn.execute(
+            "INSERT INTO records (id, source, project_id, record_type, title, body, \
+             content_hash, index_hash, indexed_at) \
+             VALUES ('rec-1', 'local', 'name:p', 'recommendation', 'Cache', 'body', \
+             'ch', 'ih', '2026-04-29T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let mut conn = Connection::open(&db).unwrap();
+    let outcome = migrate_to_latest(&mut conn, &db, true).unwrap();
+    assert!(
+        matches!(outcome, MigrationOutcome::Migrated { to: 3, .. }),
+        "expected Migrated to v3, got {outcome:?}"
+    );
+
+    let (title, ce, pf, iw): (String, Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT title, commit_evidence, promoted_from, inherited_warnings \
+             FROM records WHERE id = 'rec-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        title, "Cache",
+        "existing row data must survive the migration"
+    );
+    assert!(
+        ce.is_none() && pf.is_none() && iw.is_none(),
+        "the new lifecycle columns must be NULL on a pre-existing row"
+    );
+}

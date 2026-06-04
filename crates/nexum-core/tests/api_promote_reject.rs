@@ -6,7 +6,7 @@
 
 mod trust;
 
-use nexum_core::api::{PromoteParams, promote, reject};
+use nexum_core::api::{PromoteParams, promote, promote_suggestions, reject, verify_record};
 use nexum_core::indexer::db::open_or_create;
 use nexum_core::indexer::run::run as indexer_run;
 use nexum_core::paths::Paths;
@@ -38,13 +38,32 @@ fn commit_trust_files(fixture: &NotebookFixture, key: &KeyPair) {
     run_git_signed(nb, &key.private_path, "trust: commit initial trust files");
 }
 
-/// Seed a recommendation YAML to notebook.git and return its commit SHA.
+/// Seed a recommendation YAML (created `2026-04-29`) to notebook.git.
 fn seed_rec(
     fixture: &NotebookFixture,
     key: &KeyPair,
     project_id: &str,
     rec_id: &str,
     outcome: &str,
+) {
+    seed_rec_created(
+        fixture,
+        key,
+        project_id,
+        rec_id,
+        outcome,
+        "2026-04-29T00:00:00Z",
+    );
+}
+
+/// Seed a recommendation YAML with an explicit `created` timestamp.
+fn seed_rec_created(
+    fixture: &NotebookFixture,
+    key: &KeyPair,
+    project_id: &str,
+    rec_id: &str,
+    outcome: &str,
+    created: &str,
 ) {
     let nb = fixture.path();
     let dir = nb.join(project_id).join("recommendations");
@@ -60,8 +79,8 @@ fn seed_rec(
              outcome: {outcome}\n\
              confidence: medium\n\
              agent: claude-code\n\
-             created: 2026-04-29T00:00:00Z\n\
-             updated: 2026-04-29T00:00:00Z\n\
+             created: {created}\n\
+             updated: {created}\n\
              problem: should we cache responses?\n\
              title: Cache Responses\n"
         ),
@@ -309,5 +328,145 @@ fn reject_stamps_rec_as_rejected_and_returns_outcome() {
     assert!(
         rec_content.contains("outcome: rejected"),
         "rec must have outcome: rejected after reject call"
+    );
+}
+
+/// Fresh verification of a promoted decision: the writer signs the decision
+/// commit with the active key, so `verify_record` must report `verified` and
+/// surface the (online) commit-evidence status.
+#[test]
+fn verify_record_returns_verified_for_signed_decision() {
+    let (fixture, primary, _ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+
+    let project_id = "name:verify-project";
+    let rec_id = "2026-04-29-verify-me";
+    seed_rec(&fixture, &primary, project_id, rec_id, "proposed");
+
+    let cfg = local_cfg();
+    index_fixture(&fixture, &cfg);
+
+    let repo_dir = tempfile::tempdir().expect("create repo tempdir");
+    let (_sha1, sha2) = init_project_repo(repo_dir.path());
+
+    let paths = paths_for(&fixture);
+    let params = PromoteParams {
+        rec: rec_id,
+        commit: &sha2,
+        repo: Some(repo_dir.path()),
+        branch: Some("main"),
+        skip_fingerprint: false,
+        force_untrusted: true,
+    };
+    let out = promote(&paths, &cfg, &params).expect("online promote must succeed");
+
+    let verdict =
+        verify_record(&paths, &cfg, &out.decision_id).expect("verify_record must succeed");
+    assert_eq!(
+        verdict.signature_status, "verified",
+        "the signed decision commit must verify"
+    );
+    assert_eq!(
+        verdict.commit_evidence_status.as_deref(),
+        Some("verified"),
+        "online promote records verified commit evidence on the decision"
+    );
+}
+
+/// The stale sweep marks an old proposed rec with no candidate commit as
+/// `stale` and commits the lifecycle event.
+#[test]
+fn promote_suggestions_marks_old_proposed_rec_stale() {
+    let (fixture, primary, _ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+
+    let project_id = "name:stale-project";
+    let rec_id = "2020-01-01-ancient-rec";
+    // Created far in the past so it exceeds any reasonable correlation window.
+    seed_rec_created(
+        &fixture,
+        &primary,
+        project_id,
+        rec_id,
+        "proposed",
+        "2020-01-01T00:00:00Z",
+    );
+
+    let cfg = local_cfg();
+    index_fixture(&fixture, &cfg);
+
+    let paths = paths_for(&fixture);
+    let out = promote_suggestions(&paths, &cfg).expect("promote_suggestions must succeed");
+    assert_eq!(
+        out.marked_stale, 1,
+        "the ancient proposed rec must be marked stale"
+    );
+    assert!(
+        out.suggestions.is_empty(),
+        "no project path is registered, so there are no candidate commits"
+    );
+
+    let rec_path = fixture
+        .path()
+        .join(project_id)
+        .join("recommendations")
+        .join(format!("{rec_id}.yml"));
+    let rec = std::fs::read_to_string(&rec_path).expect("read rec after stale sweep");
+    assert!(
+        rec.contains("outcome: stale"),
+        "the swept rec must be stamped stale"
+    );
+}
+
+/// Guard: promoting an already-promoted recommendation is refused rather than
+/// silently creating a second decision / corrupting the rec.
+#[test]
+fn promote_already_promoted_rec_is_refused() {
+    let (fixture, primary, _ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+
+    let project_id = "name:guard-project";
+    let rec_id = "2026-04-29-already-promoted";
+    seed_rec(&fixture, &primary, project_id, rec_id, "promoted");
+
+    let cfg = local_cfg();
+    index_fixture(&fixture, &cfg);
+
+    let paths = paths_for(&fixture);
+    let params = PromoteParams {
+        rec: rec_id,
+        commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        repo: None,
+        branch: Some("main"),
+        skip_fingerprint: true,
+        force_untrusted: true,
+    };
+    let err = promote(&paths, &cfg, &params)
+        .expect_err("promoting an already-promoted rec must be refused");
+    assert!(
+        matches!(err, nexum_core::api::ApiError::SourceRecIncompatible { .. }),
+        "expected SourceRecIncompatible, got {err:?}"
+    );
+}
+
+/// Guard: rejecting an already-terminal recommendation is refused.
+#[test]
+fn reject_already_rejected_rec_is_refused() {
+    let (fixture, primary, _ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+
+    let project_id = "name:guard-project2";
+    let rec_id = "2026-04-29-already-rejected";
+    seed_rec(&fixture, &primary, project_id, rec_id, "rejected");
+
+    let cfg = local_cfg();
+    index_fixture(&fixture, &cfg);
+
+    let paths = paths_for(&fixture);
+    let err = reject(&paths, &cfg, rec_id)
+        .expect_err("rejecting an already-rejected rec must be refused");
+    assert!(
+        matches!(err, nexum_core::api::ApiError::SourceRecIncompatible { .. }),
+        "expected SourceRecIncompatible, got {err:?}"
     );
 }

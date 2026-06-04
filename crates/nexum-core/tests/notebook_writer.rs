@@ -506,6 +506,74 @@ fn promote_commit_hook_failure_returns_commit_sign_failed_and_clean_tree() {
     );
 }
 
+// ── Rollback: commit fails via pre-commit hook (Reject) ───────────────────────
+
+/// Exercises the commit-failure rollback for a Reject event — which has NO new
+/// files, only the existing rec restored from HEAD (a structurally different
+/// rollback branch from the Promote case above). Asserts `CommitSignFailed`
+/// (not `RollbackFailed`), the rec is restored to `outcome: proposed`, and the
+/// worktree is clean.
+#[test]
+fn reject_commit_hook_failure_returns_commit_sign_failed_and_clean_tree() {
+    let (fixture, primary, _bootstrap_ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+    let nb = fixture.path();
+    let project_id = "testproject-reject-rollback";
+    let rec_id = "2026-04-29-reject-hook-fail";
+
+    seed_rec(&fixture, &primary, project_id, rec_id, "proposed");
+
+    let rec_path = nb
+        .join(project_id)
+        .join("recommendations")
+        .join(format!("{rec_id}.yml"));
+    let rec_before = std::fs::read_to_string(&rec_path).expect("read rec before reject");
+
+    // Pre-commit hook that always fails, with a valid signer still configured.
+    let hooks_dir = nb.join(".git/hooks");
+    std::fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+    let hook_path = hooks_dir.join("pre-commit");
+    std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").expect("write pre-commit hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x pre-commit hook");
+    }
+
+    let paths = paths_for(&fixture);
+    let event = LifecycleEvent::Reject {
+        rec_ref: RecordKey {
+            source: Some(Source::Local),
+            project_id: Some(project_id.into()),
+            id: rec_id.into(),
+        },
+    };
+
+    let result = commit_lifecycle_event(&paths, &event);
+    assert!(
+        matches!(
+            result,
+            Err(nexum_core::api::ApiError::CommitSignFailed { .. })
+        ),
+        "expected CommitSignFailed, got {result:?}"
+    );
+
+    let rec_after = std::fs::read_to_string(&rec_path).expect("read rec after failed reject");
+    assert_eq!(
+        rec_before, rec_after,
+        "rec must be restored to its pre-reject content"
+    );
+    assert!(
+        rec_after.contains("outcome: proposed"),
+        "rec must still be proposed after the reject rollback"
+    );
+    assert!(
+        worktree_clean(nb),
+        "worktree must be clean after reject commit-failure rollback"
+    );
+}
+
 // ── Rollback: no valid signer (preflight) ─────────────────────────────────────
 
 /// When no `user.signingkey` is set, `preflight` returns `SignerInactive`
