@@ -22,13 +22,7 @@ pub fn content_hash(title: &str, summary: Option<&str>, body: &str) -> ContentHa
     hasher.update(summary.as_bytes());
     hasher.update(b"\n");
     hasher.update(body.as_bytes());
-    let bytes = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for b in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
+    hex_encode(&hasher.finalize())
 }
 
 /// Hash over every load-bearing field stored by the indexer.
@@ -102,10 +96,14 @@ pub fn compute_index_hash(r: &UnifiedRecord) -> String {
     }
     hasher.update(b"\x00");
     hasher.update(r.updated.to_rfc3339().as_bytes());
-    let bytes = hasher.finalize();
-    let mut out = String::with_capacity(64);
+    hex_encode(&hasher.finalize())
+}
+
+/// Encode bytes as lowercase hex (two chars per byte).
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        use std::fmt::Write as _;
         let _ = write!(out, "{b:02x}");
     }
     out
@@ -118,13 +116,7 @@ pub fn compute_index_hash(r: &UnifiedRecord) -> String {
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let result = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for b in result {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
+    hex_encode(&hasher.finalize())
 }
 
 /// `(id, content_hash, project_id)` tuple — the lightweight row

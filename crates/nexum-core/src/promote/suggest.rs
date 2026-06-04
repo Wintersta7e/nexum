@@ -43,10 +43,15 @@ pub fn scan(
             continue;
         };
         for sha in candidate_commits(&repo, rec, window)? {
-            let changed = super::fingerprint::changed_paths(&repo, &sha)?;
-            let overlap = super::correlate::file_overlap(rec, &changed);
             let meta = super::fingerprint::commit_metadata(&repo, &sha)?;
             let msg_ref = super::correlate::message_reference(rec, &meta.message);
+            // In AND-mode a missing message reference can't be rescued by file
+            // overlap, so skip the extra `git diff-tree` that `changed_paths` runs.
+            if require_msg && !msg_ref {
+                continue;
+            }
+            let changed = super::fingerprint::changed_paths(&repo, &sha)?;
+            let overlap = super::correlate::file_overlap(rec, &changed);
             let pass = if require_msg {
                 msg_ref && overlap >= thr
             } else {
