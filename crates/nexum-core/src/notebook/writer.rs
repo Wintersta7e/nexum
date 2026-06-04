@@ -326,6 +326,25 @@ pub fn commit_lifecycle_event(paths: &Paths, event: &LifecycleEvent) -> Result<S
     })
 }
 
+/// Reject a `project_id` or record id (read from on-disk YAML) that would
+/// escape `notebook.git` when joined into a path — `..`, an absolute path, or
+/// any non-`Normal` component. Defends the lifecycle writer against a
+/// hand-planted recommendation whose `id:` / `project_id:` field traverses the
+/// tree (e.g. `create_dir_all` outside the notebook).
+fn safe_component(value: &str, what: &str) -> Result<(), ApiError> {
+    use std::path::Component;
+    let all_normal = !value.is_empty()
+        && Path::new(value)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)));
+    if !all_normal {
+        return Err(ApiError::Other {
+            message: format!("unsafe {what} for path construction: {value:?}"),
+        });
+    }
+    Ok(())
+}
+
 /// Compute the repo-relative paths that `event` will touch (relative to
 /// `paths.notebook_git`), split into pre-existing and newly created files.
 ///
@@ -346,6 +365,9 @@ fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<EventPaths, ApiEr
                 .ok_or_else(|| ApiError::Other {
                     message: "rec_ref.project_id is required for Promote".into(),
                 })?;
+            safe_component(project_id, "project_id")?;
+            safe_component(&rec_ref.id, "recommendation id")?;
+            safe_component(&new_decision.id, "decision id")?;
             let rec_path = nb
                 .join(project_id)
                 .join("recommendations")
@@ -372,6 +394,8 @@ fn plan_paths(paths: &Paths, event: &LifecycleEvent) -> Result<EventPaths, ApiEr
                 .ok_or_else(|| ApiError::Other {
                     message: "rec_ref.project_id is required for Reject/Stale".into(),
                 })?;
+            safe_component(project_id, "project_id")?;
+            safe_component(&rec_ref.id, "recommendation id")?;
             let rec_path = nb
                 .join(project_id)
                 .join("recommendations")
@@ -616,6 +640,45 @@ mod tests {
         assert!(
             matches!(err, Err(ApiError::NotebookDirty { ref dirty_files }) if !dirty_files.is_empty()),
             "expected NotebookDirty, got {err:?}"
+        );
+    }
+
+    /// A staged rename (`R  new\0old`) must report only the destination — the
+    /// origin-path NUL chunk must be consumed, never surfaced as a truncated
+    /// spurious dirty path.
+    #[test]
+    fn dirty_check_skips_staged_rename_origin_path() {
+        let home_dir = tempdir().unwrap();
+        let nb = home_dir.path().join("notebook.git");
+        git_init_with_empty_commit(&nb);
+
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&nb)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+
+        std::fs::write(nb.join("orig.txt"), "x").unwrap();
+        run(&["add", "orig.txt"]);
+        run(&["commit", "-m", "add orig"]);
+        run(&["mv", "orig.txt", "renamed.txt"]);
+
+        let dirty = dirty_outside_event_paths(&nb, &[]).unwrap();
+        assert!(
+            dirty.iter().any(|f| f == "renamed.txt"),
+            "destination must be the reported dirty path: {dirty:?}"
+        );
+        assert!(
+            !dirty.iter().any(|f| f.contains("orig")),
+            "rename origin path must NOT be reported: {dirty:?}"
         );
     }
 

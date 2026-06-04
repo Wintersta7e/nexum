@@ -14,6 +14,13 @@ use super::options::InitError;
 fn run_git(repo: &Path, args: &[&str]) -> Result<Output, InitError> {
     let out = Command::new("git")
         .current_dir(repo)
+        // Scrub global/system config so a user gitconfig can't run a
+        // `core.hooksPath` hook or redirect the signer during the notebook's
+        // signed commit. The signing identity + key live in the notebook's
+        // LOCAL config (set by `git_config_signing`), which this does not touch.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .args(args)
         .output()
         .map_err(|e| InitError::Io {
