@@ -162,6 +162,7 @@ fn skip_fingerprint_promote_succeeds_with_dummy_repo() {
     let paths = paths_for(&fixture);
     let params = PromoteParams {
         rec: rec_id,
+        project_id: None,
         commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         repo: None, // not consulted under skip_fingerprint
         branch: Some("main"),
@@ -235,6 +236,7 @@ fn online_promote_reachable_commit_creates_decision() {
     let paths = paths_for(&fixture);
     let params = PromoteParams {
         rec: rec_id,
+        project_id: None,
         commit: &sha2,
         repo: Some(repo_dir.path()),
         branch: Some("main"),
@@ -276,6 +278,7 @@ fn online_promote_unreachable_commit_returns_error() {
     let paths = paths_for(&fixture);
     let params = PromoteParams {
         rec: rec_id,
+        project_id: None,
         commit: &sha2,
         repo: Some(repo_dir.path()),
         // Use sha1_parent as the "branch" tip; sha2 is HEAD and is NOT an
@@ -352,6 +355,7 @@ fn verify_record_returns_verified_for_signed_decision() {
     let paths = paths_for(&fixture);
     let params = PromoteParams {
         rec: rec_id,
+        project_id: None,
         commit: &sha2,
         repo: Some(repo_dir.path()),
         branch: Some("main"),
@@ -435,6 +439,7 @@ fn promote_already_promoted_rec_is_refused() {
     let paths = paths_for(&fixture);
     let params = PromoteParams {
         rec: rec_id,
+        project_id: None,
         commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         repo: None,
         branch: Some("main"),

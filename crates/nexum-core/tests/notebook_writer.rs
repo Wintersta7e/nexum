@@ -574,6 +574,106 @@ fn reject_commit_hook_failure_returns_commit_sign_failed_and_clean_tree() {
     );
 }
 
+// ── Under-lock collision + partial-write cleanup ──────────────────────────────
+
+/// The under-lock decision-file existence check refuses a second promotion that
+/// derives the same decision id rather than silently overwriting the first.
+#[test]
+fn promote_refuses_when_decision_file_already_exists() {
+    let (fixture, primary, _bootstrap_ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+    let nb = fixture.path();
+    let project_id = "testproject-collision";
+    let rec_id = "2026-04-29-collide-rec";
+    let decision_id = "2026-05-01-collide-decision";
+    seed_rec(&fixture, &primary, project_id, rec_id, "proposed");
+
+    // Commit a decision file at the path the event will target so the worktree
+    // is clean (preflight passes) and the under-lock existence check is what
+    // fires — mirroring a concurrent promotion that already committed it.
+    let dec_dir = nb.join(project_id).join("decisions");
+    std::fs::create_dir_all(&dec_dir).unwrap();
+    std::fs::write(
+        dec_dir.join(format!("{decision_id}.yml")),
+        "schema_version: 1\nid: x\n",
+    )
+    .unwrap();
+    run_git(
+        nb,
+        &["add", &format!("{project_id}/decisions/{decision_id}.yml")],
+    );
+    run_git_signed(nb, &primary.private_path, "seed pre-existing decision");
+
+    let paths = paths_for(&fixture);
+    let event = LifecycleEvent::Promote {
+        rec_ref: RecordKey {
+            source: Some(Source::Local),
+            project_id: Some(project_id.into()),
+            id: rec_id.into(),
+        },
+        new_decision: sample_decision(decision_id, project_id, "should we cache responses?"),
+        commit_evidence: sample_commit_evidence(),
+    };
+
+    let result = commit_lifecycle_event(&paths, &event);
+    assert!(
+        matches!(result, Err(nexum_core::api::ApiError::Other { ref message }) if message.contains("already exists")),
+        "expected Other(already exists), got {result:?}"
+    );
+}
+
+/// If `write_event_files` fails midway (the rec file is gone when it goes to
+/// stamp it, after the decision YAML was already written), the orphan decision
+/// file is removed so it can't wedge the next preflight, and the rec is restored.
+#[test]
+fn promote_partial_write_failure_cleans_up_orphan_decision() {
+    let (fixture, primary, _bootstrap_ev, _key_dir) = fresh_notebook_with_bootstrap();
+    commit_trust_files(&fixture, &primary);
+    let nb = fixture.path();
+    let project_id = "testproject-partial";
+    let rec_id = "2026-04-29-partial-rec";
+    let decision_id = "2026-05-01-partial-decision";
+    seed_rec(&fixture, &primary, project_id, rec_id, "proposed");
+
+    // Delete the rec from the worktree so the stamp step fails after the
+    // decision YAML has been written.
+    let rec_path = nb
+        .join(project_id)
+        .join("recommendations")
+        .join(format!("{rec_id}.yml"));
+    std::fs::remove_file(&rec_path).unwrap();
+
+    let paths = paths_for(&fixture);
+    let event = LifecycleEvent::Promote {
+        rec_ref: RecordKey {
+            source: Some(Source::Local),
+            project_id: Some(project_id.into()),
+            id: rec_id.into(),
+        },
+        new_decision: sample_decision(decision_id, project_id, "should we cache responses?"),
+        commit_evidence: sample_commit_evidence(),
+    };
+
+    let result = commit_lifecycle_event(&paths, &event);
+    assert!(
+        result.is_err(),
+        "partial write must surface an error, got {result:?}"
+    );
+
+    let dec_path = nb
+        .join(project_id)
+        .join("decisions")
+        .join(format!("{decision_id}.yml"));
+    assert!(
+        !dec_path.exists(),
+        "orphan decision file must be cleaned up: {dec_path:?}"
+    );
+    assert!(
+        worktree_clean(nb),
+        "worktree must be clean after partial-write cleanup"
+    );
+}
+
 // ── Rollback: no valid signer (preflight) ─────────────────────────────────────
 
 /// When no `user.signingkey` is set, `preflight` returns `SignerInactive`
