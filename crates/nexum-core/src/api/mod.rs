@@ -2986,11 +2986,7 @@ pub fn promote(
 
     // 1. Resolve + read the source rec. Ambiguous -> propagate.
     let rec = resolve_and_get_local_rec(paths, cfg, p.rec)?;
-    let rec_ref = RecordKey {
-        source: Some(Source::Local),
-        project_id: Some(rec.project_id.clone()),
-        id: rec.id.clone(),
-    };
+    let rec_ref = RecordKey::exact(Source::Local, rec.project_id.clone(), rec.id.clone());
 
     // 2. Eligibility check — returns inherited warnings for the decision.
     let inherited = crate::notebook::writer::check_promote_eligibility(&rec, p.force_untrusted)?;
@@ -3087,11 +3083,7 @@ pub fn reject(paths: &Paths, cfg: &Config, rec_arg: &str) -> Result<RejectOutcom
     use crate::records::types::Source;
 
     let rec = resolve_and_get_local_rec(paths, cfg, rec_arg)?;
-    let rec_ref = RecordKey {
-        source: Some(Source::Local),
-        project_id: Some(rec.project_id.clone()),
-        id: rec.id.clone(),
-    };
+    let rec_ref = RecordKey::exact(Source::Local, rec.project_id.clone(), rec.id.clone());
 
     let notebook_commit = crate::notebook::writer::commit_lifecycle_event(
         paths,

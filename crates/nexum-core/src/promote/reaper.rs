@@ -22,11 +22,7 @@ pub(crate) fn find_stale(
     recs.iter()
         .filter(|r| r.outcome == Outcome::Proposed && r.source == Source::Local)
         .filter(|r| now.signed_duration_since(r.created) > window)
-        .map(|r| RecordKey {
-            source: Some(Source::Local),
-            project_id: Some(r.project_id.clone()),
-            id: r.id.clone(),
-        })
+        .map(|r| RecordKey::exact(Source::Local, r.project_id.clone(), r.id.clone()))
         .collect()
 }
 
