@@ -15,6 +15,7 @@ pub mod migrate;
 pub mod models;
 pub mod project;
 pub mod promote;
+pub mod promote_suggestions;
 pub mod recent;
 pub mod reject;
 pub mod search;

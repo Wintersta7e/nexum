@@ -55,6 +55,8 @@ enum Commands {
     Doctor(commands::doctor::DoctorArgs),
     /// Promote a local recommendation to a decision.
     Promote(commands::promote::PromoteArgs),
+    /// Scan proposed recommendations for candidate commits to promote.
+    PromoteSuggestions(commands::promote_suggestions::PromoteSuggestionsArgs),
     /// Reject a local recommendation.
     Reject(commands::reject::RejectArgs),
     /// Manage signing keys. This release supports `rotate` (additive —
@@ -84,6 +86,7 @@ fn main() -> ExitCode {
         Commands::Migrate(args) => commands::migrate::run(&args),
         Commands::Doctor(args) => commands::doctor::run(&args),
         Commands::Promote(args) => commands::promote::run(&args),
+        Commands::PromoteSuggestions(args) => commands::promote_suggestions::run(&args),
         Commands::Reject(args) => commands::reject::run(&args),
         Commands::Keys { cmd } => commands::keys::run(&cmd),
     }
