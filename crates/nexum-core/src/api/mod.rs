@@ -2917,6 +2917,10 @@ fn nibble_char(n: u8) -> char {
 pub struct PromoteParams<'a> {
     /// Bare id or `source/project_id/id` triple.
     pub rec: &'a str,
+    /// Project of the rec, when known (e.g. from a suggestion scan). Qualifies
+    /// the lookup so a bare rec id that collides across projects resolves to the
+    /// right record; `None` falls back to a bare lookup.
+    pub project_id: Option<&'a str>,
     /// Commit SHA to bind to the decision.
     pub commit: &'a str,
     /// Override the repo path; defaults to `project_path_for(rec.project_id)`.
@@ -2985,7 +2989,7 @@ pub fn promote(
     use crate::records::types::{Source, VerificationStatus};
 
     // 1. Resolve + read the source rec. Ambiguous -> propagate.
-    let rec = resolve_and_get_local_rec(paths, cfg, p.rec)?;
+    let rec = resolve_and_get_local_rec(paths, cfg, p.rec, p.project_id)?;
     let rec_ref = RecordKey::exact(Source::Local, rec.project_id.clone(), rec.id.clone());
 
     // 2. Eligibility check — returns inherited warnings for the decision.
@@ -3082,7 +3086,7 @@ pub fn promote(
 pub fn reject(paths: &Paths, cfg: &Config, rec_arg: &str) -> Result<RejectOutcome, ApiError> {
     use crate::records::types::Source;
 
-    let rec = resolve_and_get_local_rec(paths, cfg, rec_arg)?;
+    let rec = resolve_and_get_local_rec(paths, cfg, rec_arg, None)?;
     let rec_ref = RecordKey::exact(Source::Local, rec.project_id.clone(), rec.id.clone());
 
     let notebook_commit = crate::notebook::writer::commit_lifecycle_event(
@@ -3110,10 +3114,14 @@ fn resolve_and_get_local_rec(
     paths: &Paths,
     cfg: &Config,
     rec_arg: &str,
+    project_id: Option<&str>,
 ) -> Result<crate::records::types::UnifiedRecord, ApiError> {
     use crate::records::types::{Outcome, RecordType, Source};
 
-    let key = RecordKey::bare(rec_arg.to_owned());
+    let key = match project_id {
+        Some(pid) => RecordKey::exact(Source::Local, pid, rec_arg),
+        None => RecordKey::bare(rec_arg.to_owned()),
+    };
     let opts = crate::query::GetOpts {
         include_unsigned: true,
         ..Default::default()

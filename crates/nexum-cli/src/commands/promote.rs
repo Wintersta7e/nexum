@@ -59,6 +59,7 @@ pub fn run(args: &PromoteArgs) -> ExitCode {
     }
     let params = api::PromoteParams {
         rec: &args.rec,
+        project_id: None,
         commit: &args.commit,
         repo: args.repo.as_deref(),
         branch: args.branch.as_deref(),
@@ -225,5 +226,21 @@ mod tests {
     fn validate_promote_refs_rejects_flaglike_or_range_branch() {
         assert!(validate_promote_refs("abcd", Some("--all")).is_err());
         assert!(validate_promote_refs("abcd", Some("a..b")).is_err());
+    }
+
+    #[test]
+    fn validate_promote_refs_commit_length_boundaries() {
+        assert!(
+            validate_promote_refs("", None).is_err(),
+            "empty commit rejected"
+        );
+        assert!(
+            validate_promote_refs(&"a".repeat(65), None).is_err(),
+            ">64 hex chars rejected"
+        );
+        assert!(
+            validate_promote_refs(&"a".repeat(64), None).is_ok(),
+            "a full 64-hex SHA is accepted"
+        );
     }
 }

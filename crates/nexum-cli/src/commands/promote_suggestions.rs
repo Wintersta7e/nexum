@@ -119,6 +119,7 @@ fn interactive_walk(paths: &Paths, cfg: &Config, suggestions: &[Suggestion]) -> 
 fn promote_one(paths: &Paths, cfg: &Config, s: &Suggestion) -> bool {
     let params = api::PromoteParams {
         rec: &s.rec_id,
+        project_id: Some(&s.project_id),
         commit: &s.commit_sha,
         repo: None,
         branch: None,
