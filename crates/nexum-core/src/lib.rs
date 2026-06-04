@@ -22,7 +22,7 @@ pub mod migrate;
 pub mod notebook;
 pub mod paths;
 pub mod project;
-pub mod promote;
+pub(crate) mod promote;
 pub mod query;
 pub mod records;
 pub mod session;

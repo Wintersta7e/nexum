@@ -1,32 +1,23 @@
 //! Commit-promotion plumbing.
 //!
 //! Exposes git-correlation and evidence-assembly helpers consumed by the
-//! promotion facade (lands in a later change; the transitional `dead_code`
-//! allows on submodules are removed then).
+//! promotion facade.
 
 use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::records::types::UnifiedRecord;
 
-// Commit-correlation plumbing. Consumed by the promotion facade in a
-// later change; the transitional dead_code allow is removed then.
-#[allow(dead_code)]
+/// Commit-correlation plumbing.
 pub(crate) mod fingerprint;
 
-// Correlation signals. Consumed by the promotion facade in a later change;
-// the transitional dead_code allow is removed then.
-#[allow(dead_code)]
+/// Correlation signals.
 pub(crate) mod correlate;
 
-// Suggestion scan. Consumed by the promotion facade in a later change;
-// the transitional dead_code allow is removed then.
-#[allow(dead_code)]
+/// Suggestion scan.
 pub(crate) mod suggest;
 
-// Stale-recommendation identification. Consumed by the promotion facade in a
-// later change; the transitional dead_code allow is removed then.
-#[allow(dead_code)]
+/// Stale-recommendation identification.
 pub(crate) mod reaper;
 
 /// Resolve a record's project repo path from the config registry.
@@ -34,8 +25,6 @@ pub(crate) mod reaper;
 /// don't need to reach into `api` directly.
 ///
 /// Returns `None` when no path is registered for the record's project.
-// Consumed by suggest::scan; the allow is removed when the facade lands.
-#[allow(dead_code)]
 pub(crate) fn repo_path_for(rec: &UnifiedRecord, cfg: &Config) -> Option<PathBuf> {
     crate::api::project_path_for(&rec.project_id, cfg).map(PathBuf::from)
 }
