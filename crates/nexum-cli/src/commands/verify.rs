@@ -53,7 +53,7 @@ pub fn run(args: &VerifyArgs) -> ExitCode {
             }
             ExitCode::from(verdict_code(&out.signature_status))
         }
-        Err(e) => render_error(&e, args.json),
+        Err(e) => super::common::render_error(&e, args.json),
     }
 }
 
@@ -67,18 +67,6 @@ fn verdict_code(status: &str) -> u8 {
         _ => super::exit_codes::FAILURE,
     }
 }
-
-fn render_error(e: &api::ApiError, json: bool) -> ExitCode {
-    let env: nexum_core::api::error::ErrorEnvelope = e.into();
-    let code = super::exit_codes::for_envelope(&env);
-    if json {
-        super::json_emit::emit_error(&env, code)
-    } else {
-        eprintln!("error: {}", env.message);
-        ExitCode::from(code)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

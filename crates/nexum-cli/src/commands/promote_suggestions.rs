@@ -30,7 +30,7 @@ pub fn run(args: &PromoteSuggestionsArgs) -> ExitCode {
     };
     let mut out = match api::promote_suggestions(&paths, &cfg) {
         Ok(o) => o,
-        Err(e) => return render_error(&e, args.json),
+        Err(e) => return super::common::render_error(&e, args.json),
     };
     if let Some(limit) = args.limit {
         out.suggestions.truncate(limit);
@@ -134,18 +134,6 @@ fn promote_one(paths: &Paths, cfg: &Config, s: &Suggestion) {
         }
     }
 }
-
-fn render_error(e: &api::ApiError, json: bool) -> ExitCode {
-    let env: nexum_core::api::error::ErrorEnvelope = e.into();
-    let code = super::exit_codes::for_envelope(&env);
-    if json {
-        super::json_emit::emit_error(&env, code)
-    } else {
-        eprintln!("error: {}", env.message);
-        ExitCode::from(code)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

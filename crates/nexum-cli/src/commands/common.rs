@@ -3,8 +3,8 @@
 use std::{path::Path, process::ExitCode};
 
 use nexum_core::{
-    api::ApiError, api::error::error_codes, config::types::Config, paths::Paths, query::QueryError,
-    trust::events::TrustError,
+    api::ApiError, api::error::ErrorEnvelope, api::error::error_codes, config::types::Config,
+    paths::Paths, query::QueryError, trust::events::TrustError,
 };
 
 use super::exit_codes;
@@ -129,4 +129,19 @@ pub(crate) fn handle_read_verb_error(err: &ApiError) -> ExitCode {
     }
     eprintln!("error: {err}");
     ExitCode::from(exit_codes::STORE_INTEGRITY)
+}
+
+/// Render an [`ApiError`] for a mutation verb: a wire-stable [`ErrorEnvelope`]
+/// on stdout under `--json`, or `error: <message>` prose on stderr otherwise.
+/// Returns the mapped exit code. Shared by the lifecycle / keys / trust verbs;
+/// read verbs use [`handle_read_verb_error`] instead.
+pub(crate) fn render_error(err: &ApiError, json: bool) -> ExitCode {
+    let env: ErrorEnvelope = err.into();
+    let code = exit_codes::for_envelope(&env);
+    if json {
+        super::json_emit::emit_error(&env, code)
+    } else {
+        eprintln!("error: {}", env.message);
+        ExitCode::from(code)
+    }
 }

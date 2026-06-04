@@ -46,18 +46,7 @@ pub fn run(args: &AuditLogArgs) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(e) => render_error(&e, args.json),
-    }
-}
-
-fn render_error(e: &api::ApiError, json: bool) -> ExitCode {
-    let env: nexum_core::api::error::ErrorEnvelope = e.into();
-    let code = super::exit_codes::for_envelope(&env);
-    if json {
-        super::json_emit::emit_error(&env, code)
-    } else {
-        eprintln!("error: {}", env.message);
-        ExitCode::from(code)
+        Err(e) => super::common::render_error(&e, args.json),
     }
 }
 

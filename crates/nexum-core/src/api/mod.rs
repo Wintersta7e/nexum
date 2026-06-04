@@ -2953,6 +2953,18 @@ pub struct RejectOutcome {
     pub index_warning: Option<crate::api::error::ErrorEnvelope>,
 }
 
+/// Post-commit incremental reindex, fail-soft: a reindex failure becomes a
+/// `partial`-severity `IndexRefreshFailed` warning rather than aborting the
+/// already-durable lifecycle commit. Shared by the promote / reject /
+/// promote-suggestions facades.
+fn reindex_warning(paths: &Paths, cfg: &Config) -> Option<crate::api::error::ErrorEnvelope> {
+    index_run(paths, cfg).err().map(|e| {
+        crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
+            detail: e.to_string(),
+        })
+    })
+}
+
 /// Promote a local recommendation to a decision.
 ///
 /// Resolves the source record, checks eligibility, assembles commit evidence
@@ -3051,11 +3063,7 @@ pub fn promote(
     let sha = crate::notebook::writer::commit_lifecycle_event(paths, &event)?;
 
     // 7. Post-commit incremental reindex — fail-soft (partial).
-    let index_warning = index_run(paths, cfg).err().map(|e| {
-        crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
-            detail: e.to_string(),
-        })
-    });
+    let index_warning = reindex_warning(paths, cfg);
 
     Ok(PromoteOutcome {
         decision_id,
@@ -3091,11 +3099,7 @@ pub fn reject(paths: &Paths, cfg: &Config, rec_arg: &str) -> Result<RejectOutcom
     )?;
 
     // Post-commit incremental reindex — fail-soft (partial).
-    let index_warning = index_run(paths, cfg).err().map(|e| {
-        crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
-            detail: e.to_string(),
-        })
-    });
+    let index_warning = reindex_warning(paths, cfg);
 
     Ok(RejectOutcome {
         notebook_commit,
@@ -3144,27 +3148,17 @@ fn resolve_and_get_local_rec(
     }
 }
 
-/// Verify the project repo's git origin identity matches `project_id` when the
-/// id has a `git:` prefix. Returns `Ok(())` for non-git identities (they have
-/// no canonical URL to check) or when no origin is set.
 fn verify_repo_identity_if_git(project_id: &str, repo: &std::path::Path) -> Result<(), ApiError> {
     if !project_id.starts_with("git:") {
         return Ok(());
     }
-    let url_output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["remote", "get-url", "origin"])
-        .output();
-    let url = match url_output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-        // No origin remote — skip identity check (caller passed an explicit
-        // repo path; non-origin repos are valid for local-only projects).
-        _ => return Ok(()),
-    };
-    let canonical = crate::project::canon::canonicalize_git_url(&url);
-    let derived = crate::project::canon::git_url_hint(&canonical);
-    if derived == project_id {
+    // Reuse the same env-scrubbed identity derivation that evidence assembly
+    // uses, so the two can't disagree. `repo_identity` falls back to a `root:`
+    // id when there's no origin remote; a non-`git:` result means there's
+    // nothing to check (non-origin repos are valid for local-only projects),
+    // so skip rather than flag a mismatch.
+    let derived = crate::promote::fingerprint::repo_identity(repo);
+    if !derived.starts_with("git:") || derived == project_id {
         Ok(())
     } else {
         Err(ApiError::RepoIdentityMismatch {
@@ -3327,11 +3321,7 @@ pub fn promote_suggestions(paths: &Paths, cfg: &Config) -> Result<SuggestOutcome
 
     // Surface a partial index failure only when there were stale commits to reindex.
     let index_warning = if marked > 0 {
-        crate::api::index_run(paths, cfg).err().map(|e| {
-            crate::api::error::ErrorEnvelope::from(&ApiError::IndexRefreshFailed {
-                detail: e.to_string(),
-            })
-        })
+        reindex_warning(paths, cfg)
     } else {
         None
     };

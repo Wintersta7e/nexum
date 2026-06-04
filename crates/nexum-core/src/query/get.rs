@@ -215,6 +215,20 @@ fn row_to_raw(r: &Row<'_>) -> rusqlite::Result<RawRow> {
     })
 }
 
+/// Parse an optional JSON-encoded column into `T`, tagging a parse failure with
+/// the column name. A `NULL` cell (the common non-promoted-record case) yields
+/// `None`.
+fn parse_json_col<T: serde::de::DeserializeOwned>(
+    raw: Option<&str>,
+    column: &str,
+) -> Result<Option<T>, QueryError> {
+    raw.map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| QueryError::InvalidFilter {
+            detail: format!("{column}: {e}"),
+        })
+}
+
 fn build_record(
     raw: RawRow,
     crypto_result: CryptoResult,
@@ -249,31 +263,11 @@ fn build_record(
     let record_type = RecordType::from_db_str(&raw.record_type);
     let source = Source::from_db_str(&raw.source);
 
-    let commit_evidence = raw
-        .commit_evidence
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(|e| QueryError::InvalidFilter {
-            detail: format!("commit_evidence: {e}"),
-        })?;
-    let promoted_from = raw
-        .promoted_from
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(|e| QueryError::InvalidFilter {
-            detail: format!("promoted_from: {e}"),
-        })?;
-    let inherited_warnings: Vec<String> = raw
-        .inherited_warnings
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(|e| QueryError::InvalidFilter {
-            detail: format!("inherited_warnings: {e}"),
-        })?
-        .unwrap_or_default();
+    let commit_evidence = parse_json_col(raw.commit_evidence.as_deref(), "commit_evidence")?;
+    let promoted_from = parse_json_col(raw.promoted_from.as_deref(), "promoted_from")?;
+    let inherited_warnings: Vec<String> =
+        parse_json_col(raw.inherited_warnings.as_deref(), "inherited_warnings")?
+            .unwrap_or_default();
 
     // Merge inherited warnings into the surfaced warnings without duplicating.
     let mut warnings = projected.warnings;

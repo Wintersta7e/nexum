@@ -57,11 +57,18 @@ pub(crate) fn build_decision_yaml(input: &DecisionInput) -> String {
     // provenance block — tracks promotion lineage and commit evidence
     let mut prov = serde_yaml::Mapping::new();
     put(&mut prov, "source", "nexum-promoted".into());
-    let mut pf = serde_yaml::Mapping::new();
-    put(&mut pf, "source", "local".into());
-    put(&mut pf, "project_id", input.project_id.clone().into());
-    put(&mut pf, "id", input.source_rec_id.clone().into());
-    put(&mut prov, "promoted_from", serde_yaml::Value::Mapping(pf));
+    // Serialize the lineage through `RecordKey` so the emitted shape and the
+    // adapter's `RecordKey` deserialization can never drift apart.
+    let promoted_from = crate::records::RecordKey::exact(
+        crate::records::Source::Local,
+        input.project_id.clone(),
+        input.source_rec_id.clone(),
+    );
+    put(
+        &mut prov,
+        "promoted_from",
+        serde_yaml::to_value(&promoted_from).unwrap(),
+    );
     if !input.inherited_warnings.is_empty() {
         put(
             &mut prov,
