@@ -6,7 +6,6 @@
 //! and (refused) bare fingerprint.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::indexer::db::IndexerError;
 use crate::paths::Paths;
@@ -32,9 +31,7 @@ use super::ApiError;
 ///
 /// See above.
 pub fn resolve_active_signer_fingerprint(paths: &Paths) -> Result<Option<String>, ApiError> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(&paths.notebook_git)
+    let out = crate::trust::git_history::git(&paths.notebook_git)
         .args(["config", "--local", "--get", "user.signingkey"])
         .output()
         .map_err(|e| {
