@@ -473,9 +473,8 @@ pub(crate) fn refuse_if_unrelated_dirty(
     repo: &std::path::Path,
     our_paths: &[&std::path::Path],
 ) -> Result<(), ApiError> {
-    let out = std::process::Command::new("git")
+    let out = crate::trust::git_history::git(repo)
         .args(["status", "--porcelain", "-z"])
-        .current_dir(repo)
         .output()
         .map_err(|e| {
             ApiError::Indexer(IndexerError::Io {
@@ -619,10 +618,9 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
 
         // Stage the candidate paths, checking the exit status so a silent
         // failure doesn't get misread as "no change" downstream.
-        let add_out = std::process::Command::new("git")
+        let add_out = crate::trust::git_history::git(&paths.notebook_git)
             .arg("add")
             .args(&staged_refs)
-            .current_dir(&paths.notebook_git)
             .output()
             .map_err(|e| {
                 ApiError::Indexer(IndexerError::Io {
@@ -646,9 +644,8 @@ pub fn trust_regenerate_files(paths: &Paths) -> Result<TrustRegenerateOutcome, A
         // If staging produced no diff against HEAD the regeneration was a
         // worktree-only restore (the canonical content already matched what
         // is committed). Per the no-empty-commit rule, treat it as NoChange.
-        let diff_status = std::process::Command::new("git")
+        let diff_status = crate::trust::git_history::git(&paths.notebook_git)
             .args(["diff", "--cached", "--quiet"])
-            .current_dir(&paths.notebook_git)
             .status();
         if matches!(diff_status, Ok(s) if s.success()) {
             return Ok(TrustRegenerateOutcome::NoChange);
@@ -930,10 +927,9 @@ pub fn keys_rotate(
         // the operator can update git config manually. Surface the status in the
         // outcome so agents see whether the next commit will sign with the OLD
         // or NEW key.
-        let update_result = std::process::Command::new("git")
+        let update_result = crate::trust::git_history::git(&paths.notebook_git)
             .args(["config", "user.signingkey"])
             .arg(new_key_path)
-            .current_dir(&paths.notebook_git)
             .output();
         let signingkey_updated = matches!(update_result, Ok(ref out) if out.status.success());
         if !signingkey_updated {
@@ -1378,8 +1374,7 @@ fn restore_reanchor_trust_files(notebook_git: &std::path::Path) {
 /// Restore (or unset) `user.signingkey` in the notebook repo. Errors are
 /// silently ignored — used only on rollback paths.
 fn restore_signingkey(notebook_git: &std::path::Path, prior_signingkey: Option<&str>) {
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(notebook_git);
+    let mut cmd = crate::trust::git_history::git(notebook_git);
     match prior_signingkey {
         Some(prior) => cmd.args(["config", "--local", "user.signingkey", prior]),
         None => cmd.args(["config", "--local", "--unset", "user.signingkey"]),
@@ -1554,9 +1549,8 @@ pub fn keys_recover(
 
         // Snapshot the current user.signingkey so the sentinel and rollback
         // path can restore it on failure.
-        let prior_signingkey: Option<String> = std::process::Command::new("git")
+        let prior_signingkey: Option<String> = crate::trust::git_history::git(&paths.notebook_git)
             .args(["config", "--local", "user.signingkey"])
-            .current_dir(&paths.notebook_git)
             .output()
             .ok()
             .and_then(|o| {
@@ -1619,14 +1613,13 @@ pub fn keys_recover(
         // to be signed by `new_fingerprint`; signing with the old key (even
         // when it is still available, as in Case A) freezes the chain on the
         // next read-time projection.
-        let outcome = std::process::Command::new("git")
+        let outcome = crate::trust::git_history::git(&paths.notebook_git)
             .args([
                 "config",
                 "--local",
                 "user.signingkey",
                 &new_key_path.display().to_string(),
             ])
-            .current_dir(&paths.notebook_git)
             .status();
         if outcome.map_or(true, |s| !s.success()) {
             recover_rollback(paths, prior_signingkey.as_deref());
@@ -2339,9 +2332,8 @@ pub enum ReanchorResolveOutcome {
 /// Returns `false` on any read or parse failure — no committed events.yml
 /// means no reanchor commit exists.
 fn head_carries_matching_reanchor(notebook_git: &std::path::Path, expected_new_fp: &str) -> bool {
-    let Ok(output) = std::process::Command::new("git")
+    let Ok(output) = crate::trust::git_history::git(notebook_git)
         .args(["show", "HEAD:.trust/events.yml"])
-        .current_dir(notebook_git)
         .output()
     else {
         return false;

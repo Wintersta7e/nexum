@@ -171,3 +171,29 @@ pub(crate) fn git_rev_parse(
         .map(str::to_owned)
         .collect())
 }
+
+/// Return the SHAs of any merge commits in the notebook's history. The trust
+/// store must be linear, so a non-empty result is a linear-history violation.
+/// Runs through the env-scrubbed builder so a user gitconfig can't redirect
+/// the query.
+///
+/// # Errors
+///
+/// Returns `TrustError::Io` if `git` cannot be invoked, or
+/// `TrustError::GitCommand` if `git log` exits non-zero.
+pub fn notebook_merge_commits(notebook_git: &Path) -> Result<Vec<String>, TrustError> {
+    let out = git(notebook_git)
+        .args(["log", "--merges", "--format=%H"])
+        .output()
+        .map_err(io_err(notebook_git))?;
+    if !out.status.success() {
+        return Err(TrustError::GitCommand {
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect())
+}

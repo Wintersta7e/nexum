@@ -21,9 +21,9 @@ use std::thread;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-/// Tiny single-threaded HTTP server that serves a fixed map of paths to
-/// payloads. Returns 404 on unknown paths. Runs until the test process
-/// exits.
+/// Tiny HTTP server that serves a fixed map of paths to payloads, one
+/// connection per request. Returns 404 on unknown paths. Runs until the
+/// test process exits.
 fn serve_fixed_payloads(payloads: HashMap<&'static str, Vec<u8>>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -44,16 +44,23 @@ fn serve_fixed_payloads(payloads: HashMap<&'static str, Vec<u8>>) -> SocketAddr 
                     .next()
                     .and_then(|l| l.split_whitespace().nth(1))
                     .unwrap_or("/");
+                // Each connection serves a single response and then closes, but
+                // the installer reuses one reqwest::Client across downloads.
+                // Without `Connection: close` the HTTP/1.1 client pools this
+                // connection and a later download lands on the already-closed
+                // socket ("error sending request"). Advertising close makes it
+                // open a fresh connection per file.
                 if let Some(body) = payloads.get(path.trim_start_matches('/')) {
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(resp.as_bytes());
                     let _ = stream.write_all(body);
                 } else {
-                    let _ =
-                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
                 }
             });
         }
