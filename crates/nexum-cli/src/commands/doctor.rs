@@ -392,28 +392,17 @@ fn is_legacy_reanchor_drift(
 }
 
 fn merge_commit_check(paths: &nexum_core::paths::Paths) -> DoctorCheckResult {
-    // notebook.git is a trust-only repo: any merge commit in its history is
-    // a linear-history violation. The path filter `-- .trust/` is intentionally
-    // omitted because git's simplified-history merge tracking drops merges from
-    // `git log -- <path>` output even when the path was modified on both parents.
-    let output = std::process::Command::new("git")
-        .args(["log", "--merges", "--format=%H"])
-        .current_dir(&paths.notebook_git)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let raw = String::from_utf8_lossy(&out.stdout);
-            let shas: Vec<&str> = raw.lines().filter(|l| !l.is_empty()).collect();
-            if shas.is_empty() {
-                DoctorCheckResult::Ok
-            } else {
-                DoctorCheckResult::Critical {
-                    code: "trust-history-not-linear".into(),
-                    message: format!("merge commits found in trust history: {}", shas.join(", ")),
-                }
-            }
-        }
-        _ => DoctorCheckResult::Warn {
+    // notebook.git is a trust-only repo: any merge commit in its history is a
+    // linear-history violation. The query lives in nexum-core so it can run
+    // through the env-scrubbed git builder — a user gitconfig must not be able
+    // to redirect it.
+    match nexum_core::trust::git_history::notebook_merge_commits(&paths.notebook_git) {
+        Ok(shas) if shas.is_empty() => DoctorCheckResult::Ok,
+        Ok(shas) => DoctorCheckResult::Critical {
+            code: "trust-history-not-linear".into(),
+            message: format!("merge commits found in trust history: {}", shas.join(", ")),
+        },
+        Err(_) => DoctorCheckResult::Warn {
             code: "doctor-git-log-fail".into(),
             message: "git log failed; could not check for merges".into(),
         },

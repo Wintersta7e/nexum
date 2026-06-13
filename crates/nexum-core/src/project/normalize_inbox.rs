@@ -349,9 +349,7 @@ fn process_one(
         .to_path_buf();
 
     // `git rm` the old inbox path (removes working-tree file + stages deletion).
-    let rm_status = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&paths.notebook_git)
+    let rm_status = crate::trust::git_history::git(&paths.notebook_git)
         .args(["rm", "--quiet"])
         .arg(&rel_removed)
         .status()
