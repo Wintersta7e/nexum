@@ -1,0 +1,16 @@
+# gitleaks configuration for nexum.
+#
+# Inherit the full default ruleset, then allowlist directories that
+# intentionally contain fake/sample secrets. The redaction test corpus
+# under crates/nexum-core/tests/fixtures/extract/redaction/ holds
+# deliberately fake tokens (a sample xoxb- token, a sample JWT, env-style
+# secret assignments) whose only purpose is to exercise the secret-redaction
+# logic. They are not real credentials.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Redaction test fixtures hold deliberately fake secrets for the redaction tests; not real credentials."
+paths = [
+  '''crates/nexum-core/tests/fixtures/extract/redaction/.*''',
+]
