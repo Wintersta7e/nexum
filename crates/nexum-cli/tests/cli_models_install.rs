@@ -32,13 +32,27 @@ fn serve_fixed_payloads(payloads: HashMap<&'static str, Vec<u8>>) -> SocketAddr 
         for stream in listener.incoming().flatten() {
             let payloads = payloads.clone();
             thread::spawn(move || {
-                let mut buf = [0u8; 4096];
                 let mut stream = stream;
-                let n = stream.read(&mut buf).unwrap_or(0);
-                if n == 0 {
+                // A single read() is not guaranteed to return the full
+                // request line in one call, so accumulate bytes until the
+                // header terminator (or a sane cap / EOF) before parsing.
+                let mut raw = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            raw.extend_from_slice(&chunk[..n]);
+                            if raw.windows(4).any(|w| w == b"\r\n\r\n") || raw.len() > 16 * 1024 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if raw.is_empty() {
                     return;
                 }
-                let req = String::from_utf8_lossy(&buf[..n]);
+                let req = String::from_utf8_lossy(&raw);
                 let path = req
                     .lines()
                     .next()
