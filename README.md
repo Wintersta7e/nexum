@@ -16,9 +16,14 @@ Claude Code and Codex CLI memory. Read it from the CLI or any MCP-aware host.
 [![Edition](https://img.shields.io/badge/edition-2024-purple)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 [![SQLite](https://img.shields.io/badge/SQLite-FTS5%20%2B%20vec0-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org)
 [![MCP](https://img.shields.io/badge/MCP-stdio-7C3AED)](https://modelcontextprotocol.io)
-[![Status](https://img.shields.io/badge/status-personal%20%C2%B7%20actively%20developed-brightgreen)](#status)
+[![Status](https://img.shields.io/badge/status-discontinued-lightgrey)](#status)
 
 </div>
+
+> [!IMPORTANT]
+> **Discontinued for now.** nexum is no longer under active development and this
+> repository is archived (read-only). The code stays available as-is under
+> Apache-2.0, but there will be no fixes, releases, or dependency updates.
 
 ---
 
@@ -38,16 +43,19 @@ will trust.
 
 > A tool I built for myself to suit my own workflow. It's open source under
 > Apache-2.0, and if you find it useful, you're welcome to use it. There's no
-> adoption goal and no support guarantees, but issues and PRs are read.
+> adoption goal and no support guarantees.
 
 ## Status
 
-Actively developed personal tool. The read path, the write path, the trust
-state machine, the MCP stdio server, semantic ranking, typed extraction, the
-admin / recovery command surface, and the recommendation → decision promotion
-lifecycle are all in `main` and validated end-to-end against real Codex +
-Claude Code data via the Docker harness. Three crates compile clean; the gate
-is green at `cargo fmt + check + clippy -D warnings + test`.
+Discontinued for now; the repository is archived. When development stopped, the
+read path, the write path, the trust state machine, the MCP stdio server,
+semantic ranking, typed extraction, the admin / recovery command surface, and
+the recommendation → decision promotion lifecycle were all in `main` and
+validated end-to-end against real Codex + Claude Code data via the Docker
+harness, with the gate green at `cargo fmt + check + clippy -D warnings + test`.
+
+Nothing is maintained past that point. Dependencies will age and security
+advisories will accumulate, so audit them before building or running it.
 
 ## Features
 
@@ -248,9 +256,9 @@ nexum/
 
 ---
 
-<sub>nexum is a personal tool — built for my own daily use, with no telemetry,
-analytics, or growth metrics. Not chasing adoption, but if you're interested
-you're welcome to try it.</sub>
+<sub>nexum is a personal tool — built for my own use, with no telemetry,
+analytics, or growth metrics. It is discontinued for now, but you're welcome to
+read or fork the code.</sub>
 
 [rust]:       https://www.rust-lang.org
 [sqlite]:     https://www.sqlite.org
